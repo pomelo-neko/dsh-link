@@ -1,0 +1,28 @@
+# Copy this insert into your profile patch (e.g. profiles/web/cordis.patch.yml).
+# It is the whole activation: the bridge polls the node below and wakes a Session
+# in workspacePath when unread messages arrive. Edit the values and save — the
+# profile patch reloads live (dsh.profile.patchReload: live), no restart needed.
+
+- insert:
+    - id: dsh-link-bridge
+      name: dsh-link-bridge
+      config:
+        enabled: true
+        nodeUrl: http://127.0.0.1:8787
+        workspacePath: ""        # 必填：工作区目录（不存在会自动创建）
+        sessionId: ""            # 可选：钉死一个对话（0.2.x 行为）；留空=按话题自动建
+        pollSeconds: 20
+        cooldownSeconds: 30
+        # ---- 0.3：一个话题一个会话 + 老会话自动归档 ----
+        topics:
+          strategy: auto         # auto | thread | subject
+          maxSessionWakes: 12    # 一个会话最多被唤醒多少次（按消息条数累计）
+          maxSessionAgeSeconds: 43200
+          topicIdleResetSeconds: 21600
+          archiveIdleSeconds: 86400
+          maxPoolSize: 20
+        archiveSessions: true    # 退休会话交给 DSH 原生归档（侧边栏收起、日志保留）
+        sessionTitlePrefix: "[dsh-link] "
+        # ---- 0.3：能力通道（对端可通过本机节点读/驱动本机 DSH）----
+        commandSeconds: 5        # 轮询本机节点命令队列；0 = 关闭
+        commandBatch: 5

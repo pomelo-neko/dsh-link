@@ -1,0 +1,29 @@
+# Normalize text files to LF in the repository; check out Windows launchers with CRLF.
+* text=auto eol=lf
+
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Windows launchers stay CRLF. They also carry a UTF-8 BOM (enforced by test/release.test.mjs).
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.vbs   text eol=crlf
+
+# Third-party frp binaries (downloaded, never committed) and archives: never touch.
+vendor/frp/**/frpc      binary
+vendor/frp/**/frpc.exe  binary
+vendor/frp/**/frps      binary
+vendor/frp/**/frps.exe  binary
+*.exe   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+
+# Keep the checksum manifest diffable and language detection correct.
+SHA256SUMS.txt text eol=lf
+docs/** linguist-documentation

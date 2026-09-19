@@ -1,0 +1,24 @@
+# ---- runtime scratch ----
+test/.tmp/
+*.log
+node_modules/
+
+# ---- build output (regenerate with scripts/build-bundle.ps1) ----
+dist/
+
+# ---- vendored third-party frp binaries (download with: node scripts/fetch-vendor.mjs) ----
+vendor/frp/windows-amd64/
+vendor/frp/linux-amd64/
+
+# ---- local configs / data dirs ----
+dshlink.config.json
+.dshlink/
+*.local.json
+
+# ---- editors / OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

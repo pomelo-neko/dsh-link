@@ -1,0 +1,25 @@
+# frps — the public relay for dsh-link's FRP STCP tunnels.
+# Server side only: run this on the machine with a public address, open 7000/tcp, and keep the
+# dashboard on loopback. Get the binary from the official release (frp v0.71.0):
+#   https://github.com/fatedier/frp/releases/tag/v0.71.0
+#
+#   ./frps -c frps.toml
+
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+# Require TLS from every frpc.
+transport.tls.force = true
+
+# A fresh random token — never reuse an example value:
+#   openssl rand -hex 32
+auth.method = "token"
+auth.token = "REPLACE_WITH_openssl_rand_hex_32"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+
+# Dashboard stays on loopback (reach it over SSH if you need it).
+webServer.addr = "127.0.0.1"
+webServer.port = 7501
+
+# Optional: pin the proxy names this relay accepts.
+# allowPorts = [{ start = 7000, end = 7000 }]

@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an idea or a capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does it solve?
+      description: Describe the situation, not the implementation. "I cannot X when Y" beats "add a flag".
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+  - type: dropdown
+    id: security
+    attributes:
+      label: Does it widen the trust boundary?
+      description: dsh-link is a trusted-peer tool; new powers must be opt-in and documented.
+      options:
+        - "No — same trust boundary"
+        - "Yes — new inbound capability (needs a default-off switch)"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

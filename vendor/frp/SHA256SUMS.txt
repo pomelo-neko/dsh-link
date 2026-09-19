@@ -1,0 +1,16 @@
+# frp v0.71.0 (Apache-2.0) — https://github.com/fatedier/frp/releases/tag/v0.71.0
+#
+# dsh-link does NOT ship the frp binaries. Download the official archives yourself and extract
+# frpc/frps next to this file:
+#   frp_0.71.0_windows_amd64.zip     -> vendor/frp/windows-amd64/{frpc.exe,frps.exe}
+#   frp_0.71.0_linux_amd64.tar.gz    -> vendor/frp/linux-amd64/frpc
+# The release also publishes frp_sha256_checksums.txt if you want to verify the archives first.
+#
+# Then verify what you extracted byte for byte:  node scripts/verify-vendor.mjs
+# If a file is missing or does not match, check your antivirus first: the frp binaries are
+# UNSIGNED, and some products (Huorong/火绒 in particular) silently block or quarantine them.
+#
+# sha256                                                           size      path
+F79FFF8DE3089EC711FF8BDD4B73E00DFE491A1C3D754983C8B0F8D58C21B068  16593080  vendor/frp/linux-amd64/frpc
+C9C59F9BB99561405B81D68F688384AEC49369DF10489044315292B0EAAC957A  16708608  vendor/frp/windows-amd64/frpc.exe
+6D5FBB17DA4651EF981FA5233D14CD6D63C7266E920010AA98ED5DB6424061EB  20493312  vendor/frp/windows-amd64/frps.exe

@@ -1,0 +1,16 @@
+# The MCP entry on its own, for hosts configured from a settings file instead of a profile patch.
+# One entry per machine: it points at the LOCAL dshlink node, and peers are reached by name via the
+# "peer" argument — N machines need N entries, not N^2.
+#
+# Tool names become mcp__dshlink__link_status, mcp__dshlink__link_send_message, ...
+
+- id: mcp-dshlink
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: dshlink
+    transport: streamable-http
+    url: http://127.0.0.1:8787/mcp
+    toolCallTimeoutMs: 120000
+    # Optional when auth.trustLocalhost is false (create with: dshlink token new --label dsh):
+    # headers:
+    #   Authorization: !!js '`Bearer ${process.env.DSHLINK_TOKEN}`'

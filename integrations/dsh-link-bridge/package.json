@@ -1,0 +1,31 @@
+{
+  "name": "dsh-link-bridge",
+  "version": "0.3.0",
+  "description": "Wake a DSH conversation automatically when dsh-link messages arrive (one Session per topic, retired sessions archived), and serve the peer capability channel: list/read/create/prompt/rename/archive conversations on this machine on request.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.example.yml",
+    "install-bridge.ps1",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "dsh-link",
+    "session",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

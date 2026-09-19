@@ -1,0 +1,41 @@
+{
+  "name": "dsh-link",
+  "version": "0.3.0",
+  "description": "Peer-to-peer messaging + file exchange between DeepSeek Harness (DSH) instances on different computers. Zero runtime dependencies; exposes an HTTP JSON API, a CLI, and an MCP (streamable HTTP) endpoint.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dshlink": "bin/dshlink.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "serve": "node bin/dshlink.mjs serve",
+    "test": "node test/run.mjs",
+    "test:node": "node --test --test-concurrency=1 test/",
+    "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1",
+    "bom": "node scripts/ensure-bom.mjs",
+    "verify-vendor": "node scripts/verify-vendor.mjs",
+    "bundle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bundle.ps1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pomelo-neko/dsh-link.git"
+  },
+  "homepage": "https://github.com/pomelo-neko/dsh-link#readme",
+  "bugs": {
+    "url": "https://github.com/pomelo-neko/dsh-link/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "mcp",
+    "peer-to-peer",
+    "file-transfer",
+    "frp",
+    "stcp",
+    "agent"
+  ],
+  "license": "MIT"
+}

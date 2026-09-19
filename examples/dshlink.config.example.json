@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "name": "alice-pc",
+  "nodeId": "node_0000000000000000",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "bind": "127.0.0.1",
+  "port": 8787,
+  "publicUrl": null,
+  "dataDir": "C:\\Users\\alice\\.dshlink",
+  "auth": {
+    "trustLocalhost": false,
+    "tokens": [
+      {
+        "id": "tok_example0001",
+        "label": "bob-pc",
+        "hash": "REPLACE_WITH_SHA256_OF_THE_TOKEN_YOU_GAVE_BOB",
+        "createdAt": "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "limits": {
+    "maxBodyBytes": 33554432,
+    "maxMessageBytes": 1048576,
+    "maxInlineAttachmentBytes": 524288,
+    "maxListEntries": 2000,
+    "requestTimeoutMs": 60000
+  },
+  "files": {
+    "allowUpload": false,
+    "roots": [
+      {
+        "name": "ws",
+        "kind": "dir",
+        "path": "D:\\ws",
+        "read": true,
+        "write": false
+      },
+      {
+        "name": "drop",
+        "kind": "dir",
+        "path": "D:\\ws\\drop",
+        "read": true,
+        "write": true
+      },
+      {
+        "name": "allws",
+        "kind": "workspaces",
+        "path": null,
+        "read": true,
+        "write": false
+      }
+    ],
+    "deny": [
+      "**/.env",
+      "**/.env.*",
+      "**/.credentials.yaml",
+      "**/.ssh/**",
+      "**/*.key",
+      "**/*.pem",
+      "**/*.pfx",
+      "**/*.p12"
+    ]
+  },
+  "dsh": {
+    "enabled": true,
+    "home": "D:\\DSH",
+    "exposeWorkspaces": true,
+    "exposeTranscripts": false,
+    "transcriptMaxChars": 8000,
+    "transcriptMaxMessages": 200,
+    "excludeWorkspaces": [
+      "D:\\dshlink-bridge",
+      "C:\\Users\\alice\\.dshlink"
+    ]
+  },
+  "capabilities": {
+    "enabled": true,
+    "methods": [
+      "workspaces.list",
+      "sessions.list",
+      "sessions.read",
+      "bridge.status"
+    ],
+    "peers": {
+      "bob-pc": {
+        "allow": [
+          "sessions.prompt",
+          "sessions.create"
+        ],
+        "deny": [
+          "sessions.archive"
+        ]
+      }
+    },
+    "maxWaitSeconds": 30,
+    "commandTtlSeconds": 120,
+    "maxPending": 50,
+    "claimStaleSeconds": 60,
+    "maxResultBytes": 524288
+  },
+  "peers": [
+    {
+      "name": "bob-pc",
+      "url": "http://127.0.0.1:19110",
+      "token": "REPLACE_WITH_THE_TOKEN_BOB_ISSUED_FOR_YOU",
+      "autoSync": false,
+      "note": "wired through frp STCP; visitor port 19110",
+      "stcp": {
+        "serverName": "dshlink-bob-pc",
+        "secretKey": "REPLACE_WITH_BOBS_STCP_SECRET",
+        "visitorPort": 19110
+      }
+    }
+  ],
+  "tunnel": {
+    "enabled": true,
+    "serverAddr": "frps.example.com",
+    "serverPort": 7000,
+    "token": "REPLACE_WITH_THE_FRP_TOKEN",
+    "user": "dsh-link",
+    "tls": true,
+    "frpcPath": null,
+    "adminPort": 7400,
+    "visitorPortBase": 19100,
+    "logDir": null,
+    "autoStart": false
+  },
+  "stcp": {
+    "proxyName": "dshlink-alice-pc",
+    "secretKey": "REPLACE_WITH_THIS_NODES_STCP_SECRET",
+    "publicAddr": null
+  },
+  "relay": {
+    "enabled": true
+  },
+  "log": {
+    "level": "info"
+  }
+}

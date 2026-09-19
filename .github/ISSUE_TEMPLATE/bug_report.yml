@@ -1,0 +1,54 @@
+name: Bug report
+description: Something did not work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact tokens, STCP secret keys, hostnames and personal paths before posting.
+        For a connectivity problem, `dshlink doctor --json` output is the most useful thing you can attach.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component?
+      options:
+        - node / CLI (dshlink)
+        - MCP endpoint
+        - dsh-link-bridge plugin (session wake-ups)
+        - FRP tunnel
+        - portable bundle / install scripts
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `dshlink --version`, plus the bridge plugin version from its package.json
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Node version
+      placeholder: Windows 11 24H2 / Node 22.15.0
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Command(s) you ran, observed output, expected output.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config (redacted)
+      description: Paste the keys that matter — never a real token or secretKey.
+      render: json
+  - type: textarea
+    id: doctor
+    attributes:
+      label: dshlink doctor --json
+      render: json

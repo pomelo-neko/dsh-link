@@ -1,0 +1,43 @@
+# A DSH profile patch: the two dsh-link entries, exactly as `dshlink install-dsh` writes them.
+# Copy the "- insert:" block into <DSH_HOME>/profiles/<profile>/cordis.patch.yml and restart the
+# DSH host once (profile patches reload live, but a brand-new plugin id has to be loaded at boot).
+#
+#   node bin/dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write
+#
+# The first entry gives the agent the mcp__dshlink__link_* tools. The second is the bridge plugin:
+# it polls the local node and wakes a conversation when unread messages arrive.
+
+- insert:
+    - id: mcp-dshlink
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: dshlink
+        transport: streamable-http
+        url: http://127.0.0.1:8787/mcp
+        toolCallTimeoutMs: 120000
+        # Only needed when auth.trustLocalhost is false (create one: dshlink token new --label dsh):
+        # headers:
+        #   Authorization: !!js '`Bearer ${process.env.DSHLINK_TOKEN}`'
+
+    - id: dsh-link-bridge
+      name: dsh-link-bridge
+      config:
+        enabled: true
+        nodeUrl: http://127.0.0.1:8787
+        workspacePath: "D:\\dshlink-bridge"   # 专用空目录：桥会话只落在这里
+        sessionId: ""                 # pin one conversation (0.2.x behaviour); empty = one per topic
+        pollSeconds: 20
+        cooldownSeconds: 30
+        # one conversation per topic, retire and archive the old ones
+        topics:
+          strategy: auto              # auto | thread | subject
+          maxSessionWakes: 12         # wake budget per conversation (counted in messages)
+          maxSessionAgeSeconds: 43200
+          topicIdleResetSeconds: 21600
+          archiveIdleSeconds: 86400
+          maxPoolSize: 20
+        archiveSessions: true
+        sessionTitlePrefix: "[dsh-link] "
+        # capability channel: poll this node's command queue and drive DSH for authorised peers
+        commandSeconds: 5             # 0 = off
+        commandBatch: 5
