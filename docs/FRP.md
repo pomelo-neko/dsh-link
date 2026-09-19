@@ -89,6 +89,34 @@ bindAddr = "127.0.0.1"
 bindPort = 19100
 ```
 
+### 2.3 STCP 模式注意事项（务必先读）
+
+STCP = Secret TCP：服务端口**不在公网 frps 上开放**，只有持有 `secretKey` 的 visitor 能连。
+这也决定了它的边界和坑：
+
+1. **真正的边界是 `secretKey`，不是 dsh-link 的 token。** 经隧道到达本机节点的请求，源地址
+   恒为 `127.0.0.1`；在 `auth.trustLocalhost: true`（默认）下，`server.mjs` 会在 token 校验
+   失败后回落放行——也就是说**这条路径上入站 token 从未被检查**。要让 token 成为边界，两端
+   都要切 `auth.trustLocalhost: false`（并给本机 MCP/脚本补 token）。见 [`../SECURITY.md`](../SECURITY.md)。
+2. **`secretKey` 与 `user`/`allowUsers` 必须成对匹配**：provider 的 `secretKey` 与 visitor 的
+   必须一字不差；同一条隧道上所有 frpc 的 `user` 要一致，且 `allowUsers` 要包含对方（写
+   `["team"]` 这类具体值，不要用 `"*"`）。
+3. **一个对端一个 visitor 端口**：visitor 只在**发起方**本机监听（dsh-link 从 19100 递增分配）。
+   provider 侧不需要任何入站端口。visitor 默认只绑 `127.0.0.1`，不要改成 `0.0.0.0`。
+4. **STCP 只支持 TCP**。UDP 服务用 `sudp` 或另想办法；FTP 主动模式、动态端口协议需要为每个
+   端口单独加 proxy。
+5. **服务看到的是本机 frpc 的连接**，不是远端真实 IP（需要真实 IP 得靠 `proxyProtocol` 或业务层传递）。
+6. **两层加密**：`transport.tls.force = true`（frps 侧强制 TLS）+ STCP 各自的
+   `transport.useEncryption = true`（数据二次加密）。服务本身已是 TLS 时可关掉后者省点开销。
+7. **配置里不要写 `start = [...]`**：frp 的 `start` 是"只启动这些代理"的白名单（不是标签），
+   写了会让 provider/visitor 全部不启动——dsh-link 生成的配置已经不带它。
+8. **WSL2 的 `localIP`**：frpc 与服务在同一 WSL 发行版内 → `127.0.0.1`；服务在 Windows 宿主 →
+   用 WSL 里 `ip route show | grep default` 得到的宿主 IP。dsh-link 场景下 `localIP` 固定是
+   本机节点的 `127.0.0.1:8787`，不受此影响。
+9. **轮换要成对做**：`auth.token` 与 `secretKey` 一起换，且**两端同时换、带外交接新值**；
+   只换一端 = 立刻 401 或 visitor 连不上。步骤见 [`OPERATIONS.md`](OPERATIONS.md) §5。
+10. **启动前先校验配置**：`frpc verify -c <config>` / `frps verify -c <config>` 比"起来看日志"快得多。
+
 ## 3. 两个节点互相接入（两步）
 
 **A 机**：`tunnel share` 打印一段信息，把它交给 B（连同 A 的 dshlink 入站 token）：
@@ -153,3 +181,48 @@ dshlink doctor --json
 
 两种改法验证方式相同：`dshlink peers ping <peer>` → `dshlink send --to <peer> ...` →
 `dshlink doctor`（`peer:<peer>`、`peer-route:<peer>` 两项都 pass）。
+
+## 7. 生成 token / secretKey / 证书
+
+### 7.1 token 与 secretKey
+
+```powershell
+node scripts/gen-secrets.mjs                  # 一次生成 frp token + STCP secretKey + dsh-link 入站 token
+node scripts/gen-secrets.mjs --count 3        # 三台机器各一套
+node scripts/gen-secrets.mjs --name alice-pc  # 输出里带上节点名，便于直接粘进配置
+node scripts/gen-secrets.mjs --json           # 给脚本用
+```
+
+输出里直接给出可粘贴的片段：frps 的 `auth.token`/`webServer.password`、`tunnel setup` 命令行、
+`dshlink.config.json` 的 `stcp.secretKey`，以及入站 token 的 `auth.tokens[].hash`
+（也可以照常走 `dshlink token new --label <peer>`，它只存 sha256、明文只打印一次）。
+不想用脚本的话，等价的命令行是 `openssl rand -hex 32`（frp token）与
+`openssl rand -base64 32`（secretKey）。
+
+### 7.2 mTLS 证书（可选加固）
+
+frp 自带 TLS，`transport.tls.force = true` 就能用；下面这套是**双向 TLS**——frpc 校验 frps、
+frps 也校验 frpc：
+
+```bash
+# Linux / WSL / macOS
+./scripts/gen-certs.sh 203.0.113.10 certs --clients alice-pc,bob-pc
+```
+
+```powershell
+# Windows（openssl 不在 PATH 时会自动从 git 安装目录找）
+powershell -ExecutionPolicy Bypass -File .\scripts\gen-certs.ps1 -ServerName 203.0.113.10 -Clients alice-pc,bob-pc
+```
+
+生成 `ca.crt/ca.key`、`server.crt/server.key`、每个客户端一套 `<名称>.crt/.key`（SAN 按 IP/域名
+自动写成 `IP:` 或 `DNS:`）。启用方式：frps 与各 frpc 打开
+
+```toml
+transport.tls.certFile = "certs/server.crt"     # frpc 换成自己的 <名称>.crt
+transport.tls.keyFile  = "certs/server.key"     # 同理
+transport.tls.trustedCaFile = "certs/ca.crt"
+transport.tls.serverName = "203.0.113.10"       # 仅 frpc 需要
+```
+
+然后重启 frps 与所有 frpc（本机 `dshlink tunnel stop && dshlink tunnel sync`）。判据：frpc 日志
+出现 `login to server success` 且没有 x509 报错。`ca.key` 要离线保存——拿到它就能签发任意证书。

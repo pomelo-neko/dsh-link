@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/gen-secrets.mjs` — generate the three credentials a deployment needs (frp `auth.token`,
+  STCP `secretKey`, dsh-link inbound token + its sha256) without openssl, printing ready-to-paste
+  config snippets; `--count`, `--name`, `--json`.
+- `scripts/gen-certs.sh` / `scripts/gen-certs.ps1` — create a CA, a server certificate and
+  per-machine client certificates for frp mTLS (`--clients`, `--days`; the PowerShell twin finds
+  openssl through git when it is not on PATH). Verified with a real mutual-TLS handshake.
+- [`docs/FRP.md`](docs/FRP.md) §2.3 "STCP 模式注意事项" — the caveats that actually bite: the
+  `secretKey` is the boundary (not the token), `user`/`allowUsers` pairing, one visitor port per
+  peer, TCP-only, `start = [...]` whitelist trap, WSL2 `localIP`, paired rotation — plus §7 on
+  generating tokens and certificates.
+- [`AIGC-Notice.md`](AIGC-Notice.md) — the repository is entirely AI-generated and maintained.
+
 ### Fixed
 
 - The bridge no longer writes `state.json` twice per wake-up. The intermediate write lacked

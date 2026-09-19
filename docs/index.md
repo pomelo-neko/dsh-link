@@ -15,6 +15,7 @@ Entry points, in the order most readers want them:
 | [`WAN-VERIFICATION.md`](WAN-VERIFICATION.md) | 跨公网实测记录与复现步骤 |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | 症状 → 原因 → 处理，附一分钟体检清单 |
 | [`../SECURITY.md`](../SECURITY.md) | 信任模型与加固清单 |
+| [`../AIGC-Notice.md`](../AIGC-Notice.md) | AIGC 声明：本仓库完全由 AI 生成与维护 |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 版本历史 |
 
 Also useful:

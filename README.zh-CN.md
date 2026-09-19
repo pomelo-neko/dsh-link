@@ -41,6 +41,8 @@ node bin\dshlink.mjs show --id msg_xxx
 node bin\dshlink.mjs send --to alice-pc --body "收到" --thread msg_xxx
 ```
 
+> **AIGC 声明**：本仓库完全由 AI 生成与维护，详见 [`AIGC-Notice.md`](AIGC-Notice.md)。
+
 > **离线也没关系**：对方不可达时消息进入本地 outbox 队列（`send` 返回 `pending`）。
 > 之后 `dshlink flush` 重试推送，或对方用 `dshlink sync --from <你>` 主动拉走。
 
@@ -123,6 +125,11 @@ dshlink dsh call sessions.prompt --peer bob-pc --wait 30 --params '{"sessionId":
 # frpc 会按 DSHLINK_FRPC → <仓库>\vendor\frp\windows-amd64 → PATH 等顺序查找；
 # 本仓库不随附 frp 二进制，请自行从 https://github.com/fatedier/frp/releases/tag/v0.71.0
 # 下载 frp_0.71.0_windows_amd64.zip，把 frpc.exe 解压到 vendor\frp\windows-amd64\。
+# 凭据与（可选）mTLS 证书可以直接生成：
+#   node scripts/gen-secrets.mjs                  # frp token + STCP secretKey + dsh-link 入站 token
+#   scripts\gen-certs.ps1 -ServerName <frps地址>    # Windows：CA / 服务端 / 客户端证书
+#   ./scripts/gen-certs.sh <frps地址>              # Linux / WSL / macOS
+# 开 STCP 前先读 docs/FRP.md §2.3「STCP 模式注意事项」——那条路径上的真正边界是 secretKey。
 node bin\dshlink.mjs tunnel setup --server <frps地址> --port 7000 --token <frp token>
 node bin\dshlink.mjs tunnel sync          # 生成 frpc.toml 并拉起 frpc（后台常驻）
 node bin\dshlink.mjs tunnel share         # 打印给对端的信息：proxyName + secretKey

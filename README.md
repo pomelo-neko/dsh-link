@@ -168,6 +168,17 @@ node looks for it (`vendor/frp/windows-amd64/`, `vendor/frp/linux-amd64/`, `DSHL
 `--frpc`). `node scripts/verify-vendor.mjs` checks whatever is there against the recorded
 upstream sha256 values.
 
+Generate the credentials (and, optionally, mutual-TLS certificates) with the bundled scripts:
+
+```powershell
+node scripts/gen-secrets.mjs                                    # frp token + STCP secretKey + dsh-link inbound token
+powershell -ExecutionPolicy Bypass -File .\scripts\gen-certs.ps1 -ServerName <frps-host>   # Windows: CA + server + client certs
+./scripts/gen-certs.sh <frps-host>                              # Linux / WSL / macOS
+```
+
+Read [`docs/FRP.md`](docs/FRP.md) §2.3 before exposing an STCP tunnel: the `secretKey` — not the
+dsh-link token — is the real boundary on that path.
+
 ```powershell
 # public server (once): frps only needs 7000/tcp open; template in docs/FRP.md
 
@@ -267,6 +278,7 @@ dsh-link/
 │   ├── dsh-skill/          # agent-facing skill (SKILL.md)
 │   ├── dsh-mcp-settings.example.yaml
 │   └── wan-lab/            # two-machine WAN test lab (WSL helper scripts)
+├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
 ├── test/                   # 15 test files / 116 checks + CLI smoke script
 ├── docs/                   # architecture, design, protocol, DSH access, FRP, operations, troubleshooting
@@ -326,3 +338,6 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 
 [MIT](LICENSE). frp is a separate project by fatedier, licensed under Apache-2.0 — it is not
 redistributed here.
+
+> **AIGC notice** — this repository is generated and maintained entirely by AI. What that means for
+> you (and what to verify yourself) is written down in [`AIGC-Notice.md`](AIGC-Notice.md).
