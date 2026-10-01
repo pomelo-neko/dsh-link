@@ -66,6 +66,27 @@ node bin\dshlink.mjs peers ping         # 对端 softwareVersion —— 两端�
 
 > 桥的"升级"只有重启 host 才能装载新代码；配置改动则即时生效（profile patch 是 live 重载）。
 
+## 3.1 仓库 → 部署副本：手动同步
+
+DSH 通过 profile 的 `link:` 指向一棵**部署副本**（本机 `D:\DeepSeekHarness\plugins\vendored\dsh-link`）。
+仓库 `D:\dsh-link` 改了不会自动生效，两者可以长期分叉（副本还带本机专属文件）。用仓库自带的工具对照与更新：
+
+```powershell
+# 只读对照：列出 缺 / 内容不同 / 残留 三类漂移，有漂移退出码 1
+node scripts\deploy-sync.mjs --check --target "D:\DeepSeekHarness\plugins\vendored\dsh-link"
+
+# 同步：默认 dry-run，--write 才落盘（覆盖前逐文件备份）
+node scripts\deploy-sync.mjs --apply --target "D:\DeepSeekHarness\plugins\vendored\dsh-link"
+```
+
+- 部署路径也可以用 `DSHLINK_DEPLOY_DIR`，或 `DSH_HOME`（默认 `<DSH_HOME>\plugins\vendored\dsh-link`）。
+  没有任何提示时脚本**报错而不是**退回 `~/.dsh`——那正是"读到另一套 DSH"的老坑。
+- 本机专属文件（`dshlink.config.json`、`vendor\frp\*-amd64\*` 二进制、`*.local.*`、`README.local.md`）
+  **既不参与比较也不会被删**；`--delete-extra` 才清"仓库里已经没有"的残留（同样先备份）。
+- 备份落在 `<DSH_HOME>\plugin-data\dsh-link-deploy-backups\<时间戳>\`（`--backup-dir` 可改）。
+- 同步只改磁盘：节点代码要**重启节点进程**、bridge 代码要**重启 DSH host** 才生效（见上表）。
+- 站点差异走配置、不要改代码：frpc 路径写节点配置 `tunnel.frpcPath`，本机说明写 `README.local.md`。
+
 ## 4. 定期巡检
 
 ```powershell

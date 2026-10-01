@@ -22,6 +22,7 @@ import path from 'node:path';
 import { createCommandWorker } from './commands.js';
 import { createDshOps } from './dshops.js';
 import { TOPIC_DEFAULTS, normalizeTopicPolicy, planSession, poolSummary, recordUse, sweepPool, topicKeyFor, topicLabel } from './topics.js';
+import { forgetRoutesForSession, isSendTool, normalizeRoutePolicy, registerRoute, routeFor, routesSummary, sentMessageFromResult, sweepRoutes } from './routes.js';
 
 /** Cordis plugin name. */
 export const name = 'dsh-link-bridge';
@@ -56,6 +57,9 @@ const DEFAULTS = {
   prompt: '',
   // One session per topic, retired when it gets old/idle/full (see lib/topics.js).
   topics: {},
+  // Ask-and-answer routing (see lib/routes.js): a thread a local conversation asked on is
+  // answered back into that conversation instead of the pool. Filled from the Host event bus.
+  routes: {},
   // Retired sessions are archived with workspaceRegistry.archiveSession() (the DSH-native archive
   // set: hidden from the sidebar, log kept). Set false to leave every session in the list.
   archiveSessions: true,
@@ -306,6 +310,7 @@ function install(ctx, rawConfig) {
   const maxBodyChars = Math.max(200, Number(config.maxBodyChars) || DEFAULTS.maxBodyChars);
   const promptTemplate = String(config.prompt || '') || DEFAULT_PROMPT;
   const topicPolicy = normalizeTopicPolicy(config.topics ?? {});
+  const routePolicy = normalizeRoutePolicy(config.routes ?? {});
   const commandMs = Math.max(0, Number(config.commandSeconds ?? DEFAULTS.commandSeconds) || 0) * 1000;
   const commandBatch = Math.max(1, Math.min(25, Number(config.commandBatch ?? DEFAULTS.commandBatch) || DEFAULTS.commandBatch));
   const stateFile = path.join(resolveStateDir(config), 'state.json');
@@ -330,6 +335,9 @@ function install(ctx, rawConfig) {
     lastSuppressed: null,
     pool: {},
     topic: null,
+    routes: {},
+    routed: 0,
+    lastRoute: null,
     archived: [],
     sessionsCreated: 0,
     sessionsArchived: 0,
@@ -349,6 +357,8 @@ function install(ctx, rawConfig) {
     if (Array.isArray(saved.wakeTimes)) runtime.wakeTimes = saved.wakeTimes.filter((at) => typeof at === 'number');
     if (typeof saved.suppressed === 'number') runtime.suppressed = saved.suppressed;
     if (saved.pool && typeof saved.pool === 'object') runtime.pool = saved.pool;
+    if (saved.routes && typeof saved.routes === 'object') runtime.routes = saved.routes;
+    if (typeof saved.routed === 'number') runtime.routed = saved.routed;
     if (Array.isArray(saved.archived)) runtime.archived = saved.archived.slice(-50);
     if (typeof saved.sessionsCreated === 'number') runtime.sessionsCreated = saved.sessionsCreated;
     if (typeof saved.sessionsArchived === 'number') runtime.sessionsArchived = saved.sessionsArchived;
@@ -457,6 +467,38 @@ function install(ctx, rawConfig) {
     log.debug('topic pool: ' + Object.keys(runtime.pool).length + ' topic(s), archived ' + archived + ', forgot ' + swept.drop.length);
   }
 
+  /**
+   * Record "this Session just sent a message on this thread" straight from the Host event bus.
+   * The dsh-link send tools are ordinary tools, so `tools/result` carries both the calling agent
+   * (and therefore its Session) and the message the node created: no new tool argument and no
+   * cooperation from the agent is needed. A failure here must never affect the tool result.
+   */
+  function recordOutbound(exec, result) {
+    if (!routePolicy.enabled) return;
+    if (!exec || typeof exec.name !== 'string' || !isSendTool(exec.name)) return;
+    if (result && result.isError === true) return;
+    const sessionId = exec.agent && exec.agent.session ? exec.agent.session.id : null;
+    if (!sessionId) return;
+    const sent = sentMessageFromResult(result, exec.arguments);
+    if (!sent) return;
+    const entry = registerRoute(runtime.routes, {
+      thread: sent.thread, messageId: sent.id, sessionId, now: Date.now(), policy: routePolicy
+    });
+    if (!entry) return;
+    runtime.lastRoute = { thread: sent.thread, sessionId: String(sessionId), id: sent.id, at: new Date().toISOString(), direction: 'out' };
+    log.debug('route: thread ' + sent.thread + ' -> ' + sessionId);
+  }
+
+  if (routePolicy.enabled && typeof ctx.on === 'function') {
+    try {
+      ctx.on('tools/result', (exec, result) => {
+        try { recordOutbound(exec, result); } catch (error) { log.debug('route registration failed: ' + errorText(error)); }
+      });
+    } catch (error) {
+      log.debug('could not subscribe to tools/result: ' + errorText(error));
+    }
+  }
+
   async function tick() {
     if (runtime.busy) return;
     runtime.busy = true;
@@ -475,6 +517,10 @@ function install(ctx, rawConfig) {
       // Retire quiet topics even when nothing arrives: that is what keeps old bridge conversations
       // out of the sidebar instead of letting them accumulate forever.
       await sweepSessions(now);
+      const sweptRoutes = sweepRoutes(runtime.routes, { now, policy: routePolicy });
+      if (sweptRoutes.expired || sweptRoutes.malformed || sweptRoutes.overflow) {
+        log.debug('routes: expired ' + sweptRoutes.expired + ', malformed ' + sweptRoutes.malformed + ', overflow ' + sweptRoutes.overflow);
+      }
       if (!messages.length) return;
       if (cooldownMs && runtime.lastNotifyAt && now - runtime.lastNotifyAt < cooldownMs) {
         log.debug('holding ' + messages.length + ' message(s) for the cooldown window');
@@ -500,11 +546,22 @@ function install(ctx, rawConfig) {
         return;
       }
       runtime.phase = 'session';
-      const sessionId = await ensureSessionFor(topicKey, label);
+      // A thread a local conversation asked on is answered back into that conversation; every
+      // other message keeps the one-session-per-topic behaviour.
+      const route = routeFor(runtime.routes, newest, { now, policy: routePolicy });
+      let sessionId = route && !runtime.deadSessions.has(route.sessionId) ? route.sessionId : null;
+      if (sessionId) {
+        runtime.routed += 1;
+        runtime.topic = { key: route.key, reason: 'route:' + route.matched, sessionId };
+        runtime.lastRoute = { thread: route.key, sessionId, id: newest.id, at: new Date().toISOString(), direction: 'in', matched: route.matched };
+        log.info('routed ' + newest.id + ' back into ' + sessionId + ' (thread ' + route.key + ', matched by ' + route.matched + ')');
+      } else {
+        sessionId = await ensureSessionFor(topicKey, label);
+        // Count the wake before prompting: a failed prompt then retries against the same session
+        // instead of opening a fresh one on every tick.
+        recordUse(runtime.pool, topicKey, { sessionId, label, now, messages: messages.length });
+      }
       runtime.sessionId = sessionId;
-      // Count the wake before prompting: a failed prompt then retries against the same session
-      // instead of opening a fresh one on every tick.
-      recordUse(runtime.pool, topicKey, { sessionId, label, now, messages: messages.length });
       const peers = [...new Set(messages.map((message) => (message.from && message.from.name) || '未知节点'))];
       const text = renderPrompt(promptTemplate, {
         node: runtime.node,
@@ -517,10 +574,16 @@ function install(ctx, rawConfig) {
       const requestId = 'link-bridge:' + sessionId + ':' + newest.id;
       const guard = promptSignal(60_000);
       try {
-        await ctx.sessionController.prompt({ sessionId, content: [{ type: 'text', text }], requestId }, guard.signal);
+        // DSH 0.2.0 made `mode` a required field of SessionPromptRequest. 'queue' is what the bridge
+        // always meant (append to the session's inbox) and what the capability channel already sends.
+        await ctx.sessionController.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text }], requestId }, guard.signal);
       } catch (error) {
         // A session that disappeared between selection and prompt must not be reused forever.
-        if (/not found|unknown session|no such session/i.test(errorText(error))) runtime.deadSessions.add(sessionId);
+        if (/not found|unknown session|no such session/i.test(errorText(error))) {
+          runtime.deadSessions.add(sessionId);
+          const forgotten = forgetRoutesForSession(runtime.routes, sessionId);
+          if (forgotten) log.debug('forgot ' + forgotten + ' route(s) for missing session ' + sessionId);
+        }
         throw error;
       } finally {
         guard.done();
@@ -569,6 +632,10 @@ function install(ctx, rawConfig) {
         workspacePath,
         pool: poolSummary(runtime.pool),
         topic: runtime.topic,
+        routes: routesSummary(runtime.routes, { now: Date.now(), policy: routePolicy }),
+        routeTable: runtime.routes,
+        routed: runtime.routed,
+        lastRoute: runtime.lastRoute,
         archived: runtime.archived.slice(-10),
         sessionsCreated: runtime.sessionsCreated,
         sessionsArchived: runtime.sessionsArchived,
@@ -582,6 +649,7 @@ function install(ctx, rawConfig) {
   log.info('watching ' + baseUrl + ' every ' + (pollMs / 1000) + 's; workspace ' + workspacePath + (config.sessionId ? '; session ' + config.sessionId + ' (pinned)' : '; one session per topic'));
   log.info('loop guard: thread cooldown ' + limits.threadCooldownSeconds + 's, ' + limits.maxThreadWakes + ' wakes/thread per ' + Math.round(limits.threadWindowSeconds / 60) + 'min, ' + limits.maxWakesPerHour + ' wakes/hour overall');
   log.info('topic policy: strategy ' + topicPolicy.strategy + ', ' + topicPolicy.maxSessionWakes + ' wakes/session, session age ' + Math.round(topicPolicy.maxSessionAgeSeconds / 3600) + 'h, idle reset ' + Math.round(topicPolicy.topicIdleResetSeconds / 3600) + 'h, archive after ' + Math.round(topicPolicy.archiveIdleSeconds / 3600) + 'h idle, pool ' + topicPolicy.maxPoolSize + (config.archiveSessions === false ? ' (archiving off)' : ''));
+  log.info('routing: ' + (routePolicy.enabled ? 'on (a thread asked locally is answered back into that conversation, ttl ' + Math.round(routePolicy.ttlSeconds / 3600) + 'h)' : 'off'));
   log.info('state file: ' + stateFile);
   const mode = schedulePolling(ctx, () => { void tick(); }, pollMs);
   log.debug('poll scheduled via ' + mode);
@@ -600,6 +668,7 @@ function install(ctx, rawConfig) {
           notified: runtime.notified,
           errors: runtime.errors,
           sessions: Object.keys(runtime.pool).length,
+          routed: runtime.routed,
           archived: runtime.sessionsArchived,
           lastArchive: runtime.lastArchive
         })

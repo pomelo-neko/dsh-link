@@ -11,6 +11,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ### Added
 
+- `scripts/deploy-sync.mjs` — the repository and the tree DSH actually runs
+  (`<DSH_HOME>/plugins/vendored/dsh-link`) drift apart silently; `--check` classifies every file
+  (missing / different / stale / local to the machine) and exits non-zero on drift, `--apply --write`
+  copies the difference with a per-file backup. Machine-local files (node config, vendored frp
+  binaries, `*.local.*`) are never compared, copied or deleted. The tool prints the restart it
+  implies instead of restarting anything.
+- The bridge now answers a peer's reply back into the conversation that asked: a thread a local
+  Session sent on is remembered (`routes`, filled from the DSH Host `tools/result` event, so no new
+  tool argument and no agent cooperation is needed) and the reply is prompted straight into that
+  Session instead of the topic pool. Missing sessions expire/fall back to the pool;
+  `routes.enabled: false` restores the old behaviour.
+
 - `scripts/gen-secrets.mjs` — generate the three credentials a deployment needs (frp `auth.token`,
   STCP `secretKey`, dsh-link inbound token + its sha256) without openssl, printing ready-to-paste
   config snippets; `--count`, `--name`, `--json`.
@@ -24,6 +36,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - [`AIGC-Notice.md`](AIGC-Notice.md) — the repository is entirely AI-generated and maintained.
 
 ### Fixed
+
+- **DSH 0.2.0 compatibility**: `SessionPromptRequest.mode` became a required field, so the
+  bridge's wake-up prompt now sends `mode: 'queue'` like the capability channel already did.
+  Verified live against DSH 0.2.0-rc.2: wake-up, ask-and-answer routing and the capability
+  channel (`workspaces.list`) all pass, and the disk-read DSH view is unaffected (session logs
+  are still v3/v4).
 
 - The bridge no longer writes `state.json` twice per wake-up. The intermediate write lacked
   `errors`, `notified` and `ticks`, so a reader that polled the file at the wrong moment could

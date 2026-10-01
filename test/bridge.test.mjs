@@ -17,6 +17,9 @@ function fakeCtx({ strictServices = false, effect, createId } = {}) {
   const disposers = [];
   const archived = [];
   const renamed = [];
+  // Host event listeners: the bridge subscribes to 'tools/result' to learn which conversation
+  // sent on a thread, so the harness has to be able to deliver one by hand.
+  const listeners = new Map();
   const push = (level) => (...args) => logs.push(level + ': ' + args.join(' '));
   const core = {
     logger: { info: push('info'), warn: push('warn'), error: push('error'), debug: () => {} },
@@ -45,7 +48,12 @@ function fakeCtx({ strictServices = false, effect, createId } = {}) {
       }
     },
     effect: effect ?? ((execute) => { disposers.push(execute()); return () => {}; }),
-    on: () => () => {}
+    on: (name, handler) => {
+      const list = listeners.get(name) ?? [];
+      list.push(handler);
+      listeners.set(name, list);
+      return () => {};
+    }
   };
   const ctx = strictServices
     ? new Proxy(core, {
@@ -55,7 +63,11 @@ function fakeCtx({ strictServices = false, effect, createId } = {}) {
       }
     })
     : core;
-  return { ctx, prompts, created, logs, disposers, archived, renamed };
+  return {
+    ctx, prompts, created, logs, disposers, archived, renamed, listeners,
+    /** Deliver one Host event, the way the real ctx.emit() would. */
+    fire: (name, ...args) => { for (const handler of listeners.get(name) ?? []) handler(...args); }
+  };
 }
 
 /**
@@ -543,5 +555,110 @@ test('bridge: a capability call from the node is executed through the worker', a
   assert.equal(result.result.workspaces[0].id, 'ws_test');
   assert.equal(result.result.workspaces[0].title, 'test workspace');
   assert.equal(result.origin.peer, 'TEST-PEER', 'the audit trail keeps who asked');
+});
+
+/**
+ * 2-(b): a conversation in ANOTHER workspace asks a peer something. DSH hands the bridge the
+ * tool execution (tools/result) with the calling agent's Session, so the bridge can remember
+ * thread -> session and deliver the peer's answer back into that conversation instead of opening
+ * a bridge session for it.
+ */
+test('bridge: an answer on a thread a local conversation asked on wakes that conversation', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-route' });
+  t.after(() => node.close());
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-route');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-route'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+
+  // 1) The asking conversation sends through the node; the Host reports the finished tool call.
+  const sent = await node.ops.sendMessage({ to: 'LAPTOP-TEST', subject: '询问', body: '请把结果发回' });
+  const toolResult = {
+    content: [{
+      type: 'text',
+      text: 'message ' + sent.message.id + ' to LAPTOP-TEST: queued (peer offline)\n\n'
+        + JSON.stringify({ message: sent.message, delivery: sent.delivery }, null, 2)
+    }]
+  };
+  fake.fire('tools/result', {
+    name: 'mcp__dshlink__link_send_message',
+    arguments: { peer: 'LAPTOP-TEST', body: '请把结果发回' },
+    agent: { session: { id: 'session-asker' } }
+  }, toolResult);
+
+  // 2) The peer answers on the same thread.
+  await inboxMessage(node, 'msg_route_reply', 'LAPTOP-TEST', 'Re: 询问', '结果是 42', new Date().toISOString(), sent.message.thread);
+
+  // 3) One tick must deliver it into the asking conversation — and open no bridge session.
+  await messagePoll(scheduled).callback();
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to wake the asking conversation');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-asker');
+  assert.equal(fake.prompts[0].request.requestId, 'link-bridge:session-asker:msg_route_reply');
+  assert.match(fake.prompts[0].request.content[0].text, /结果是 42/, 'the answer reaches the asking conversation');
+  assert.equal(fake.created.length, 0, 'a routed thread must not open a bridge session');
+
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.routed === 1,
+    'the heartbeat to record the routed wake'
+  );
+  assert.equal(state.routes.count, 1);
+  assert.equal(state.routes.sessions, 1);
+  assert.equal(state.lastRoute.sessionId, 'session-asker');
+  assert.equal(state.errors, 0);
+});
+
+test('bridge: a routed conversation that has disappeared falls back to the topic pool', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-route-gone' });
+  t.after(() => node.close());
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-route-gone');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-route-gone'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+  // The asking conversation is gone by the time the answer arrives.
+  fake.ctx.sessionController.prompt = async (request) => {
+    if (request.sessionId === 'session-asker') throw new Error('unknown session: ' + request.sessionId);
+    fake.prompts.push({ request, signal: { aborted: false, throwIfAborted() {} } });
+    return { accepted: true };
+  };
+
+  const sent = await node.ops.sendMessage({ to: 'LAPTOP-TEST', subject: '询问', body: '请把结果发回' });
+  fake.fire('tools/result', {
+    name: 'mcp__dshlink__link_send_message',
+    arguments: { peer: 'LAPTOP-TEST' },
+    agent: { session: { id: 'session-asker' } }
+  }, { content: [{ type: 'text', text: 'message ' + sent.message.id + ' to LAPTOP-TEST: queued\n\n' + JSON.stringify({ message: sent.message }) }] });
+  await inboxMessage(node, 'msg_route_gone', 'LAPTOP-TEST', 'Re: 询问', '结果是 43', new Date().toISOString(), sent.message.thread);
+
+  // First tick tries the route and fails; the route is forgotten together with the session.
+  await messagePoll(scheduled).callback();
+  const afterFailure = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.errors === 1,
+    'the first tick to fail on the missing session'
+  );
+  assert.equal(afterFailure.routes.count, 0, 'a route to a missing session is forgotten');
+
+  // Second tick has no route to follow and opens a bridge session instead.
+  await messagePoll(scheduled).callback();
+  await waitFor(() => fake.created.length === 1, 'the next tick to open a bridge session instead');
+  assert.equal(fake.prompts.length, 1, 'only the fallback session was prompted');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-bridge-test');
 });
 

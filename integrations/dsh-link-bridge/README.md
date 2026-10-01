@@ -71,6 +71,11 @@ dsh web
           maxPoolSize: 20                    # 同时记住多少话题
         archiveSessions: true                # 退休会话交给 DSH 原生归档（侧边栏收起、日志保留）
         sessionTitlePrefix: "[dsh-link] "    # 桥开的对话统一加前缀，便于识别
+        # ---- 0.3：回信路由（谁问的、回给谁）----
+        routes:
+          enabled: true                      # 关掉 = 回到纯话题池行为
+          ttlSeconds: 86400                  # 路由记忆 24h
+          max: 200                           # 最多记住多少条 thread → 会话
         # ---- 0.3：能力通道（对端可通过本机节点调用本机 DSH）----
         commandSeconds: 5                    # 轮询本机节点的命令队列；0 = 关闭
         commandBatch: 5                      # 每轮最多认领几条命令
@@ -96,6 +101,27 @@ dsh web
 都保留，随时可以取消归档。桥开的对话标题统一带 `sessionTitlePrefix`，一眼能和人工对话区分开。
 
 新会话的创建**按需发生**：只有出现新话题、或旧会话超龄/超预算时才建，不会每个 tick 建一个。
+
+## 回信回到发起会话（0.3）
+
+话题池解决的是"对端发起的消息落在哪"。反过来还有一个场景：**你在别的工作区的会话里问对端一件事，
+对端的回复会被桥拉到 `workspacePath` 里去，提问的那个会话反而收不到。**
+
+桥会记住"哪个会话在哪个 thread 上发过消息"（`routes`），回信按 thread 命中后直接投回那个会话：
+
+| 判据 | 行为 |
+|---|---|
+| 何时登记 | 在任意工作区用 `link_send_message` / `link_reply` 发消息时，DSH 把这次工具调用（含发起会话）交给桥，桥记下 `thread → 会话`。**不必传自己的会话 id，也不需要 agent 配合** |
+| 何时命中 | 对端回复落在同一 thread，或 `replyTo` 命中你那条消息 |
+| 命中之后 | 直接 `sessionController.prompt` 那个会话，**不建**桥会话、不动话题池 |
+| 命中不到 | 回落到话题池：照旧在 `workspacePath` 建/复用会话 |
+| 发起会话已消失 | 桥忘掉该路由（prompt 失败即视为死会话），下一条消息回落到话题池 |
+| 有效期 | `routes.ttlSeconds`（默认 24h）；超过 `routes.max` 时按最久未用淘汰 |
+| 关掉 | `routes.enabled: false` |
+
+登记依赖 DSH Host 的 `tools/result` 事件（拿到发起 agent 的 Session）。经 CLI（`dshlink send`）发出的
+消息不经过任何会话，登记不了路由——那类发送请在 `workspacePath` 收信。唤醒上限、冷却与防打环判据对
+路由唤醒同样生效。
 
 ## 能力通道：让对端读/驱动本机 DSH（0.3）
 

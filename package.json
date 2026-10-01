@@ -17,6 +17,8 @@
     "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1",
     "bom": "node scripts/ensure-bom.mjs",
     "verify-vendor": "node scripts/verify-vendor.mjs",
+    "deploy:check": "node scripts/deploy-sync.mjs --check",
+    "deploy:apply": "node scripts/deploy-sync.mjs --apply --write",
     "bundle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bundle.ps1"
   },
   "repository": {
