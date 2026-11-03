@@ -6,7 +6,7 @@
 
 - Base URL：http://<节点地址>:8787（默认 bind 127.0.0.1，无 TLS）
 - 鉴权头二选一：Authorization: Bearer <token> 或 X-DSHLink-Token: <token>
-- 回环地址在 trustLocalhost=true 时可免 token（生产环境应关闭）
+- 0.5 起默认 `trustLocalhost: false`：即使来自回环/隧道也必须带 token（手机用 `role: device`）
 - 失败响应统一为 { "error": { "code": "...", "message": "..." } }
 - 同 IP 每分钟失败超过 20 次会返回 429（src/server.mjs:58-62）
 

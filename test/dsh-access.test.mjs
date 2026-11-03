@@ -236,7 +236,7 @@ test('dsh access: the bridge channel refuses remote callers', async (t) => {
   const remote = await fetch(node.url + '/api/v1/bridge/commands', { headers: { authorization: 'Bearer ' + node.token } });
   assert.equal(remote.status, 403);
   const body = await remote.json();
-  assert.equal(body.error.code, 'bridge_loopback_only');
+  assert.equal(body.error.code, 'bridge_forbidden');
 });
 
 test('dsh access: the new MCP tools are listed and answer over the wire', async (t) => {
@@ -272,4 +272,3 @@ test('dsh access: the new MCP tools are listed and answer over the wire', async 
   assert.equal(refused.result.isError, true, 'an unauthorized action must surface as a tool error');
   assert.match(refused.result.content[0].text, /capability_denied|denied/);
 });
-

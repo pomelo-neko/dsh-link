@@ -35,8 +35,32 @@ export const DEFAULT_LIMITS = {
   maxMessageBytes: 1024 * 1024,
   maxInlineAttachmentBytes: 512 * 1024,
   maxListEntries: 2000,
-  requestTimeoutMs: 60_000
+  requestTimeoutMs: 60_000,
+  // Requests per minute per token (or per source IP for unauthenticated/local calls), across all
+  // routes. 0 disables the limiter. Keeps a leaked or hostile peer token from hammering the node.
+  maxRequestsPerMinute: 1200
 };
+
+// Inbound token roles. A token without a role is a legacy token and behaves as "admin".
+//   admin  - full control (local tooling, installation)
+//   bridge - only what the local dsh-link-bridge plugin needs: read inbox/read marks + bridge channel
+//   peer   - another dsh-link node: send messages, read its own inbox/outbox, read DSH view
+//   device - a mobile/desktop controller: read DSH view, call capabilities, send messages; no admin APIs
+export const TOKEN_ROLES = ['admin', 'bridge', 'peer', 'device'];
+export const DEFAULT_TOKEN_ROLE = 'admin';
+
+export function normalizeTokenRole(value, fallback = DEFAULT_TOKEN_ROLE) {
+  const role = String(value ?? fallback).trim().toLowerCase();
+  if (!TOKEN_ROLES.includes(role)) throw badRequest(`token role must be one of: ${TOKEN_ROLES.join(', ')}`);
+  return role;
+}
+
+function normalizeExpiry(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw badRequest('token expiresAt must be a valid ISO date or timestamp');
+  return date.toISOString();
+}
 
 export function defaultConfig(overrides = {}) {
   const dataDir = overrides.dataDir ? path.resolve(overrides.dataDir) : defaultDataDir();
@@ -49,7 +73,9 @@ export function defaultConfig(overrides = {}) {
     port: overrides.port ?? 8787,
     publicUrl: overrides.publicUrl ?? null,
     dataDir,
-    auth: { trustLocalhost: true, tokens: [] },
+    // Secure by default (0.5.0): the old default (true) let anything that reached the port through
+    // a loopback-forwarding tunnel — e.g. frp/STCP visitor — call the whole API without a token.
+    auth: { trustLocalhost: false, tokens: [] },
     limits: { ...DEFAULT_LIMITS },
     files: { allowUpload: false, roots: [], deny: [...DEFAULT_DENY] },
     dsh: normalizeDshViewConfig({}),
@@ -97,15 +123,25 @@ export function normalizeConfig(raw, baseDir) {
     ...raw,
     dataDir,
     auth: {
-      trustLocalhost: raw.auth?.trustLocalhost !== false,
-      tokens: (raw.auth?.tokens ?? []).map((t) => ({
-        id: t.id ?? newId('tok'),
-        label: String(t.label ?? 'token').slice(0, 64),
-        hash: t.hash ? String(t.hash) : undefined,
-        token: t.token ? expandEnv(String(t.token)) : undefined,
-        createdAt: t.createdAt ?? new Date().toISOString(),
-        note: t.note
-      }))
+      // Secure by default; an existing config that explicitly said true keeps that (loudly warned
+      // about by `dshlink doctor` / `dshlink harden`).
+      trustLocalhost: raw.auth?.trustLocalhost === true,
+      tokens: (raw.auth?.tokens ?? []).map((t) => {
+        const role = t.role === undefined || t.role === null || t.role === '' ? undefined : normalizeTokenRole(t.role);
+        const peer = t.peer === undefined || t.peer === null || String(t.peer).trim() === '' ? null : slugName(t.peer);
+        if (role === 'peer' && !peer) throw badRequest('a token with role "peer" must name its peer (auth.tokens[].peer)');
+        return {
+          id: t.id ?? newId('tok'),
+          label: String(t.label ?? 'token').slice(0, 64),
+          hash: t.hash ? String(t.hash) : undefined,
+          token: t.token ? expandEnv(String(t.token)) : undefined,
+          role,
+          peer,
+          expiresAt: normalizeExpiry(t.expiresAt),
+          createdAt: t.createdAt ?? new Date().toISOString(),
+          note: t.note
+        };
+      })
     },
     limits: { ...defaults.limits, ...(raw.limits ?? {}) },
     dsh: normalizeDshViewConfig(raw.dsh ?? {}),
@@ -206,17 +242,28 @@ export async function saveConfig(cfg, file = cfg.configPath ?? configPathFor({ d
   return file;
 }
 
-/** Create an inbound token; the plaintext is returned once and stored hashed. */
-export function createInboundToken(cfg, label = 'peer') {
+/**
+ * Create an inbound token; the plaintext is returned once and stored hashed.
+ * opts.role: admin|bridge|peer|device (default admin, so existing callers keep working).
+ * opts.peer: required for role "peer", binds the token to one peer identity.
+ * opts.expiresAt: ISO date or timestamp after which the token stops working.
+ */
+export function createInboundToken(cfg, label = 'peer', opts = {}) {
   const token = randomToken(32);
+  const role = normalizeTokenRole(opts.role, DEFAULT_TOKEN_ROLE);
+  const peer = opts.peer === undefined || opts.peer === null || String(opts.peer).trim() === '' ? null : slugName(opts.peer);
+  if (role === 'peer' && !peer) throw badRequest('a token with role "peer" needs the peer name it is issued to');
   const entry = {
     id: newId('tok'),
     label: String(label).slice(0, 64),
     hash: sha256Hex(token),
+    role,
+    peer,
+    expiresAt: normalizeExpiry(opts.expiresAt),
     createdAt: new Date().toISOString()
   };
   cfg.auth.tokens.push(entry);
-  return { id: entry.id, token, label: entry.label };
+  return { id: entry.id, token, label: entry.label, role: entry.role, peer: entry.peer, expiresAt: entry.expiresAt };
 }
 
 /** Replace any stored plaintext token with its sha256 hash. Returns count sealed. */
@@ -233,8 +280,17 @@ export function verifyToken(cfg, presented) {
   if (typeof presented !== 'string' || presented.length === 0) return null;
   const digest = sha256Hex(presented);
   for (const t of cfg.auth.tokens) {
-    if (t.hash && safeEqual(t.hash, digest)) return { id: t.id, label: t.label };
-    if (t.token && safeEqual(t.token, presented)) return { id: t.id, label: t.label };
+    const hit = (t.hash && safeEqual(t.hash, digest)) || (t.token && safeEqual(t.token, presented));
+    if (!hit) continue;
+    if (t.expiresAt && Date.parse(t.expiresAt) <= Date.now()) return null; // expired = unknown token
+    return {
+      id: t.id,
+      label: t.label,
+      // Legacy tokens (created before 0.5.0) carry no role; they keep full control.
+      role: t.role ?? DEFAULT_TOKEN_ROLE,
+      peer: t.peer ?? null,
+      expiresAt: t.expiresAt ?? null
+    };
   }
   return null;
 }

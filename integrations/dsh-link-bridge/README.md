@@ -31,10 +31,13 @@ dsh-link 会把消息投进本机节点的收件箱，但 DSH 这一侧不会自
 # 1) 把包装进 profile（本地目录用 link:，改代码即时生效）
 dsh plugin --profile web add "link:<dsh-link 路径>/integrations/dsh-link-bridge"
 
-# 2) 写配置并激活（本项目的 CLI 会备份 profile patch，然后写入 insert 条目）
-node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write
+# 2) 0.5 起节点默认不信任回环：先加固，拿到 admin / bridge 两个 token（只打印一次）
+node bin\dshlink.mjs harden --write
 
-# 3) 重启一次 DSH host（新插件条目在启动时装载；之后改配置是热重载）
+# 3) 写配置并激活（本项目的 CLI 会备份 profile patch，然后写入 insert 条目）
+node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write --token <admin-token> --bridge-token <bridge-token>
+
+# 4) 重启一次 DSH host（新插件条目在启动时装载；之后改配置是热重载）
 dsh web
 ```
 
@@ -59,7 +62,7 @@ dsh web
         batchLimit: 20                       # 一次最多带多少条消息进 prompt
         maxBodyChars: 1200                   # 每条消息正文截断长度
         agentPreset: ""                      # 可选：新建对话时使用的 agent preset
-        token: ""                            # 可选：节点需要鉴权时填 peers token
+        token: ""                            # 0.5：hardened 节点必填 role=bridge 的 token（install-dsh --bridge-token 会自动写入）
         stateDir: ""                         # 可选：状态文件目录
         prompt: ""                           # 可选：自定义 prompt 模板（留空用内置）
         # ---- 0.3：话题路由与自动归档 ----
@@ -98,6 +101,30 @@ dsh web
 0.4 起 direct/route 投递默认用 DSH 的 `mode: "steer"` 唤醒——插到目标会话的下一个 step 边界，像人插话，
 不用排在长工具循环后面；topic 批量仍用 `mode: "queue"`（追加一个回合）。`promptMode: queue` 让所有唤醒都排队，
 `steer` 让所有唤醒都插话；默认 `auto` 按投递类型选择。
+
+## 鉴权与安全边界（0.5）
+
+0.5 起节点默认 `auth.trustLocalhost: false`：**每个请求都要 token**，桥访问的
+`/api/v1/bridge/*` 控制面也不例外。桥配置里的 `token` 决定桥以什么身份访问节点：
+
+| token 角色 | 用途 | 能否调 bridge 控制面 |
+|---|---|---|
+| `bridge` | 桥专用：读写消息/文件、认领并回填 bridge 命令 | ✅ 推荐 |
+| `admin` | 人 / CLI / MCP 专用，可管理 token、peers、审计 | 仅本机回环；远端 admin 会 403 `bridge_forbidden` |
+| `peer` | 对端节点：只能收发自己的流量 | ❌ `bridge_forbidden` |
+| `device` | 手机等只读终端 | ❌ `bridge_forbidden` |
+
+- `dshlink harden --write` 关掉 `trustLocalhost` 并铸 `mcp-admin`（admin）与 `bridge`（bridge）两个 token；
+- 安装时用 `install-dsh ... --token <admin-token> --bridge-token <bridge-token>`，MCP 的
+  `headers.authorization` 与桥的 `token` 会一起写进 patch；
+- 多机互连时**每台对端各用一个 `role: peer` 且绑定对端名的 token**
+  （`dshlink token new --role peer --peer LAPTOP-X`）：消息 `from` 会被强制为该 peer，
+  收件箱/发件箱也只返回它自己的流量；
+- 桥的 token 泄漏等于对方能读写本机消息、投递定向消息、认领 bridge 命令——按凭据管理：独立、可轮换、
+  不要和 MCP 共用；节点侧的完整边界见 [`SECURITY.md`](../../SECURITY.md)；
+- 升级到 0.5 后桥报 `403 bridge_forbidden`：说明配置里没有 role=bridge 的 token。
+  `dshlink token new --role bridge` 后填进 `token`（或重跑 install-dsh `--bridge-token`）；
+  改的是配置，patchReload 为 live 时热重载即可，不必重启。
 
 ## 一个话题一个会话 + 自动归档（0.3）
 

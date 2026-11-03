@@ -9,6 +9,57 @@ import { MCP_DEFAULT_PROTOCOL, MCP_PROTOCOL_VERSIONS, handleMcpMessage } from '.
 const LOCAL_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const OPEN_PATHS = new Set(['/healthz']);
 
+// Role-based authorisation (v0.5.0). A route without an explicit role list is admin-only, so a
+// newly added route cannot accidentally become world-readable. Legacy tokens have no role and
+// are treated as admin by verifyToken(); loopback/open (trustLocalhost) callers are admin too.
+const ALL_ROLES = ['admin', 'bridge', 'peer', 'device'];
+const READ_ROLES = ['admin', 'bridge', 'peer'];
+const DSH_ROLES = ['admin', 'peer', 'device'];
+const BRIDGE_ROLES = ['admin', 'bridge'];
+
+function roleOf(auth) {
+  if (auth?.token?.role) return auth.token.role;
+  return auth?.via === 'localhost' || auth?.via === 'open' ? 'admin' : 'anonymous';
+}
+
+function routeRoleTable() {
+  return new Map([
+    ['GET /healthz', null],
+    ['GET ' + API_PREFIX + '/info', ALL_ROLES],
+    ['GET ' + API_PREFIX + '/peers', ['admin']],
+    ['GET ' + API_PREFIX + '/status', ['admin']],
+    ['POST ' + API_PREFIX + '/messages', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/messages', READ_ROLES],
+    ['GET ' + API_PREFIX + '/messages/:id', READ_ROLES],
+    ['POST ' + API_PREFIX + '/messages/read', READ_ROLES],
+    ['POST ' + API_PREFIX + '/messages/:id/read', READ_ROLES],
+    ['GET ' + API_PREFIX + '/outbox', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/files', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/files/stat', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/files/hash', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/files/download', ['admin', 'peer']],
+    ['POST ' + API_PREFIX + '/files/upload', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/audit', ['admin']],
+    ['GET ' + API_PREFIX + '/dsh/workspaces', DSH_ROLES],
+    ['GET ' + API_PREFIX + '/dsh/sessions', DSH_ROLES],
+    ['GET ' + API_PREFIX + '/dsh/sessions/:id', DSH_ROLES],
+    ['GET ' + API_PREFIX + '/dsh/sessions/:id/transcript', DSH_ROLES],
+    ['GET ' + API_PREFIX + '/dsh/capabilities', DSH_ROLES],
+    ['POST ' + API_PREFIX + '/dsh/call', DSH_ROLES],
+    ['GET ' + API_PREFIX + '/dsh/call/:id', DSH_ROLES],
+    ['GET ' + API_PREFIX + '/bridge/status', BRIDGE_ROLES],
+    ['GET ' + API_PREFIX + '/bridge/commands', BRIDGE_ROLES],
+    ['POST ' + API_PREFIX + '/bridge/commands/:id/result', BRIDGE_ROLES],
+    ['POST ' + API_PREFIX + '/bridge/heartbeat', BRIDGE_ROLES],
+    ['POST ' + API_PREFIX + '/bridge/bind', BRIDGE_ROLES],
+    ['GET ' + API_PREFIX + '/bridge/bind', BRIDGE_ROLES],
+    ['POST /mcp', ['admin']],
+    ['GET /mcp', ['admin']],
+    ['DELETE /mcp', ['admin']]
+  ]);
+}
+const ROUTE_ROLES = routeRoleTable();
+
 function compileRoute(pattern) {
   const names = [];
   const source = pattern
@@ -25,11 +76,14 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   const log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   const routes = [];
   const authFailures = new Map();
+  const requestWindows = new Map();
   const sessions = new Set();
 
   const add = (method, pattern, handler, opts = {}) => {
     const { re, names } = compileRoute(pattern);
-    routes.push({ method, re, names, handler, auth: opts.auth !== false, audit: opts.audit ?? null });
+    const key = method + ' ' + pattern;
+    const roles = opts.auth === false ? null : (opts.roles ?? ROUTE_ROLES.get(key) ?? ['admin']);
+    routes.push({ method, re, names, handler, auth: opts.auth !== false, audit: opts.audit ?? null, roles });
   };
 
   function clientIp(req) {
@@ -98,10 +152,47 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
     const status = err instanceof LinkError ? err.status : 500;
     const code = err instanceof LinkError ? err.code : 'internal_error';
     if (status >= 500) log.error('request failed:', err?.stack ?? String(err));
-    sendJson(res, status === 2 ? 400 : status, { error: { code, message: err?.message ?? String(err), details: err?.details ?? undefined } });
+    const headers = {};
+    const retryAfter = Number(err?.details?.retryAfterSeconds);
+    if (status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) headers['retry-after'] = String(Math.ceil(retryAfter));
+    sendJson(res, status === 2 ? 400 : status, { error: { code, message: err?.message ?? String(err), details: err?.details ?? undefined } }, headers);
   }
 
   const audit = (entry) => { store.audit({ ...entry, ts: nowIso() }).catch(() => {}); };
+
+  // A peer token is bound to exactly one peer name by config; it may only present messages as
+  // that peer and only read that peer's traffic. A peer token without a binding can never be
+  // created by createInboundToken(), but hand-edited configs are rejected here too.
+  function boundPeer(auth) {
+    if (roleOf(auth) !== 'peer') return null;
+    const peer = auth?.token?.peer;
+    if (!peer) throw new LinkError(403, 'peer_unbound', 'this peer token is not bound to a peer identity');
+    return peer;
+  }
+
+  function rateLimit(auth) {
+    const limit = Number(cfg.limits.maxRequestsPerMinute ?? 0);
+    if (!Number.isFinite(limit) || limit <= 0) return;
+    const window = 60_000;
+    const now = Date.now();
+    const key = auth?.token?.id ? 'token:' + auth.token.id : 'ip:' + (auth?.ip ?? 'unknown');
+    let record = requestWindows.get(key);
+    if (!record || now - record.start >= window) {
+      record = { start: now, count: 0 };
+      requestWindows.set(key, record);
+    }
+    record.count += 1;
+    if (record.count > limit) {
+      throw new LinkError(429, 'too_many_requests', 'request rate limit exceeded; retry later', {
+        limit,
+        windowSeconds: 60,
+        retryAfterSeconds: Math.max(1, Math.ceil((window - (now - record.start)) / 1000))
+      });
+    }
+    if (requestWindows.size > 5000) {
+      for (const [key, value] of requestWindows) if (now - value.start >= window) requestWindows.delete(key);
+    }
+  }
 
   // ---------------------------------------------------------------- routes ---
   add('GET', '/healthz', async (ctx) => {
@@ -124,19 +215,32 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
 
   add('POST', `${API_PREFIX}/messages`, async (ctx) => {
     const record = await readJson(ctx.req, cfg.limits.maxMessageBytes);
+    const peer = boundPeer(ctx.auth);
+    if (peer) {
+      if (!record || typeof record !== 'object') throw badRequest('a message record is required');
+      const claimed = String(record.from?.name ?? '').trim();
+      if (claimed && claimed !== peer) throw new LinkError(403, 'identity_mismatch', `this token belongs to peer "${peer}", not "${claimed}"`);
+      record.from = { ...(record.from ?? {}), name: peer };
+      const to = String(record.to ?? '');
+      const local = ops.isSelf(to) || to === '*' || to === '';
+      if (!local && roleOf(ctx.auth) !== 'admin') {
+        throw new LinkError(403, 'relay_not_allowed', 'only an admin token may relay a message to a third node');
+      }
+    }
     const result = await ops.acceptMessage(record);
-    audit({ event: 'message_received', id: result.id, from: record.from?.name, to: record.to, stored: result.stored, ip: ctx.auth.ip, token: ctx.auth.token?.label ?? 'localhost', duplicate: !!result.duplicate });
+    audit({ event: 'message_received', id: result.id, from: record.from?.name, to: record.to, stored: result.stored, ip: ctx.auth.ip, token: ctx.auth.token?.label ?? 'localhost', role: roleOf(ctx.auth), duplicate: !!result.duplicate });
     sendJson(ctx.res, 202, result);
   });
 
   add('GET', `${API_PREFIX}/messages`, async (ctx) => {
     const q = ctx.url.searchParams;
+    const bound = boundPeer(ctx.auth);
     const result = await store.list('inbox', {
       since: q.get('since') ?? undefined,
       limit: toInt(q.get('limit'), 50, { min: 1, max: 1000 }),
       unreadOnly: q.get('unread') === '1',
       thread: q.get('thread') ?? undefined,
-      from: q.get('from') ?? undefined,
+      from: bound ?? (q.get('from') ?? undefined),
       order: q.get('order') === 'asc' ? 'asc' : 'desc'
     });
     sendJson(ctx.res, 200, result);
@@ -145,22 +249,38 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   add('GET', `${API_PREFIX}/messages/:id`, async (ctx) => {
     const message = await store.get('inbox', ctx.params.id);
     if (!message) throw notFound(`no message ${ctx.params.id}`);
+    const bound = boundPeer(ctx.auth);
+    if (bound && message.from?.name !== bound) throw new LinkError(403, 'not_your_message', 'this message belongs to another peer');
     sendJson(ctx.res, 200, message);
   });
+
+  async function assertPeerMayRead(auth, ids) {
+    const bound = boundPeer(auth);
+    if (!bound) return;
+    for (const id of ids) {
+      const message = await store.get('inbox', id);
+      if (message && message.from?.name !== bound) throw new LinkError(403, 'not_your_message', 'this message belongs to another peer');
+    }
+  }
 
   add('POST', `${API_PREFIX}/messages/read`, async (ctx) => {
     const body = await readJson(ctx.req, 1024 * 1024);
     const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+    await assertPeerMayRead(ctx.auth, ids);
     sendJson(ctx.res, 200, { marked: await store.markRead(ids) });
   });
 
   add('POST', `${API_PREFIX}/messages/:id/read`, async (ctx) => {
+    await assertPeerMayRead(ctx.auth, [ctx.params.id]);
     sendJson(ctx.res, 200, { marked: await store.markRead([ctx.params.id]) });
   });
 
   add('GET', `${API_PREFIX}/outbox`, async (ctx) => {
     const q = ctx.url.searchParams;
-    const to = q.get('to') ?? undefined;
+    const bound = boundPeer(ctx.auth);
+    const requested = q.get('to') ?? undefined;
+    if (bound && requested && requested !== bound) throw new LinkError(403, 'not_your_traffic', 'a peer token may only read its own outbox');
+    const to = bound ?? requested;
     const all = await store.list('outbox', {
       since: q.get('since') ?? undefined,
       limit: toInt(q.get('limit'), 200, { min: 1, max: 1000 }),
@@ -241,9 +361,17 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   // ------------------------------------------- DSH view + capability channel ---
   // Every route below is off unless the node config enables it; the capability channel is
   // additionally enforced per peer inside ops (see src/capabilities.mjs).
-  function requireLoopback(ctx) {
-    if (ctx.auth?.via !== 'localhost' && ctx.auth?.via !== 'open') {
-      throw new LinkError(403, 'bridge_loopback_only', 'the bridge channel is only reachable from this machine');
+  function requireBridge(ctx) {
+    // The bridge channel used to be loopback-only. With trustLocalhost now defaulting to false,
+    // the local bridge authenticates with a dedicated "bridge" token instead of relying on the
+    // source address (which frp/STCP can forge by making a remote connection appear as 127.0.0.1).
+    const via = ctx.auth?.via;
+    const role = roleOf(ctx.auth);
+    // Local callers (an in-process or same-machine bridge) and dedicated bridge tokens only.
+    // An admin token is deliberately not enough: a remote admin has root through the normal
+    // API, and the bridge channel should stay a this-machine control plane.
+    if (via !== 'localhost' && via !== 'open' && role !== 'bridge') {
+      throw new LinkError(403, 'bridge_forbidden', 'the bridge channel is only available to the local bridge or a bridge token');
     }
   }
 
@@ -289,26 +417,44 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
 
   add('POST', `${API_PREFIX}/dsh/call`, async (ctx) => {
     const body = await readJson(ctx.req, 1024 * 1024);
-    const origin = { peer: ctx.auth.token?.label ?? ctx.auth.ip ?? 'unknown', ip: ctx.auth.ip, label: ctx.auth.token?.label ?? 'localhost' };
+    const role = roleOf(ctx.auth);
+    const origin = {
+      peer: ctx.auth.token?.peer ?? ctx.auth.token?.label ?? ctx.auth.ip ?? 'unknown',
+      ip: ctx.auth.ip,
+      label: ctx.auth.token?.label ?? 'localhost',
+      role,
+      tokenId: ctx.auth.token?.id ?? null
+    };
     const target = body.peer && body.peer !== cfg.name && body.peer !== 'self' ? String(body.peer) : '';
+    if (target && role !== 'admin') {
+      throw new LinkError(403, 'relay_not_allowed', 'only an admin token may forward a capability call to another node');
+    }
     const result = target
       ? await ops.dshCall({ peer: target, method: body.method, params: body.params, waitSeconds: body.waitSeconds })
       : await ops.dshCallLocal({ method: body.method, params: body.params, waitSeconds: body.waitSeconds, origin });
-    audit({ event: 'dsh_call', method: body.method, forPeer: target || null, commandId: result.commandId ?? null, status: result.status ?? null, ip: ctx.auth.ip, token: origin.label });
+    audit({ event: 'dsh_call', method: body.method, forPeer: target || null, commandId: result.commandId ?? null, status: result.status ?? null, ip: ctx.auth.ip, token: origin.label, role });
     sendJson(ctx.res, 200, result);
   });
 
   add('GET', `${API_PREFIX}/dsh/call/:id`, async (ctx) => {
-    sendJson(ctx.res, 200, await ops.dshCallResult({ id: ctx.params.id }));
+    const result = await ops.dshCallResult({ id: ctx.params.id });
+    const role = roleOf(ctx.auth);
+    if (role !== 'admin' && role !== 'bridge') {
+      const origin = result?.origin ?? {};
+      const sameToken = ctx.auth.token?.id && origin.tokenId === ctx.auth.token.id;
+      const samePeer = ctx.auth.token?.peer && origin.peer === ctx.auth.token.peer;
+      if (!sameToken && !samePeer) throw new LinkError(403, 'not_your_command', 'this command was issued by another client');
+    }
+    sendJson(ctx.res, 200, result);
   });
 
   add('GET', `${API_PREFIX}/bridge/status`, async (ctx) => {
-    requireLoopback(ctx);
+    requireBridge(ctx);
     sendJson(ctx.res, 200, await ops.bridgeStatus());
   });
 
   add('GET', `${API_PREFIX}/bridge/commands`, async (ctx) => {
-    requireLoopback(ctx);
+    requireBridge(ctx);
     const q = ctx.url.searchParams;
     const result = await ops.claimCommands({
       limit: toInt(q.get('limit'), 5, { min: 1, max: 25 }),
@@ -319,7 +465,7 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   });
 
   add('POST', `${API_PREFIX}/bridge/commands/:id/result`, async (ctx) => {
-    requireLoopback(ctx);
+    requireBridge(ctx);
     const body = await readJson(ctx.req, Math.max(1024 * 1024, Number(cfg.capabilities?.maxResultBytes ?? 0) + 65536));
     const result = await ops.completeCommand(ctx.params.id, body);
     audit({ event: 'bridge_result', commandId: ctx.params.id, method: result.method, status: result.status, ok: result.ok });
@@ -327,7 +473,7 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   });
 
   add('POST', `${API_PREFIX}/bridge/heartbeat`, async (ctx) => {
-    requireLoopback(ctx);
+    requireBridge(ctx);
     const body = await readJson(ctx.req, 256 * 1024);
     sendJson(ctx.res, 200, await ops.bridgeBeat(body));
   });
@@ -336,7 +482,7 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   // before prompting that Session, so the next outbound message can carry `originSession`
   // even when the model does not pass one explicitly.
   add('POST', `${API_PREFIX}/bridge/bind`, async (ctx) => {
-    requireLoopback(ctx);
+    requireBridge(ctx);
     const body = await readJson(ctx.req, 64 * 1024);
     const result = await ops.bindSession({ thread: body.thread, sessionId: body.sessionId, peer: body.peer });
     audit({ event: 'bridge_bind', thread: result.binding.thread, sessionId: result.binding.sessionId, peer: result.binding.peer ?? null });
@@ -344,7 +490,7 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   });
 
   add('GET', `${API_PREFIX}/bridge/bind`, async (ctx) => {
-    requireLoopback(ctx);
+    requireBridge(ctx);
     sendJson(ctx.res, 200, await ops.binding({ thread: ctx.url.searchParams.get('thread') ?? '' }));
   });
 
@@ -411,6 +557,12 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
           throw unauthorized();
         }
         ctx.auth = auth;
+        rateLimit(auth);
+        const role = roleOf(auth);
+        if (Array.isArray(route.roles) && !route.roles.includes(role)) {
+          audit({ event: 'role_forbidden', role, path: pathname, token: auth.token?.label ?? 'localhost' });
+          throw new LinkError(403, 'role_forbidden', `this route is not available to role "${role}"`);
+        }
       } else {
         ctx.auth = { via: 'open', ip: clientIp(req), token: null };
       }

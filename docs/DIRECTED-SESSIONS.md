@@ -98,9 +98,10 @@ Invoke-RestMethod -Method Post 'http://127.0.0.1:8787/api/v1/bridge/bind' -Conte
   -Body '{"thread":"msg_abc","sessionId":"session-5f0c","peer":"bob-pc"}'
 ```
 
-Both endpoints require a **loopback client** (`auth.trustLocalhost` or a token on the same host
-still yields 403 `bridge_loopback_only`): bindings describe this machine's own Sessions and are
-never part of the peer API. `dsh.bridge bind` is not exposed to peers.
+Both endpoints live on the **bridge control plane**: since 0.5 they accept only the local process
+(loopback with `trustLocalhost`, or any local role) or a `role: bridge` token. A remote `admin`
+token gets 403 `bridge_forbidden`; bindings describe this machine's own Sessions and are never
+part of the peer API.
 
 ## Using it
 

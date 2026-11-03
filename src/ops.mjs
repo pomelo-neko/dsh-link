@@ -509,7 +509,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       const client = clientFor(peer, { timeoutMs: (wait + 15) * 1000 });
       return { peer, ...(await client.dshCall({ method, params: params ?? {}, waitSeconds: wait })) };
     }
-    return dshCallLocal({ method, params, waitSeconds, origin: { peer: cfg.name, ip: 'loopback', label: 'localhost' } });
+    return dshCallLocal({ method, params, waitSeconds, origin: { peer: cfg.name, ip: 'loopback', label: 'localhost', role: 'admin', tokenId: null } });
   }
 
   async function dshCallLocal({ method, params = {}, waitSeconds, origin } = {}) {

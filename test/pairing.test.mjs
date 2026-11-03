@@ -125,7 +125,7 @@ test('install-dsh: plans, validates, backs up and is idempotent', async () => {
 
 test('doctor: reports config, http, mcp and peers for a live node', async (t) => {
   await resetTmp();
-  const node = await makeNode({ name: 'docNode', roots: [{ name: 'ws', path: PROJECT_DIR, read: true, write: false }] });
+  const node = await makeNode({ name: 'docNode', trustLocalhost: false, roots: [{ name: 'ws', path: PROJECT_DIR, read: true, write: false }] });
   const dead = await makeNode({ name: 'deadNode' });
   t.after(async () => { await node.close(); await dead.close(); });
   node.connectTo(dead);

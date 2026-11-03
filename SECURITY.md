@@ -17,7 +17,7 @@ multi-tenant service**. Its defaults are conservative, but the operator can open
 | Door | Default | What opening it means |
 |---|---|---|
 | `bind` | `127.0.0.1` | A public/LAN bind exposes the API to the network. |
-| `auth.trustLocalhost` | `true` | Requests from loopback need **no token**. This is what makes a local MCP client work; it also means anything that can reach the port from the same host (or through a tunnel that terminates on loopback) is already authenticated. |
+| `auth.trustLocalhost` | `false` | Off by default since 0.5.0: every request needs a token. Turning it on lets loopback requests skip tokens — only acceptable on a single-user machine, and never when a loopback forwarder (frp/STCP, `ssh -L`) can reach the port: the remote end then arrives as `127.0.0.1` and is authenticated automatically. |
 | `files.roots` | empty | Each root is read-only unless `rw`. |
 | `files.allowUpload` | `false` | Inbound `push` writes files into a root. |
 | `dsh.enabled` | `false` | Peers can list **every** workspace and session and read transcripts on this machine. |
@@ -26,9 +26,12 @@ multi-tenant service**. Its defaults are conservative, but the operator can open
 
 Hardening checklist for machines joined over an untrusted network:
 
-1. **Turn off loopback trust** on both ends (`auth.trustLocalhost: false`) and give every local
-   client an explicit token (`dshlink token new --label mcp`). Loopback trust plus a tunnel that
-   terminates on loopback means inbound tokens are never checked on that path.
+1. **Turn off loopback trust and issue role-scoped tokens** on both ends:
+   `dshlink harden --write` (it turns `auth.trustLocalhost` off and mints an `mcp-admin` admin token
+   plus a dedicated `bridge` token), then
+   `dshlink install-dsh --write --token <admin-token> [--bridge --bridge-token <bridge-token>]`.
+   Restart the node and the DSH host once. Never hand an admin token to a peer or a phone: mint
+   `dshlink token new --role peer --peer <name>` or `--role device --ttl-days 90` instead.
 2. Prefer **frp STCP over a TLS frps** (or a reverse proxy with HTTPS) instead of exposing port
    8787. STCP is not a substitute for auth: whoever holds the STCP `secretKey` can open a visitor
    against the provider.
@@ -40,6 +43,26 @@ Hardening checklist for machines joined over an untrusted network:
    shared root, treat it as leaked: move the data dir out first, then rotate on both ends.
 6. Read `audit.jsonl` (file access) and the node's `outbox.jsonl` when something is delivered
    that you did not expect.
+
+
+## Token model (0.5.0)
+
+Every inbound token can carry a `role`, an optional bound peer identity and an optional
+`expiresAt`. A token without a role is treated as `admin` for compatibility with 0.4 configs —
+rotate those.
+
+| Role | Can | Cannot |
+|---|---|---|
+| `admin` | everything the node API offers: peers/status/audit, messages, files, DSH view, capability calls, MCP | the bridge control plane from a remote address (use a local process or a `bridge` token) |
+| `bridge` | `/api/v1/bridge/*` (status, commands claim/result, heartbeat, bind) and read messages/DSH view | manage peers/tokens, post messages, files, MCP |
+| `peer` | exchange its own messages (inbox/outbox filtered by its bound identity), DSH view, capability calls | read another peer's messages, forge `from`, relay to a third node, manage the node |
+| `device` | read-only DSH view: workspaces, sessions, transcripts, capabilities, own queued call results | messages, files, bridge control plane, peers/tokens/audit/MCP |
+
+`auth.trustLocalhost` is only about the local process: with it off, the MCP client, the CLI and the
+bridge must all send their token (this is what `harden` + `install-dsh --token ...` configure).
+`GET /healthz` is always open. Failed authentication is throttled per IP (20 per minute); every
+authenticated request also counts against `limits.maxRequestsPerMinute` (default 1200; 0 disables)
+in a 60 s window, and excess requests get `429` with `Retry-After`.
 
 ## Cryptography
 

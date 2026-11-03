@@ -76,7 +76,9 @@ test('directed: the bridge bind endpoint is loopback-only and round-trips a bind
     body: JSON.stringify({ thread: 'msg_thread_bind_2', sessionId: 'session-bound-2' })
   });
   assert.equal(denied.status, 403);
-  assert.match((await denied.json()).error?.message ?? '', /only reachable from this machine/);
+  const deniedBody = await denied.json();
+  assert.equal(deniedBody.error?.code, 'bridge_forbidden');
+  assert.match(deniedBody.error?.message ?? '', /local bridge or a bridge token/);
 });
 
 test('directed: a thread binding supplies originSession automatically', async (t) => {

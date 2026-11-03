@@ -2,8 +2,13 @@
 
 Everything is HTTP/1.1 + JSON on one port. Binary file bodies are streamed.
 Auth: `Authorization: Bearer <token>` or `X-DSHLink-Token: <token>`.
-Requests from 127.0.0.1/::1 are accepted without a token while
-`auth.trustLocalhost = true` (default). 20 failed auths per IP per minute → `429`.
+Every request needs a token since 0.5.0: `auth.trustLocalhost` now defaults to **false**. A request
+from 127.0.0.1/::1 is accepted without a token only when the operator explicitly sets
+`auth.trustLocalhost = true` — and that also lets a loopback-forwarded tunnel (frp/STCP) skip auth.
+Tokens carry a `role` (`admin` | `bridge` | `peer` | `device`), optionally a bound peer and an
+`expiresAt`; a token without a role keeps admin compatibility. 20 failed auths per IP per minute →
+`429 too_many_failures`; authenticated requests above `limits.maxRequestsPerMinute` (default 1200,
+0 disables) get `429 too_many_requests` with `Retry-After`.
 
 ## Node API
 
@@ -27,8 +32,30 @@ Requests from 127.0.0.1/::1 are accepted without a token while
 | GET | `/api/v1/audit` | Recent audit entries (`limit`) |
 
 Errors: `{"error":{"code","message","details"}}` with HTTP status
-(400 bad_request, 401 unauthorized, 403 forbidden, 404 not_found, 409 conflict,
-413 payload_too_large, 429 too_many_failures, 502 upstream_error).
+(400 bad_request, 401 unauthorized, 403 forbidden — including `role_forbidden`,
+`bridge_forbidden`, `identity_mismatch`, `not_your_message`, `not_your_traffic`,
+`relay_not_allowed` — 404 not_found, 409 conflict, 413 payload_too_large,
+429 `too_many_failures` / `too_many_requests` with `Retry-After`, 502 upstream_error).
+
+## Roles and route access (v0.5)
+
+| Role | Allowed |
+|---|---|
+| `admin` | every node route and `/mcp` |
+| `bridge` | `/api/v1/bridge/*` (control plane), message reads, DSH view |
+| `peer` | POST/GET **its own** messages, DSH view, capability calls (and its own results) |
+| `device` | DSH view and its own queued capability results — read-only |
+
+- The bridge control plane accepts the local process (loopback with `trustLocalhost`, or any
+  loopback token) or a `bridge` token; a **remote admin token is refused** with
+  `403 bridge_forbidden` — bridge trust is not admin trust.
+- A `peer` token bound to a peer can only send/read as that peer. Forging `from.name` returns
+  `403 identity_mismatch`; reading another peer's message returns `not_your_message`; asking for
+  their outbox returns `not_your_traffic`; relaying to a third node returns `403 relay_not_allowed`
+  (relay is admin-only).
+- `GET /api/v1/dsh/call/:id` returns the command only to `admin`/`bridge`, or to the token that
+  issued it.
+- Any route rejected for the caller's role returns `403 role_forbidden` and is audited.
 
 `GET /api/v1/status` also reports a `runtime` block describing the **running process** (not the file):
 `version`, `pid`, `startedAt`, `configPath`, `configReloads`, `configLastReloadAt`, `configLastError`.
@@ -118,13 +145,13 @@ Peer → node → local bridge plugin (inside DSH) → DSH Host services, and ba
 | Method | Path | Who calls it |
 |---|---|---|
 | POST | `/api/v1/dsh/call` `{ method, params, waitSeconds }` | a peer (or the local agent) |
-| GET | `/api/v1/dsh/call/:id` | anyone with a token (poll a queued command) |
-| GET | `/api/v1/bridge/commands?limit=` | **loopback only** — the bridge claims work |
-| POST | `/api/v1/bridge/commands/:id/result` `{ ok, result }` / `{ ok:false, error }` | **loopback only** |
-| POST | `/api/v1/bridge/heartbeat` `{ version, capabilities, sessions, at }` | **loopback only** |
-| GET | `/api/v1/bridge/status` | **loopback only** |
-| POST | `/api/v1/bridge/bind` `{ thread, sessionId, peer }` | **loopback only** (v0.4) — record which local Session owns a thread |
-| GET | `/api/v1/bridge/bind?thread=` | **loopback only** (v0.4) — read a binding (or `null`) |
+| GET | `/api/v1/dsh/call/:id` | admin/bridge, or the token that issued the command |
+| GET | `/api/v1/bridge/commands?limit=` | **local process or bridge token** — the bridge claims work |
+| POST | `/api/v1/bridge/commands/:id/result` `{ ok, result }` / `{ ok:false, error }` | **local process or bridge token** — the bridge posts a result |
+| POST | `/api/v1/bridge/heartbeat` `{ version, capabilities, sessions, at }` | **local process or bridge token** — the bridge heartbeat |
+| GET | `/api/v1/bridge/status` | **local process or bridge token** — capability/queue status |
+| POST | `/api/v1/bridge/bind` `{ thread, sessionId, peer }` | **local process or bridge token** (v0.4) — record which local Session owns a thread |
+| GET | `/api/v1/bridge/bind?thread=` | **local process or bridge token** (v0.4) — read a binding (or `null`) |
 
 Methods: `workspaces.list`, `sessions.list`, `sessions.read` (read) and `sessions.create`,
 `sessions.prompt`, `sessions.rename`, `sessions.archive` (actions, opt-in per node and per peer),
@@ -145,8 +172,8 @@ commands expire after `commandTtlSeconds`; results are clipped to `maxResultByte
 `<dataDir>/bindings.json` maps `thread → { thread, sessionId, peer, updatedAt }` (500 newest kept,
 atomic replace). The bridge writes a binding before it prompts a Session for a thread; `sendMessage`
 reads it to fill `originSession` when a caller (for example `link_reply`) does not supply one.
-Bindings are local state: the `/api/v1/bridge/bind` endpoints reject non-loopback clients with
-`403 bridge_loopback_only` even when a valid token is presented.
+Bindings are local state: the `/api/v1/bridge/bind` endpoints reject remote callers with
+`403 bridge_forbidden` unless the caller presents a `bridge` token; a remote admin token is not enough.
 
 ## Virtual `workspaces` file root (v0.3)
 

@@ -92,6 +92,9 @@ nodes are reached by name through the `peer` argument):
     serverName: dshlink
     transport: streamable-http
     url: http://127.0.0.1:8787/mcp
+    # 0.5: every request needs a token; install-dsh --token writes this header
+    headers:
+      authorization: !!js '`Bearer ${process.env.DSHLINK_TOKEN}`'
 ```
 
 Restart DSH and the native tools appear: `link_status`, `link_peers`, `link_send_message`,
@@ -99,8 +102,10 @@ Restart DSH and the native tools appear: `link_status`, `link_peers`, `link_send
 `link_list_files`, `link_stat_file`, `link_pull_file`, `link_push_file`, `link_help`, plus
 the opt-in `link_dsh_workspaces`, `link_dsh_sessions`, `link_dsh_transcript` and `link_call`.
 
-Loopback requests are trusted by default, so the local MCP client needs no token. To require one
-(and to turn loopback trust off), see [`docs/DSH-INTEGRATION.md`](docs/DSH-INTEGRATION.md).
+Since 0.5 loopback trust is **off by default** and every request needs a token. Run
+`dshlink harden --write` to mint an `admin` token (for MCP/CLI) and a `bridge` token (for the
+bridge plugin), then pass them to `install-dsh --token … [--bridge-token …]`. See
+[`docs/DSH-INTEGRATION.md`](docs/DSH-INTEGRATION.md) and [`SECURITY.md`](SECURITY.md).
 
 You can also copy `integrations/dsh-skill/` to `$DSH_HOME/skills/dshlink/` so an agent knows how
 to drive the CLI.
@@ -108,12 +113,14 @@ to drive the CLI.
 ### One command does the wiring
 
 ```powershell
-node bin\dshlink.mjs install-dsh --profile web --write          # MCP entry + skill, preview first
-node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write
+node bin\dshlink.mjs harden --write                              # 0.5: token-only auth; prints admin + bridge tokens
+node bin\dshlink.mjs install-dsh --profile web --write --token <admin-token>   # MCP entry + skill + header token
+node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write --token <admin-token> --bridge-token <bridge-token>
 ```
 
 `install-dsh` edits the profile's `cordis.patch.yml` (timestamped backup first) — a restart of the
-DSH host is needed once for the bridge entry to load.
+DSH host is needed once for the bridge entry to load. Tokens are written into the patch, so MCP and
+the bridge keep working after `harden` turns loopback trust off.
 
 ## Wake a conversation automatically (bridge)
 
@@ -275,20 +282,22 @@ scheduled task (at logon, plus a periodic top-up) to survive reboots.
 | Item | Default | Notes |
 |---|---|---|
 | Bind address | `127.0.0.1` | Only the local machine; `--bind 0.0.0.0` for LAN direct |
-| Auth | outbound token + optional loopback trust | Inbound tokens stored as sha256; loopback is trusted by default |
+| Auth | token required (0.5) | Tokens stored as sha256; roles `admin` / `bridge` / `peer` / `device`, optional peer binding and expiry |
+| Loopback trust | off (0.5) | `auth.trustLocalhost: true` restores the old opt-out; only for clients that cannot send tokens |
 | File roots | explicit | Each root is read-only unless `:rw`; realpath-checked, symlinks cannot escape |
 | Deny list | `.env`, `*.key`, `.ssh`, `.credentials.yaml`, `*.pem` … | Overridable per node |
 | Uploads | off | `files.allowUpload: true` enables inbound `push` |
-| Limits | 32 MiB request, 1 MiB message, 60 s timeout | See `limits` |
+| Limits | 32 MiB request, 1 MiB message, 60 s timeout | Plus `limits.maxRequestsPerMinute` (default 1200/min per token or IP, 429 + Retry-After) |
 | Audit | on | `audit.jsonl` records file access and message delivery |
 | DSH view (0.3) | off | `dsh.enabled`; `dsh.exposeTranscripts` gates conversation bodies |
 | Capability channel (0.3) | off | `capabilities.enabled` + method allow-list; action methods are never allowed by default, per-peer overrides exist, every call is audited |
 | Directed targets (0.4) | bridge: on, any peer | The bridge's `targets.{enabled,peers,allow,deny}` policy decides which peer may address which local Session; set `enabled: false` or narrow `peers`/`allow` to lock it down |
 
-**Loopback trust + a tunnel that terminates on loopback means inbound tokens are not checked on
-that path.** If your machines are joined over an untrusted network, set
-`auth.trustLocalhost: false` on both ends and give local clients explicit tokens. See
-[`SECURITY.md`](SECURITY.md) for the full hardening checklist.
+**0.5 closed the loopback bypass.** A tunnel that terminates on loopback no longer turns into an
+unauthenticated admin path: `trustLocalhost` defaults to `false`, and the bridge control plane
+(`/api/v1/bridge/*`) accepts only the local bridge or a `bridge` token. Remote `admin` tokens
+cannot touch it. Tokens can be scoped by role, bound to a peer, and given an expiry; see
+[`SECURITY.md`](SECURITY.md) and [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 
 ## Repository layout
 
@@ -315,7 +324,7 @@ dsh-link/
 │   └── wan-lab/            # two-machine WAN test lab (WSL helper scripts)
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
-├── test/                   # 19 test files / 149 checks + CLI smoke script
+├── test/                   # 20 test files / 162 checks + CLI smoke script
 ├── docs/                   # architecture, design, protocol, DSH access, directed conversations, FRP, operations, troubleshooting
 └── examples/               # sanitised config samples
 ```
@@ -323,7 +332,7 @@ dsh-link/
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 149 checks (frp/MCP suites skip if absent), ~7 s
+node test/run.mjs                                                        # 162 checks (frp/MCP suites skip if absent), ~10 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
@@ -373,7 +382,7 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/FRP.md`](docs/FRP.md) | Public `frps` deployment, STCP provider/visitor, TLS, verification |
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom → cause → fix, plus a one-minute health check |
-| [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) | Security audit (0.4): trust boundaries, token model, loopback/FRP bypass risk, hardening checklist |
+| [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) | Security audit (0.4, with 0.5 fix status): trust boundaries, token roles, loopback/FRP bypass, hardening checklist |
 | [`docs/MOBILE-CONTROL-FEASIBILITY.md`](docs/MOBILE-CONTROL-FEASIBILITY.md) | Android control-app feasibility study (research; implementation decision pending) |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Why the pieces look the way they do |
 | [`SECURITY.md`](SECURITY.md) | Trust model and hardening checklist |

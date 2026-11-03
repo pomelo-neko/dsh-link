@@ -59,14 +59,18 @@ node bin\dshlink.mjs send --to alice-pc --body "收到" --thread msg_xxx
     serverName: dshlink
     transport: streamable-http
     url: http://127.0.0.1:8787/mcp
+    # 0.5：每个请求都要 token；install-dsh --token 会写入这一行
+    headers:
+      authorization: !!js '`Bearer ${process.env.DSHLINK_TOKEN}`'
 ```
 
 重启 DSH 后即出现原生工具：`mcp__dshlink__link_status`、`link_peers`、`link_send_message`、
 `link_inbox`、`link_read_message`、`link_reply`、`link_sync`、`link_flush`、
 `link_list_files`、`link_stat_file`、`link_pull_file`、`link_push_file`、`link_help`。
 
-默认信任本机回环地址，所以同机 MCP 不需要 token；如需显式 token，见
-[`docs/DSH-INTEGRATION.md`](docs/DSH-INTEGRATION.md)。
+0.5 起默认**不信任本机回环**，每个请求都要 token。先运行 `dshlink harden --write` 铸出
+`admin`（MCP/CLI 用）与 `bridge`（桥用）两个 token，再用 `install-dsh --token … [--bridge-token …]`
+写进 patch。见 [`docs/DSH-INTEGRATION.md`](docs/DSH-INTEGRATION.md) 与 [`SECURITY.md`](SECURITY.md)。
 
 也可以把 `integrations/dsh-skill/` 复制到 `$DSH_HOME/skills/dshlink/`，让 agent 学会用 CLI。
 
@@ -78,7 +82,8 @@ MCP 装好只解决了"agent 能用工具"，没解决"agent 不知道有消息"
 拉文件、`link_reply` 回复、标记已读。装配一条命令：
 
 ```powershell
-node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write
+node bin\dshlink.mjs harden --write     # 0.5：关闭回环信任，打印 admin / bridge 两个 token（只显示一次）
+node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write --token <admin-token> --bridge-token <bridge-token>
 # 然后重启一次 DSH host（新插件条目在启动时装载）；之后改配置即时生效
 ```
 
@@ -229,11 +234,12 @@ DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启�
 | 项 | 默认 | 说明 |
 |---|---|---|
 | 绑定地址 | `127.0.0.1` | 只监听本机；要 LAN 直连需 `--bind 0.0.0.0` |
-| 鉴权 | 出站 token + 可选信任回环 | 入站 token 只存 sha256；本机回环默认免 token |
+| 鉴权 | 必须带 token（0.5） | 入站 token 只存 sha256；角色 `admin` / `bridge` / `peer` / `device`，可绑定 peer、设置过期 |
+| 回环信任 | 关闭（0.5） | `auth.trustLocalhost: true` 才恢复旧的免 token 行为，仅给无法带 token 的本地客户端用 |
 | 文件根 | 显式配置 | 每个根可 `ro`/`rw`，路径经 realpath 校验，符号链接无法逃逸 |
 | 拒绝清单 | `.env`、`*.key`、`.ssh`、`.credentials.yaml` 等 | 可按需覆盖 |
 | 上传 | 关闭 | `files.allowUpload: true` 才接受写入 |
-| 体积/超时 | 32 MiB 请求、1 MiB 消息、60s 超时 | 见 `limits` |
+| 体积/超时 | 32 MiB 请求、1 MiB 消息、60s 超时 | 另有 `limits.maxRequestsPerMinute`（默认 1200/分钟，按 token 或 IP 计，超限 429 + Retry-After） |
 | 审计 | 开 | `audit.jsonl` 记录文件访问与消息投递 |
 | DSH 视图（0.3） | 关闭 | `dsh.enabled` 才开放工作区/对话读取；`dsh.exposeTranscripts` 单独控制对话正文 |
 | 能力通道（0.3） | 关闭 | `capabilities.enabled` + 方法白名单；**动作方法（新建/发消息/改名/归档）默认不放行**，可按 peer 覆盖；命令只走本机 loopback，远端一律由节点裁决；每次调用写审计 |
@@ -243,7 +249,10 @@ DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启�
 > 隐私、内部代码）。只在你信任这些对端时打开；动作能力更进一步——`sessions.prompt` 等于让对方驱动
 > 你机器上的 agent。开关与建议见 [`docs/DSH-ACCESS.md`](docs/DSH-ACCESS.md)。
 
-公网部署建议：frps 强制 TLS + token（见 `docs/FRP.md`），或给 dsh-link 前面加 HTTPS 反代。
+**0.5 堵上了回环绕过**：经 FRP/STCP 转发的连接不再因为源地址是 127.0.0.1 就免鉴权；
+`/api/v1/bridge/*` 控制面只认本机桥或 `bridge` token，远端 admin 也进不来。token 可按角色、
+绑定 peer、设置过期时间。公网部署建议：frps 强制 TLS + token（见 `docs/FRP.md`），或给 dsh-link
+前面加 HTTPS 反代；手机端优先走 WireGuard/Tailscale 等 VPN，而不是直接暴露 visitor 端口。
 
 ## 6. 目录结构
 
@@ -262,7 +271,7 @@ dsh-link/
 │   ├── reload.mjs          # 配置热重载（改 peer/token/根目录不用重启）
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
-├── test/                   # 149 项检查 / 19 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话）+ CLI 冒烟
+├── test/                   # 162 项检查 / 20 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话）+ CLI 冒烟
 ├── docs/                   # 架构、设计、协议、DSH 接入、FRP 部署、运维手册、排障手册
 └── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递）
 ```
@@ -270,7 +279,7 @@ dsh-link/
 ## 7. 验证
 
 ```powershell
-node test/run.mjs                     # 149 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、DSH 视图、doctor
+node test/run.mjs                     # 162 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、DSH 视图、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 

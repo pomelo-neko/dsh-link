@@ -16,9 +16,9 @@ an STCP `secretKey` or a real host name.
 are **off by default** (`dsh.enabled`, `capabilities.enabled`, `files.allowUpload`). Points worth
 noticing:
 
-- `auth.trustLocalhost: false` + an explicit token is the hardened setting. With the default
-  (`true`), anything that reaches the port from loopback — including a tunnel that terminates on
-  loopback — is already authenticated. See [`../SECURITY.md`](../SECURITY.md).
+- `auth.trustLocalhost` defaults to `false` since 0.5: every request needs a token, including
+  local MCP/CLI/bridge traffic. Run `dshlink harden --write` to mint the `admin` and `bridge`
+  tokens, then `install-dsh --token … --bridge-token …`. See [`../SECURITY.md`](../SECURITY.md).
 - `files.roots`: a `dir` root needs `path`; a `workspaces` root is virtual and takes the
   workspace id (or title) as its first path segment. Read-only unless `write: true`.
 - `dsh.excludeWorkspaces` matches a workspace id, title or normalised absolute path **exactly**

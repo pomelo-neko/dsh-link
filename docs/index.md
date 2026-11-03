@@ -14,6 +14,9 @@ Entry points, in the order most readers want them:
 | [`FRP.md`](FRP.md) | frps 部署、STCP provider/visitor、TLS、混用手工 frpc 的坑 |
 | [`WAN-VERIFICATION.md`](WAN-VERIFICATION.md) | 跨公网实测记录与复现步骤 |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | 症状 → 原因 → 处理，附一分钟体检清单 |
+| [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md) | 0.4 安全审计 + 0.5.0 修复状态：信任边界、token 角色、回环/FRP 绕过、残余风险 |
+| [`DIRECTED-SESSIONS.md`](DIRECTED-SESSIONS.md) | 0.4 定向会话：targetSession/originSession、绑定、桥策略、回退与线格式 |
+| [`MOBILE-CONTROL-FEASIBILITY.md`](MOBILE-CONTROL-FEASIBILITY.md) · [`mobile/API-SKETCH.md`](mobile/API-SKETCH.md) | 安卓控制端可行性、架构评分、同步协议与 API 草案（实现待定） |
 | [`../SECURITY.md`](../SECURITY.md) | 信任模型与加固清单 |
 | [`../AIGC-Notice.md`](../AIGC-Notice.md) | AIGC 声明：本仓库完全由 AI 生成与维护 |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 版本历史 |

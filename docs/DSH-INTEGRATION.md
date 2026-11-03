@@ -19,13 +19,21 @@ dsh-link 的 `POST /mcp` 就是这样一个端点。**每个 DSH 机器只需配
     serverName: dshlink          # 工具名会变成 mcp__dshlink__<tool>
     transport: streamable-http
     url: http://127.0.0.1:8787/mcp
-    # 默认信任本机回环，无需 header；如需显式 token：
-    # headers:
-    #   Authorization: !!js '`Bearer ${process.env.DSHLINK_TOKEN}`'
+    # 0.5 起默认不信任回环，每个请求都要 token。
+    # 让安装器写入：dshlink install-dsh --write --token <admin-token>
+    headers:
+      authorization: !!js '`Bearer ${process.env.DSHLINK_TOKEN}`'
     toolCallTimeoutMs: 120000
 ```
 
 改完配置后 DSH 会重连该 MCP 服务；`tools/list` 里立即出现 17 个工具（含 `link_dsh_*` 与 `link_call`）。
+
+> **0.5 认证**：`auth.trustLocalhost` 默认 `false`，MCP 请求必须带 token。先运行
+> `dshlink harden --write`（关闭回环信任并铸 `mcp-admin` / `bridge` 两个 token），再运行
+> `dshlink install-dsh --write --token <admin-token> [--bridge --bridge-token <bridge-token>]`，
+> 安装器会把 `headers.authorization`（MCP）和 `token`（bridge）写进 patch。token 角色：
+> MCP/CLI 用 `admin`；bridge 插件用 `bridge`；对端用 `peer`；手机只读用 `device`。
+> 详见 [`../SECURITY.md`](../SECURITY.md) 与 [`PROTOCOL.md`](PROTOCOL.md#roles-and-route-access-v05)。
 
 ### 工具清单（原生名 `mcp__dshlink__<name>`）
 
@@ -76,8 +84,10 @@ dshlink dsh enable [--actions m1,m2] [--write]         # 打开 DSH 视图（与
 ### 一键安装 / 卸载
 
 ```powershell
+node bin\dshlink.mjs harden --write                          # 0.5: 关 trustLocalhost，铸 admin/bridge token
 node bin\dshlink.mjs install-dsh --profile web                 # 预览（默认不写）
-node bin\dshlink.mjs install-dsh --profile web --write         # 写入 profile 的 cordis.patch.yml + 安装技能
+node bin\dshlink.mjs install-dsh --profile web --write --token <admin-token>   # 写入 patch + 技能 + MCP token
+node bin\dshlink.mjs install-dsh --profile web --write --token <admin-token> --bridge --bridge-workspace D:\dshlink-bridge --bridge-token <bridge-token>
 # 回滚：恢复备份并删掉技能目录
 Copy-Item 'D:\DSH\profiles\web\cordis.patch.yml.bak-<时间戳>' 'D:\DSH\profiles\web\cordis.patch.yml' -Force
 Remove-Item -Recurse -Force 'D:\DSH\skills\dshlink'
@@ -85,7 +95,7 @@ Remove-Item -Recurse -Force 'D:\DSH\skills\dshlink'
 
 安装器会：校验生成的 YAML 能被 DSH 自带的 `yaml` 解析、写入前自动备份、检测
 `@deepseek-ai/dsh-mcp-client` 是否可从该 profile 解析、并把 `integrations/dsh-skill` 复制到
-`$DSH_HOME/skills/dshlink`。重复执行是幂等的（只改 URL）。
+`$DSH_HOME/skills/dshlink`。重复执行是幂等的（URL 或 token 变化时更新对应条目）。
 
 ## 方式 2：技能 + CLI（agent 用 pwsh 调命令行）
 
@@ -113,9 +123,10 @@ Copy-Item -Recurse -Force .\integrations\dsh-skill "$env:DSH_HOME\skills\dshlink
 # 1) 装插件包（本地目录用 link:，改代码即时生效）
 dsh plugin --profile web add "link:D:\dsh-link\integrations\dsh-link-bridge"
 # 2) 写 patch 条目并激活（自动备份 profile patch + YAML 校验）
-node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write
+node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\dshlink-bridge" --write --token <admin-token> --bridge-token <bridge-token>
 # 3) 重启一次 host（新插件条目在启动时装载）
 dsh web
+# 0.5 注意：bridge 需要 role=bridge 的 token，否则 /api/v1/bridge/* 返回 403 bridge_forbidden
 ```
 
 也可以直接跑 `integrations/dsh-link-bridge/install-bridge.ps1 -Workspace D:\dshlink-bridge`（1+2 一步）。
@@ -178,7 +189,8 @@ targets:
 | 现象 | 处理 |
 |---|---|
 | DSH 里没有 `mcp__dshlink__*` 工具 | 确认 `dshlink serve` 在跑：`Invoke-RestMethod http://127.0.0.1:8787/healthz` |
-| 工具调用返回 401 | 关掉 `auth.trustLocalhost` 后必须配 header token（用 `dshlink token new` 生成） |
+| 工具调用返回 401 | 0.5 默认关闭 `trustLocalhost`，必须配 header token；用 `dshlink harden --write` + `dshlink install-dsh --token <admin-token>`，或 `dshlink token new --role admin` 后手动写入 |
+| bridge 报 403 `bridge_forbidden` | bridge 需要 `role: bridge` 的 token：`dshlink token new --role bridge`，把它写进桥配置 `token`（或 `install-dsh --bridge-token`） |
 | `link_send_message` 说 queued | 对端不可达：检查 `peers ping`、token、URL/FRP 隧道；恢复后 `link_flush` |
 | 拉文件 `forbidden` | 路径越出共享根，或命中拒绝清单（`.env`/`*.key`/`.ssh` …） |
 | 推文件 403 | 对端未开启 `files.allowUpload`，或目标根是只读 |

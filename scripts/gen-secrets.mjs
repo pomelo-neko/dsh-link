@@ -78,7 +78,7 @@ if (asJson) {
   }
   console.log('Reminders:');
   console.log('  - the STCP secretKey is the boundary of an STCP proxy — rotate it together with the token;');
-  console.log('  - with auth.trustLocalhost = true (default), a request that arrives through an frp tunnel');
-  console.log('    looks like it came from 127.0.0.1 and is accepted without a token (SECURITY.md);');
+  console.log('  - since 0.5 auth.trustLocalhost defaults to false: a request through an frp tunnel still');
+  console.log('    needs a token (in 0.4 and earlier loopback trust let it through; see SECURITY.md);');
   console.log('  - rotate both ends at the same time, and hand the new value over out of band.');
 }

@@ -30,9 +30,12 @@ async function ownHealth(url) {
   }
 }
 
-async function ownStatus(url) {
+async function ownStatus(url, token) {
   try {
-    const res = await fetch(`${url}/api/v1/status`, { signal: timeoutSignal(2500) });
+    const res = await fetch(`${url}/api/v1/status`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      signal: timeoutSignal(2500)
+    });
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true, body: await res.json() };
   } catch (err) {
@@ -101,7 +104,26 @@ export async function runDoctor({ cfg, store, roots, ops, token } = {}) {
   }
 
   const tokens = cfg.auth?.tokens ?? [];
-  add('tokens', tokens.length ? PASS : (cfg.auth?.trustLocalhost ? WARN : FAIL), `${tokens.length} inbound token(s)${cfg.auth?.trustLocalhost ? ', localhost trusted' : ''}`);
+  const legacy = tokens.filter((t) => !t.role).length;
+  const roles = tokens.reduce((acc, t) => { const role = t.role ?? 'admin'; acc[role] = (acc[role] ?? 0) + 1; return acc; }, {});
+  const roleText = Object.entries(roles).map(([role, count]) => `${role} ${count}`).join(', ');
+  add('tokens', tokens.length ? PASS : FAIL,
+    `${tokens.length} inbound token(s)${roleText ? ' (' + roleText + ')' : ''}${legacy ? `; ${legacy} legacy token(s) still have full admin control — rotate with dshlink token new --role ...` : ''}`);
+  // F1 from docs/SECURITY-AUDIT.md: trusting loopback means a loopback-forwarding tunnel
+  // (frp STCP, ssh -L, ...) turns a remote connection into an unauthenticated root call.
+  add('trust-localhost', cfg.auth?.trustLocalhost ? FAIL : PASS, cfg.auth?.trustLocalhost
+    ? 'ON — anything that reaches this port through a loopback forwarder (frp/STCP, ssh -L) can call the whole API without a token. Run: dshlink harden --write'
+    : 'off — every request needs a token, including from this machine');
+  add('rate-limit', Number(cfg.limits?.maxRequestsPerMinute ?? 0) > 0 ? PASS : WARN,
+    Number(cfg.limits?.maxRequestsPerMinute ?? 0) > 0
+      ? `${cfg.limits.maxRequestsPerMinute} request(s)/minute per token or IP`
+      : 'disabled (limits.maxRequestsPerMinute = 0) — a leaked token can hammer the node');
+  const loopbackBind = ['127.0.0.1', '::1', 'localhost'].includes(String(cfg.bind));
+  if (!loopbackBind && !cfg.tunnel?.enabled) {
+    add('bind-exposure', WARN, `listening on ${cfg.bind} without TLS and without a tunnel — LAN peers send tokens in cleartext; bind 127.0.0.1 + a tunnel/VPN, or put a TLS reverse proxy in front`);
+  } else {
+    add('bind-exposure', PASS, loopbackBind ? `bound to ${cfg.bind} (use a tunnel/VPN to reach it)` : `${cfg.bind} behind the configured tunnel`);
+  }
   add('upload', cfg.files?.allowUpload ? WARN : PASS, cfg.files?.allowUpload ? 'peers may write into writable roots' : 'disabled (peers cannot push files)');
 
   // DSH view + capability channel (0.3): both are off by default, so say what is exposed.
@@ -136,13 +158,15 @@ export async function runDoctor({ cfg, store, roots, ops, token } = {}) {
   if (health.ok) {
     add('http', PASS, `running at ${localUrl}`);
     const probe = await mcpProbe(localUrl, token);
-    add('mcp', probe.ok ? PASS : FAIL, probe.ok ? `initialize ok (protocol ${probe.protocolVersion}, instructions ${probe.instructions ? 'yes' : 'no'})` : probe.error);
+    add('mcp', probe.ok ? PASS : FAIL, probe.ok
+      ? `initialize ok (protocol ${probe.protocolVersion}, instructions ${probe.instructions ? 'yes' : 'no'})`
+      : probe.error + (probe.error === 'HTTP 401' ? ' — the MCP endpoint needs an admin token; reinstall with dshlink install-dsh --write --token <admin token>' : ''));
 
     // The running process may hold an older config than the file on disk (a long-standing
     // source of "the config looks right but sending says unknown peer" confusion).
-    const live = await ownStatus(localUrl);
+    const live = await ownStatus(localUrl, token);
     if (!live.ok) {
-      add('node:config', WARN, `running node did not answer ${localUrl}/api/v1/status (${live.error})`);
+      add('node:config', WARN, `running node did not answer ${localUrl}/api/v1/status (${live.error})${live.error === 'HTTP 401' && !token ? ' — pass --token <admin token>, or the node has trustLocalhost off' : ''}`);
     } else {
       const diskPeers = (cfg.peers ?? []).map((p) => p.name).sort();
       const livePeers = (live.body.peers ?? []).map((p) => p.name).sort();

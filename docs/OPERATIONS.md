@@ -121,11 +121,12 @@ Get-Item "$env:DSH_HOME\plugin-data\dsh-link-bridge\state.json" | Select LastWri
    轮换两端"——脚本内联 token 出现在对端可读的目录里就属于凭据外泄，不只是卫生问题；
 4. 轮换窗口内暂停跨机操作（`send`/`pull`/`push`）。
 
-> **已知边界：回环信任会让 token 免检。**
-> `auth.trustLocalhost: true`（默认）+ 经 frp STCP 进来的请求，其来源地址恒为 `127.0.0.1`，
-> `server.mjs` 的 `authorize()` 在 token 校验失败后会回落放行。也就是说，**在这种组合下
-> 入站 token 从未被检查，真正边界是 STCP 的 `secretKey` 与 frps**。要让 token 成为边界，
-> 两端都要切 `auth.trustLocalhost: false`，并给本机 MCP/脚本补 token。
+> **0.5 已修复回环信任绕过。**
+> 0.4 及以前，`auth.trustLocalhost: true`（旧默认）+ 经 frp STCP 进来的请求源地址恒为
+> `127.0.0.1`，`authorize()` 会在 token 校验失败后回落放行，入站 token 从未被检查。
+> 0.5 起 `trustLocalhost` **默认 `false`**，隧道来的请求也必须带 token；bridge 控制面还要求
+> 专用的 `role: bridge` token。旧配置若显式保留 `true`，`dshlink doctor` 会判为 FAIL。
+> 迁移用 `dshlink harden --write` + `install-dsh --token … --bridge-token …`。
 
 ## 6. 唤醒排障（bridge）
 

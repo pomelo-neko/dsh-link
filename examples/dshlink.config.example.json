@@ -13,8 +13,18 @@
       {
         "id": "tok_example0001",
         "label": "bob-pc",
+        "role": "peer",
+        "peer": "bob-pc",
         "hash": "REPLACE_WITH_SHA256_OF_THE_TOKEN_YOU_GAVE_BOB",
         "createdAt": "2026-01-01T00:00:00.000Z"
+      },
+      {
+        "id": "tok_example0002",
+        "label": "mcp-admin",
+        "role": "admin",
+        "hash": "REPLACE_WITH_SHA256_OF_THE_ADMIN_TOKEN",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "expiresAt": "2027-01-01T00:00:00.000Z"
       }
     ]
   },
@@ -23,7 +33,8 @@
     "maxMessageBytes": 1048576,
     "maxInlineAttachmentBytes": 524288,
     "maxListEntries": 2000,
-    "requestTimeoutMs": 60000
+    "requestTimeoutMs": 60000,
+    "maxRequestsPerMinute": 1200
   },
   "files": {
     "allowUpload": false,

@@ -25,10 +25,11 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
   init        初始化本机节点（写配置 + 生成入站 token）     --name --port --bind --root --data-dir --force --allow-upload
   serve       启动本机节点 HTTP API + MCP 端点                --config --bind --port --auto-sync <秒> --no-reload
   status      查看本机节点、共享目录、peers                    --probe --json
-  invite      生成配对码给对端（含 token / STCP 信息）       --url --ttl <分钟> --no-token --json
+  invite      生成配对码给对端（含 token / STCP 信息）       --url --ttl <分钟> --no-token --role --peer --json
   peers       管理对端: list | add | accept | rm | ping       accept --invite <码> [--reply] [--their-token T]
-  doctor      本机自检：配置/目录/端口/MCP/对端/隧道            --json
-  token       管理入站 token: list | new | rm                 list|new --label|rm --id
+  doctor      本机自检：配置/目录/端口/MCP/对端/隧道            --json [--token T]
+  harden      安全加固：关 trustLocalhost、铸 MCP/bridge 专用 token  [--write] [--json]
+  token       管理入站 token: list | new --label --role --peer --ttl-days | rm --id
   send        给对端发消息（离线排队，之后 flush/sync）       --to --subject --body|--body-file --attach --thread
                                                               --target-session <对端会话> --origin-session <本机会话>
   bind        查看/登记 thread 与本机 DSH 会话的绑定            --thread T [--session S] [--peer P]
@@ -52,6 +53,7 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
               dsh bridge                     本机 bridge 心跳与命令队列
               dsh enable [--actions m1,m2]   打开 DSH 视图（可选打开动作能力）
   install-dsh 把 MCP 配置和技能装进 DSH_HOME                   --profile web --url --write（默认只预览）
+              token 认证: --token <admin token> [--bridge-token <bridge token>]
               自动唤醒桥（收到消息自动开对话）:              --bridge --bridge-workspace <目录> [--bridge-session <id>]
                                                             [--bridge-url http://127.0.0.1:8787] [--bridge-poll 15]
   peers-share 打印本机给别人用的 STCP 信息（proxyName + secretKey）
@@ -366,13 +368,23 @@ async function cmdToken(args) {
   const { cfg } = await loadCtx(args);
   const asJson = flagBool(args.json);
   if (sub === 'list') {
-    return out(cfg.auth.tokens.map((t) => ({ id: t.id, label: t.label, createdAt: t.createdAt })), asJson,
-      table(cfg.auth.tokens, [{ key: 'id', header: 'ID' }, { key: 'label', header: 'LABEL' }, { key: 'createdAt', header: 'CREATED' }]));
+    const rows = cfg.auth.tokens.map((t) => ({
+      id: t.id, label: t.label, role: t.role ?? 'admin', peer: t.peer ?? null, expiresAt: t.expiresAt ?? null, createdAt: t.createdAt
+    }));
+    return out(rows, asJson,
+      table(rows, [{ key: 'id', header: 'ID' }, { key: 'label', header: 'LABEL' }, { key: 'role', header: 'ROLE' },
+        { key: 'peer', header: 'PEER' }, { key: 'expiresAt', header: 'EXPIRES' }, { key: 'createdAt', header: 'CREATED' }]));
   }
   if (sub === 'new') {
-    const created = createInboundToken(cfg, flagString(args.label) ?? 'peer');
+    const role = flagString(args.role) ?? (flagString(args.peer) ? 'peer' : undefined);
+    const peer = flagString(args.peer);
+    const days = Number(flagString(args['ttl-days']) ?? 0);
+    const expiresAt = days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : undefined;
+    const label = flagString(args.label) ?? (role === 'peer' && peer ? `peer:${peer}` : `${role ?? 'admin'}:${cfg.name}`);
+    const created = createInboundToken(cfg, label, { role, peer, expiresAt });
     await saveConfig(cfg);
-    return out(created, asJson, `token ${created.id} created (label ${created.label}):\n${created.token}\nGive this to the peer; it is stored hashed and will not be shown again.`);
+    const scope = `role ${created.role ?? 'admin'}${created.peer ? `, peer ${created.peer}` : ''}${created.expiresAt ? `, expires ${created.expiresAt}` : ''}`;
+    return out(created, asJson, `token ${created.id} created (label ${created.label}; ${scope}):\n${created.token}\nGive this to the peer; it is stored hashed and will not be shown again.`);
   }
   if (sub === 'rm') {
     const id = flagString(args.id) ?? args._[1];
@@ -678,7 +690,9 @@ async function cmdInvite(args) {
     ttlMinutes: Number(flagString(args.ttl) ?? 0),
     url: flagString(args.url),
     label: flagString(args.label),
-    note: flagString(args.note)
+    note: flagString(args.note),
+    role: flagString(args.role),
+    peer: flagString(args.peer)
   });
   if (withToken) await saveConfig(cfg);
   const human = [
@@ -699,7 +713,7 @@ async function cmdInvite(args) {
 
 async function cmdDoctor(args) {
   const { cfg, store, roots, ops } = await loadCtx(args);
-  const report = await runDoctor({ cfg, store, roots, ops });
+  const report = await runDoctor({ cfg, store, roots, ops, token: flagString(args.token) ?? process.env.DSHLINK_TOKEN });
   process.exitCode = report.ok ? 0 : 1;
   const human = [
     `dsh-link doctor — ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail`,
@@ -710,6 +724,45 @@ async function cmdDoctor(args) {
   return out(report, flagBool(args.json), human);
 }
 
+async function cmdHarden(args) {
+  const asJson = flagBool(args.json);
+  const write = flagBool(args.write);
+  const { cfg } = await loadCtx(args);
+  const actions = [];
+  const warnings = [];
+  if (cfg.auth.trustLocalhost) {
+    actions.push({ action: 'trustLocalhost', from: true, to: false, why: 'loopback-forwarded tunnels (frp/STCP) can otherwise call the whole API without a token' });
+    if (write) cfg.auth.trustLocalhost = false;
+  }
+  const hasRole = (role, peer = null) => (cfg.auth.tokens ?? []).some((t) => t.role === role && (peer === null || t.peer === peer));
+  let adminToken = null;
+  let bridgeToken = null;
+  if (!hasRole('admin')) {
+    actions.push({ action: 'mint-token', role: 'admin', label: 'mcp-admin', why: 'the local MCP client and CLI need a credential when trustLocalhost is off' });
+    if (write) adminToken = createInboundToken(cfg, 'mcp-admin', { role: 'admin' }).token;
+  }
+  if (!hasRole('bridge')) {
+    actions.push({ action: 'mint-token', role: 'bridge', label: 'bridge', why: 'the auto-wake bridge needs its own bridge token for the loopback control plane' });
+    if (write) bridgeToken = createInboundToken(cfg, 'bridge', { role: 'bridge' }).token;
+  }
+  for (const peer of cfg.peers ?? []) {
+    if (!hasRole('peer', peer.name)) warnings.push('peer ' + JSON.stringify(peer.name) + ' has no dedicated inbound peer token; mint one on THIS node and give it to that node: dshlink token new --role peer --peer ' + peer.name);
+  }
+  if ((cfg.auth.tokens ?? []).some((t) => !t.role)) warnings.push('some tokens predate roles (treated as admin); rotate them: dshlink token new --role admin, then dshlink token rm --id <old>');
+  const applied = write && actions.length > 0;
+  if (applied) await saveConfig(cfg);
+  const installCmd = 'dshlink install-dsh --write --token ' + (adminToken ?? '<admin-token>') + (bridgeToken ? ' --bridge-token ' + bridgeToken : ' --bridge-token <bridge-token>');
+  const human = [
+    'dsh-link harden — ' + (write ? (applied ? 'applied' : 'nothing to change') : 'preview (add --write to apply)'),
+    actions.length ? table(actions, [{ key: 'action', header: 'ACTION' }, { key: 'role', header: 'ROLE' }, { key: 'label', header: 'LABEL' }, { key: 'why', header: 'WHY' }]) : 'nothing to change',
+    adminToken ? '\nadmin token (MCP/CLI, shown once): ' + adminToken : null,
+    bridgeToken ? 'bridge token (auto-wake bridge, shown once): ' + bridgeToken : null,
+    actions.length ? '\nnext: ' + installCmd : null,
+    actions.length && !write ? 'then restart the node and the DSH host, and run: dshlink doctor --token <admin-token>' : null,
+    warnings.length ? '\nwarnings:\n' + warnings.map((w) => '- ' + w).join('\n') : null
+  ].filter((line) => line !== null).join('\n');
+  return out({ trustedLocalhost: cfg.auth.trustLocalhost, actions, warnings, adminToken, bridgeToken, written: applied }, asJson, human);
+}
 async function cmdInstallDsh(args) {
   const asJson = flagBool(args.json);
   const write = flagBool(args.write);
@@ -726,7 +779,9 @@ async function cmdInstallDsh(args) {
     bridgeSessionId: flagString(args['bridge-session']) ?? '',
     bridgeNodeUrl: flagString(args['bridge-url']) ?? 'http://127.0.0.1:8787',
     bridgePollSeconds: Number(flagString(args['bridge-poll']) ?? 15),
-    bridgeCooldownSeconds: Number(flagString(args['bridge-cooldown']) ?? 30)
+    bridgeCooldownSeconds: Number(flagString(args['bridge-cooldown']) ?? 30),
+    token: flagString(args.token) ?? '',
+    bridgeToken: flagString(args['bridge-token']) ?? ''
   });
   const result = await applyDshInstall(plan, { dryRun: !write });
   const human = [
@@ -895,7 +950,7 @@ const COMMANDS = {
   init: cmdInit, serve: cmdServe, status: cmdStatus, peers: cmdPeers, token: cmdToken,
   send: cmdSend, bind: cmdBind, inbox: cmdInbox, show: cmdShow, sync: cmdSync, flush: cmdFlush, outbox: cmdOutbox,
   ls: cmdLs, pull: cmdPull, push: cmdPush, audit: cmdAudit, tunnel: cmdTunnel,
-  invite: cmdInvite, doctor: cmdDoctor, 'install-dsh': cmdInstallDsh, dsh: cmdDsh,
+  invite: cmdInvite, doctor: cmdDoctor, harden: cmdHarden, 'install-dsh': cmdInstallDsh, dsh: cmdDsh,
   help: async (args) => { out({}, flagBool(args.json), HELP); }
 };
 

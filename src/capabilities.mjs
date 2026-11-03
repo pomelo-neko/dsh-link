@@ -266,7 +266,10 @@ export function createCommandQueue({ dir, cfg = {}, logger } = {}) {
         origin: {
           peer: peer || null,
           ip: origin?.ip ? String(origin.ip) : null,
-          label: origin?.label ? String(origin.label) : null
+          label: origin?.label ? String(origin.label) : null,
+          // v0.5.0: lets the HTTP layer answer "is this command yours?" without trusting labels.
+          role: origin?.role ? String(origin.role) : null,
+          tokenId: origin?.tokenId ? String(origin.tokenId) : null
         },
         createdAt: nowIso(),
         status: 'pending',

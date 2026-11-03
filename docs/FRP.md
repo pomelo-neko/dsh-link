@@ -94,10 +94,12 @@ bindPort = 19100
 STCP = Secret TCP：服务端口**不在公网 frps 上开放**，只有持有 `secretKey` 的 visitor 能连。
 这也决定了它的边界和坑：
 
-1. **真正的边界是 `secretKey`，不是 dsh-link 的 token。** 经隧道到达本机节点的请求，源地址
-   恒为 `127.0.0.1`；在 `auth.trustLocalhost: true`（默认）下，`server.mjs` 会在 token 校验
-   失败后回落放行——也就是说**这条路径上入站 token 从未被检查**。要让 token 成为边界，两端
-   都要切 `auth.trustLocalhost: false`（并给本机 MCP/脚本补 token）。见 [`../SECURITY.md`](../SECURITY.md)。
+1. **0.5 起 token 才是边界，`secretKey` 只是第一道门。** 经隧道到达本机节点的请求源地址
+   恒为 `127.0.0.1`；0.4 及以前的 `auth.trustLocalhost: true`（旧默认）会让它在 token 校验
+   失败后回落放行——这条路径上入站 token 从未被检查。**0.5 起 `trustLocalhost` 默认 `false`**，
+   经隧道来的请求同样必须带 token（`dshlink harden --write` 会铸好 MCP/bridge token）。
+   因此现在需要同时保护 `secretKey` 与 token；仍建议两端都保持 `trustLocalhost: false`。
+   见 [`../SECURITY.md`](../SECURITY.md)。
 2. **`secretKey` 与 `user`/`allowUsers` 必须成对匹配**：provider 的 `secretKey` 与 visitor 的
    必须一字不差；同一条隧道上所有 frpc 的 `user` 要一致，且 `allowUsers` 要包含对方（写
    `["team"]` 这类具体值，不要用 `"*"`）。

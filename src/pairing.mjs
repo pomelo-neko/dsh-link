@@ -51,7 +51,7 @@ export function decodeInvite(code) {
  * Build an invite string for another machine.
  * Mutates cfg when a token is minted — persist the config afterwards.
  */
-export function buildInvite(cfg, { withToken = true, ttlMinutes = 0, url, label, note } = {}) {
+export function buildInvite(cfg, { withToken = true, role, peer, ttlMinutes = 0, url, label, note } = {}) {
   const urls = [];
   const push = (value) => {
     if (!value) return;
@@ -64,7 +64,7 @@ export function buildInvite(cfg, { withToken = true, ttlMinutes = 0, url, label,
   let token = null;
   let tokenId = null;
   if (withToken) {
-    const created = createInboundToken(cfg, label ?? `invite:${cfg.name}`);
+    const created = createInboundToken(cfg, label ?? `invite:${cfg.name}`, { role, peer });
     token = created.token;
     tokenId = created.id;
   }
@@ -153,8 +153,8 @@ export function defaultDshHome() {
   return process.env.DSH_HOME ?? path.join(process.env.HOME ?? process.env.USERPROFILE ?? '.', '.dsh');
 }
 
-function mcpEntry({ url, serverName }) {
-  return [
+function mcpEntry({ url, serverName, token }) {
+  const lines = [
     '- insert:',
     '    - id: mcp-dshlink',
     "      name: '@deepseek-ai/dsh-mcp-client'",
@@ -163,7 +163,13 @@ function mcpEntry({ url, serverName }) {
     '        transport: streamable-http',
     `        url: ${url}`,
     '        toolCallTimeoutMs: 120000'
-  ].join('\n');
+  ];
+  if (token) {
+    // The MCP client passes these headers on every request. Required when the node has
+    // auth.trustLocalhost=false (the default since 0.5.0); the token is an admin token.
+    lines.push('        headers:', '          authorization: ' + JSON.stringify('Bearer ' + String(token)));
+  }
+  return lines.join('\n');
 }
 
 /** Quote a filesystem path as a YAML double-quoted scalar (backslashes are escapes there). */
@@ -172,40 +178,48 @@ function yamlPath(value) {
 }
 
 /** One "- insert:" item for the auto-wake bridge plugin (see integrations/dsh-link-bridge). */
-function bridgeItem({ workspacePath, nodeUrl, sessionId, pollSeconds, cooldownSeconds }) {
-  return [
+function bridgeItem({ workspacePath, nodeUrl, sessionId, pollSeconds, cooldownSeconds, token }) {
+  const lines = [
     '    - id: dsh-link-bridge',
     '      name: dsh-link-bridge',
     '      config:',
     '        enabled: true',
-    '        nodeUrl: ' + nodeUrl,
+    '        nodeUrl: ' + nodeUrl
+  ];
+  if (token) lines.push('        token: ' + JSON.stringify(String(token)));
+  lines.push(
     '        workspacePath: ' + yamlPath(workspacePath),
     '        sessionId: ' + yamlPath(sessionId || ''),
     '        pollSeconds: ' + Number(pollSeconds),
     '        cooldownSeconds: ' + Number(cooldownSeconds)
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 function bridgeBlock(item) {
   return '- insert:\n' + item;
 }
 
-export async function planDshInstall({ dshHome = defaultDshHome(), profile = 'web', url = 'http://127.0.0.1:8787/mcp', serverName = 'dshlink', includeSkill = true, projectDir, bridge = false, bridgeWorkspace, bridgeSessionId = '', bridgeNodeUrl = 'http://127.0.0.1:8787', bridgePollSeconds = 15, bridgeCooldownSeconds = 30 } = {}) {
+export async function planDshInstall({ dshHome = defaultDshHome(), profile = 'web', url = 'http://127.0.0.1:8787/mcp', token = '', serverName = 'dshlink', includeSkill = true, projectDir, bridge = false, bridgeWorkspace, bridgeSessionId = '', bridgeNodeUrl = 'http://127.0.0.1:8787', bridgePollSeconds = 15, bridgeCooldownSeconds = 30, bridgeToken = '' } = {}) {
   const profileDir = path.join(dshHome, 'profiles', profile);
   const patchPath = path.join(profileDir, 'cordis.patch.yml');
   const skillSrc = path.join(projectDir ?? path.resolve(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'integrations', 'dsh-skill');
   const skillDest = path.join(dshHome, 'skills', 'dshlink');
   const existing = await fs.readFile(patchPath, 'utf8').catch(() => null);
-  const entry = mcpEntry({ url, serverName });
+  const entry = mcpEntry({ url, serverName, token });
+  const managedMcp = / {4}- id:\s*mcp-dshlink\n(?: {6}.*\n?)*/;
   const already = !!existing && /id:\s*mcp-dshlink\b/.test(existing);
   const urlMatches = !!existing && new RegExp(`url:\\s*${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(existing);
+  const tokenMatches = !token || (!!existing && existing.includes(JSON.stringify('Bearer ' + String(token))));
   let plan;
   if (existing === null) {
     plan = { mode: 'create', content: `# created by dsh-link ${DSHLINK_VERSION}\n${entry}\n` };
-  } else if (already && urlMatches) {
+  } else if (already && urlMatches && tokenMatches) {
     plan = { mode: 'unchanged', content: existing };
   } else if (already) {
-    plan = { mode: 'update-url', content: existing.replace(/(id:\s*mcp-dshlink[\s\S]*?url:\s*)(\S+)/, `$1${url}`) };
+    // Replace the whole managed MCP item so url + auth header are always consistent.
+    const replaced = existing.replace(managedMcp, () => entry + '\n');
+    plan = { mode: urlMatches ? 'update-token' : 'update-url', content: replaced === existing ? existing : replaced };
   } else if (/^\s*\[\s*\]\s*$/m.test(existing)) {
     plan = { mode: 'replace-empty', content: existing.replace(/^\s*\[\s*\]\s*$/m, entry) };
   } else {
@@ -219,7 +233,8 @@ export async function planDshInstall({ dshHome = defaultDshHome(), profile = 'we
       nodeUrl: bridgeNodeUrl,
       sessionId: bridgeSessionId,
       pollSeconds: bridgePollSeconds,
-      cooldownSeconds: bridgeCooldownSeconds
+      cooldownSeconds: bridgeCooldownSeconds,
+      token: bridgeToken
     });
     if (/id:\s*dsh-link-bridge\b/.test(plan.content)) {
       // Replace the whole managed item: its id line plus every indented field line.
@@ -250,7 +265,7 @@ export async function planDshInstall({ dshHome = defaultDshHome(), profile = 'we
     patchExists: existing !== null,
     patchMode: plan.mode,
     patchContent: plan.content,
-    mcp: { id: 'mcp-dshlink', name: '@deepseek-ai/dsh-mcp-client', url, serverName },
+    mcp: { id: 'mcp-dshlink', name: '@deepseek-ai/dsh-mcp-client', url, serverName, tokenConfigured: !!token },
     bridge: bridge
       ? {
         id: 'dsh-link-bridge',
@@ -259,7 +274,8 @@ export async function planDshInstall({ dshHome = defaultDshHome(), profile = 'we
         workspacePath: bridgeWorkspace,
         nodeUrl: bridgeNodeUrl,
         sessionId: bridgeSessionId || null,
-        pollSeconds: bridgePollSeconds
+        pollSeconds: bridgePollSeconds,
+        tokenConfigured: !!bridgeToken
       }
       : null,
     skill: { src: skillSrc, dest: skillDest, action: skillAction, include: includeSkill },

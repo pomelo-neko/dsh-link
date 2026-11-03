@@ -653,10 +653,10 @@ data: {"code":"dsh_unavailable","message":"..."}
 |---|---|---|
 | A 阶段（零服务端改动） | 8–11 人日 | **7–10 人日**：增量改用 0.4 的 `sinceSeq`，不再需要 offset+哈希指纹的兜底逻辑 |
 | B 阶段（节点增强） | 13–19 人日 | **12–17 人日**：`transcript sinceSeq` 已完成；剩余 SSE/长轮询、设备 token/scopes、多 peer 过滤 |
-| 安全前置（新增） | — | **+1–2 人日**：bridge 专用 token 角色 + `trustLocalhost:false` 迁移（手机接入前必须） |
+| 安全前置（新增） | — | **已完成（0.5.0）**：bridge 专用 token、角色/peer/过期、`trustLocalhost:false` 默认、限速与 `dshlink harden`；手机接入前只剩“给手机发 device token”一步 |
 | 插话发送 | 未列 | **0 人日**：0.4 已实现，App 只做“插话/排队”开关与 mode 参数 |
 
-里程碑顺序建议：**P0 安全前置（bridge token）→ A 阶段只读+导航 → A 阶段发送（steer/queue）→ B 阶段实时增量 → 多设备/通知**。
+里程碑顺序建议：**P0 安全前置 ✅（0.5.0 已完成）→ A 阶段只读+导航 → A 阶段发送（steer/queue）→ B 阶段实时增量 → 多设备/通知**。
 
 ### 14.5 安全审计结论摘要
 
@@ -666,7 +666,11 @@ data: {"code":"dsh_unavailable","message":"..."}
 2. **F2（中）**：一个 token 就是整节点权限（全部消息、files 含 allws 所有工作区、DSH transcript、可开启的能力通道）。手机 token 必须按最小权限发放，且 App 侧存 Keystore。
 3. **F9（信息/中）**：远端消息正文会成为本机会话的 prompt（0.4 定向投递可直达真实会话），提示注入是本设计固有面；手机发送侧应二次确认，接收侧用 targets 收紧。
 
-**结论**：移动端功能可行，但**当前鉴权边界不适合把端口直接给手机**；建议先做 P0（bridge 专用 token / 本地 IPC + `trustLocalhost:false`），再开 App 实现。如果用户接受“手机 = 节点 root”的信任模型（纯自用、设备不外借、STCP secretKey 不外泄），也可以先做 A 阶段验证价值，但必须在文档里写清风险。
+**结论（已随 0.5.0 更新）**：移动端功能可行，且**P0 安全前置已在 0.5.0 落地**——`trustLocalhost` 默认关闭，
+`/api/v1/bridge/*` 只认本机桥或 bridge token，token 有角色/peer 绑定/过期，另有 1200 req/min 的每 token 限速。
+手机接入时使用 `role: device` 的独立 token（只读 DSH 视图 + 受 capabilities 白名单控制的能力调用），
+节点不再因为“源地址是 127.0.0.1”而裸奔。仍建议手机走 WireGuard/Tailscale，而不是把 STCP visitor 端口
+直接暴露给手机；残余边界见 §14.8。
 
 ### 14.6 待确认问题（新增）
 
@@ -677,13 +681,37 @@ data: {"code":"dsh_unavailable","message":"..."}
 | D11 | 是否需要按项目/工作区限制手机可见范围？ | 需要则先做 per-token scopes/exclude，而不是仅靠全局 excludeWorkspaces |
 | D12 | 手机“回复”默认插话（steer）还是排队（queue）？ | 影响 App 交互与误打断风险；建议默认 steer、批量 queue |
 | D13 | 是否接受无后台通知（只有打开 App 才同步）？ | 接受则 A 阶段足够；不接受则要做 B 阶段 SSE + Android 前台服务/推送 |
-| D14 | 先做安全前置（P0）还是先做 A 阶段 MVP？ | 建议 P0 后再让手机连入；至少先在自用可信网络内验证 |
+| D14 | ~~先做安全前置（P0）还是先做 A 阶段 MVP？~~ **已解决** | P0 已由 0.5.0 完成；用户已决定“先修鉴权，再做手机端”，下一步直接进 A 阶段 |
 
 ### 14.7 本节涉及的文件与端点
 
 - 0.4 代码：`src/dshview.mjs`（transcript sinceSeq/latestSeq）、`src/ops.mjs`（dshTranscript）、`src/server.mjs`（transcript 路由）、`src/mcp.mjs`（link_dsh_transcript sinceSeq）、`bin/dshlink.mjs`（`--since-seq`）、`integrations/dsh-link-bridge/lib/index.js`（promptMode）、`integrations/dsh-link-bridge/lib/dshops.js`（sessions.prompt mode）。
 - 文档：`docs/PROTOCOL.md`（transcript 游标）、`docs/DIRECTED-SESSIONS.md`（Queue vs steer）、`docs/SECURITY-AUDIT.md`（F1-F10）。
 - 端点：`GET /api/v1/dsh/sessions/{id}/transcript?sinceSeq=&limit=&tail=`、`POST /api/v1/dsh/call`（sessions.prompt，params.mode）。
+
+### 14.8 0.5.0 已实施的安全前置（2026-11-03）
+
+> 本节取代 §2.2、§9 中「trustLocalhost 默认开启/免 token」的历史结论；§2/§9 保留为审计时的现场记录。
+
+`docs/SECURITY-AUDIT.md` 的 P0 清单与 0.5.0 的对应关系：
+
+| P0 项（审计原清单） | 0.5.0 状态 | 对手机方案的含义 |
+|---|---|---|
+| `auth.trustLocalhost` 默认关闭 | ✅ `defaultConfig()`/`normalizeConfig` 默认 `false`，只有显式 `true` 才恢复旧行为 | 手机无论经 STCP、FRP 还是反代到达，都必须带 token |
+| bridge 专用 token | ✅ `role: bridge`；`/api/v1/bridge/*` 仅本机回环或 bridge token，远端 admin 也 403 `bridge_forbidden` | 桥与手机 token 分离；桥 token 泄漏不再等于全权限 |
+| 每设备独立、可轮换 token | ✅ token 增 `role` / `peer` / `expiresAt`；`dshlink token new --role device --ttl-days N`、`token rm` 轮换 | 手机用 `role: device`，丢失即删 token，无需改节点配置 |
+| 手机网络优先 VPN | ⏳ 部署建议 | 见 14.2：STCP 也能用，但建议 WireGuard/Tailscale 承担“成员资格”，token 作第二道门 |
+| capabilities 保持最小集 | ⏳ 配置建议 | 手机若要“发送”，需显式把 `sessions.prompt` 加进 `capabilities.methods`，并按 peer 收紧 |
+
+0.5.0 同时带来的抗攻击面：每 token/IP 1200 req/min 滑动窗口（超限 429 + `Retry-After`）、
+peer token 强制 `from` 身份与收/发箱过滤、跨 peer relay 与 `/dsh/call` 转发仅 admin、
+命令结果按发起 token 隔离、`dshlink doctor` 新增 trust-localhost / rate-limit / bind-exposure 检查。
+
+手机侧仍需注意的残余风险：
+1. 节点仍无 TLS（`http.createServer`）——VPN 或 HTTPS 反代负责传输加密；
+2. `device` token 目前是“节点级只读”而非“按工作区只读”；要限制可见范围仍靠 `dsh.excludeWorkspaces` 与
+   `capabilities.methods`（per-token scopes 尚未实现，见审计 F2 的“部分修复”）；
+3. 无 SSE/WebSocket，A 阶段仍是按需轮询；实时推流属 B 阶段。
 
 ---
 

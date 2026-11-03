@@ -1,14 +1,55 @@
-# dsh-link 安全审计（0.4.0 工作树）
+# dsh-link 安全审计（0.4.0 审计 + 0.5.0 修复状态）
 
 - 审计对象：D:/dsh-link 工作树（0.4.0，未提交；HEAD 53b692f + directed conversations / steer / sinceSeq 改动）
 - 审计日期：2026-11-03
 - 审计范围：节点 HTTP 服务、鉴权与 token 模型、消息与 relay、文件根、DSH 只读视图、能力通道、bridge 回环接口、部署与传输拓扑
 - 方法：源码静态审计 + 本机运行实例只读探测 + 实际配置（脱敏）+ FRP 配置核对。未做破坏性测试、未尝试登录他人设备。
-- 结论先行：**dsh-link 的安全边界是「能连上节点端口的人 = 可信成员」，而不是 token。当前部署（trustLocalhost=true + FRP 回环转发）下，任何能到达节点端口的人都会自动获得完整节点权限；接入手机前必须先决定是否接受这一边界。**
+- 结论先行：**dsh-link 的安全边界是「能连上节点端口的人 = 可信成员」，而不是 token。审计时的部署（trustLocalhost=true + FRP 回环转发）下，任何能到达节点端口的人都会自动获得完整节点权限；接入手机前必须先决定是否接受这一边界。** 0.5.0 已把默认边界改为「每个请求都需要 token」，并给 bridge 独立角色，见下方 §0.5。
 
 ## 0. 一句话结论
 
 在单机、单用户、对端只有自己另一台电脑的场景，当前风险可接受；一旦把端口开放给手机、更多 DSH 或任何不受完全信任的设备，**F1（trustLocalhost + 回环转发免鉴权）会让 token、transcript 只读等所有「权限控制」失效**，必须先修。其余风险（F2-F9）多为「token 即完整权限」的派生问题，按最小暴露面收敛即可。
+
+## 0.5. 0.5.0 修复状态（2026-11-03）
+
+0.5.0 针对本报告的 P0/P1 项做了实现，F1/F2/F3/F5/F8 已修复或有实质性缓解；F4/F6/F7/F9/F10 仍有残余风险，需要按部署方式收敛。
+
+| 发现 | 0.5.0 状态 | 说明 |
+|---|---|---|
+| F1 免 token 全权限 | **已修复（默认）** | `auth.trustLocalhost` 默认 `false`，本机 MCP/CLI/bridge 也必须带 token；`/api/v1/bridge/*` 只接受本机进程或 `role: bridge` token，远端 admin token 返回 `403 bridge_forbidden`。显式把 `trustLocalhost` 设为 `true` 的旧配置仍保留原行为，`dshlink doctor` 会把它判为 FAIL。 |
+| F2 单 token = 整节点 | **部分修复** | token 有 `role`（admin/bridge/peer/device）、可绑定 peer、可设 `expiresAt`；路由级 role 矩阵把 peer/device/bridge 的权限分开。仍没有 per-token 文件/工作区 scope，device 仍是「DSH 只读全可见」；手机 token 泄露仍等于该节点的 DSH 只读 + 受 `capabilities.methods` 限制的动作。 |
+| F3 身份自述 + relay | **已修复（绑定 peer 时）** | 绑定 peer 的 token 不能伪造 `from.name`（`identity_mismatch`），relay 只允许 admin（`relay_not_allowed`），inbox/outbox 按其身份过滤。未绑定 peer 的旧 token 仍按 admin 处理——应轮换。 |
+| F4 能力通道动作 | **缓解** | 路由 role 矩阵与 `capabilities.methods` 双层控制；手机应只给 `device` 或最小 methods，动作方法默认仍关闭。 |
+| F5 消息不按接收者过滤 | **已修复（绑定 peer 时）** | `GET /messages` 按绑定的 peer 过滤 `from`，`/messages/:id` 读他人消息返回 `403 not_your_message`，read 端点同样逐条校验；`/outbox` 只返回发给该 peer 的消息。 |
+| F6 本地进程伪造 bridge | **缓解** | bridge 控制面需要 `role: bridge` token（或本机 `trustLocalhost`）；本机文件权限仍是信任边界，命令结果仍无签名。 |
+| F7 凭据明文落盘 | **未变** | 出站 `peers[].token`、frp secretKey/证书、DSH profile 里的 bridge/MCP token 仍是明文；收紧 ACL、不要让数据目录进共享根、备份加密。 |
+| F8 DoS | **已修复（基础）** | `limits.maxRequestsPerMinute` 默认 1200（0=关），按 token id 或 IP 的 60 s 滑动窗口，超限 `429` + `Retry-After`；大 body/大文件仍受既有 `limits` 约束，公网仍建议反代限速。 |
+| F9 远端消息 prompt 注入 | **设计如此，未消除** | 0.4 的 `targets.peers/allow/deny` 可收紧可达会话；桥 prompt 明确把远端正文当数据，但仍建议只对可信 peer 开定向投喂，bridge 使用低权限 preset。 |
+| F10 元数据/可见范围 | **未变** | `bindings.json` 仍明文、`excludeWorkspaces` 仍是全局、不能按 peer 隔离可见工作区。 |
+
+### 0.5.0 迁移（必须按顺序）
+
+1. `dshlink harden --write`：关闭 `trustLocalhost`，铸造 `mcp-admin` 与 `bridge` 两个 token（明文只打印一次）。
+2. `dshlink install-dsh --write --token <admin-token> --bridge --bridge-token <bridge-token>`：把 MCP 的 `headers.authorization` 与 bridge 的 `token` 写进 DSH patch。
+3. 重启 dsh-link 节点与 DSH host，然后 `dshlink doctor --token <admin-token>`；`trust-localhost`、`rate-limit`、`bind-exposure` 应通过。
+4. 对端/手机各铸独立 token：`dshlink token new --role peer --peer <对端名>` 或 `--role device --ttl-days 90`；不要把 admin token 给对端或手机。
+5. STCP 的 `secretKey` 视为 root 凭据：只放本机、每设备独立、丢失即轮换；frps 用 `allowUsers` 收紧。
+
+### 0.5.0 验证命令（本机）
+
+```powershell
+# 1) 未带 token 应 401（healthz 除外）
+curl.exe -s -o NUL -w "%{http_code}\n" http://127.0.0.1:8787/api/v1/info
+# 2) admin token 可以，但 bridge 控制面只认本机/bridge token
+curl.exe -s -o NUL -w "%{http_code}\n" -H "Authorization: Bearer <admin>" http://127.0.0.1:8787/api/v1/bridge/status
+curl.exe -s -o NUL -w "%{http_code}\n" -H "Authorization: Bearer <bridge>" http://127.0.0.1:8787/api/v1/bridge/status
+# 3) 角色矩阵：device 不能读 /peers
+curl.exe -s -o NUL -w "%{http_code}\n" -H "Authorization: Bearer <device>" http://127.0.0.1:8787/api/v1/peers
+# 4) 自检
+node bin/dshlink.mjs doctor --token <admin-token>
+```
+
+预期：1) 401；2) admin→403 `bridge_forbidden`、bridge→200；3) 403 `role_forbidden`；4) trust-localhost PASS。
 
 ## 1. 信任模型
 
@@ -19,6 +60,8 @@ dsh-link 的显式设计（README / PROTOCOL）是「参与者相互认识，权
 - bridge 的自动唤醒会把远端消息正文作为 prompt 注入本机会话，属于设计功能，不是漏洞；但它把「远端消息」提升为「可影响本机会话行为的输入」。
 
 因此下文的严重度按「暴露范围」评估：仅回环 → 低；仅自己另一台设备 → 中；手机/多设备/公网可达 → 高。
+
+> 以下 §1–§8 是 0.4.0 审计原文，用于说明问题和攻击路径；哪些已修复见上方 §0.5。
 
 ## 2. 发现总表
 

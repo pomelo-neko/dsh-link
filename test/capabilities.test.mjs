@@ -136,7 +136,7 @@ test('queue: enqueue -> claim -> complete -> wait', async (t) => {
   assert.equal(cmd.status, 'pending');
   assert.equal(cmd.attempts, 0);
   assert.equal(cmd.claimedBy, null);
-  assert.deepEqual(cmd.origin, { peer: 'laptop', ip: '10.0.0.7', label: null });
+  assert.deepEqual(cmd.origin, { peer: 'laptop', ip: '10.0.0.7', label: null, role: null, tokenId: null });
   assert.ok(!Number.isNaN(Date.parse(cmd.createdAt)));
 
   // <dir>/<id>.json is the documented on-disk layout
