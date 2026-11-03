@@ -26,6 +26,9 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - **Files stay inside declared roots.** Paths go through realpath validation, `.env` /
   `*.key` / `.ssh` are denied by default, writes are off by default, and transfers are
   sha256-checked on both ends.
+- **A phone controller (0.6).** The Android app in `android/` connects to one node with a
+  `device` token, lists its DSH workspaces/sessions, follows a transcript live while the screen is
+  on, and sends messages via `sessions.prompt`. It is a controller, not a node.
 
 ---
 
@@ -36,6 +39,7 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - [Wake a conversation automatically (bridge)](#wake-a-conversation-automatically-bridge)
 - [See and drive the other machine's DSH (0.3)](#see-and-drive-the-other-machines-dsh-03)
 - [Talk to a specific conversation (0.4)](#talk-to-a-specific-conversation-04)
+- [Control DSH from a phone (0.6)](#control-dsh-from-a-phone-06)
 - [NAT traversal with FRP STCP](#nat-traversal-with-frp-stcp)
 - [Command reference](#command-reference)
 - [Security model](#security-model)
@@ -199,6 +203,31 @@ binding, and the sender's bridge routes the answer into that Session. Everything
 command is executed, the fields only pick *where* a prompt goes. Policy, fallbacks, wire format and
 troubleshooting: [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md).
 
+## Control DSH from a phone (0.6)
+
+The Android app in [`android/`](android/) is a **controller**, not a node: it connects to one
+existing dsh-link node, lists that node's DSH workspaces and sessions, streams a transcript while
+the screen is in the foreground, and sends a message into a conversation through the capability
+channel. There is no background service and no polling while the app is not open; it pulls a
+snapshot plus a `sinceSeq` increment.
+
+```powershell
+# on the node: allow the phone to read the view and prompt conversations
+node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
+
+# on a machine with JDK 17+ and Android SDK 36
+powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
+# -> android/dist/dshlink-control-0.1.0-debug.apk
+adb install android\dist\dshlink-control-0.1.0-debug.apk
+```
+
+The node needs `dsh.enabled`, `dsh.exposeWorkspaces`, `dsh.exposeTranscripts`,
+`capabilities.enabled` with `sessions.prompt` in `capabilities.methods`, and a bridge running to
+execute the queued prompt. The phone reaches the node over a LAN or a VPN (Tailscale/WireGuard) and
+the node **must not** be exposed on the public internet without TLS. Use a `device` token and revoke
+it if the phone is lost; see [`android/README.md`](android/README.md) for setup and
+[`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) for the API mapping and verification.
+
 ## NAT traversal with FRP STCP
 
 When the machines share no LAN and you have no public port, put an `frps` on a host with a public
@@ -324,15 +353,16 @@ dsh-link/
 │   └── wan-lab/            # two-machine WAN test lab (WSL helper scripts)
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
-├── test/                   # 20 test files / 162 checks + CLI smoke script
-├── docs/                   # architecture, design, protocol, DSH access, directed conversations, FRP, operations, troubleshooting
+├── android/                # Android controller app (Java, no Gradle dependencies) + build-apk.ps1
+├── test/                   # 21 test files / 163 checks + CLI smoke script
+├── docs/                   # architecture, design, protocol, DSH access, directed conversations, FRP, operations, troubleshooting, mobile
 └── examples/               # sanitised config samples
 ```
 
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 162 checks (frp/MCP suites skip if absent), ~10 s
+node test/run.mjs                                                        # 163 checks (frp/MCP suites skip if absent), ~10 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
@@ -346,7 +376,9 @@ a built portable bundle and runs an end-to-end pairing against a node on the sam
 
 The suite also covers the 0.4 directed path end to end: envelope fields over HTTP, the loopback
 bind endpoint, `link_reply`'s automatic `targetSession`, and the bridge's targeting, policy
-rejection, fallback and one-batch-many-targets behaviour.
+rejection, fallback and one-batch-many-targets behaviour. `test/mobile-contract.test.mjs` pins the
+Android app's node API contract (snapshot + `sinceSeq`, capability call, `device` token boundary);
+it needs `DSH_HOME` pointing at a DSH installation and skips otherwise.
 
 Cross-internet verification (Windows node ↔ WSL node through a public frps) is written up in
 [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md).
@@ -383,7 +415,9 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom → cause → fix, plus a one-minute health check |
 | [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) | Security audit (0.4, with 0.5 fix status): trust boundaries, token roles, loopback/FRP bypass, hardening checklist |
-| [`docs/MOBILE-CONTROL-FEASIBILITY.md`](docs/MOBILE-CONTROL-FEASIBILITY.md) | Android control-app feasibility study (research; implementation decision pending) |
+| [`docs/MOBILE-CONTROL-FEASIBILITY.md`](docs/MOBILE-CONTROL-FEASIBILITY.md) | Android control-app feasibility study (phase A implemented in 0.6) |
+| [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) | 0.6: the Android controller — architecture, API contract, verification, security, B-phase gaps |
+| [`android/README.md`](android/README.md) | Build/install/use the Android controller app |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Why the pieces look the way they do |
 | [`SECURITY.md`](SECURITY.md) | Trust model and hardening checklist |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history |

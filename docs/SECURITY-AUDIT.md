@@ -17,7 +17,7 @@
 | 发现 | 0.5.0 状态 | 说明 |
 |---|---|---|
 | F1 免 token 全权限 | **已修复（默认）** | `auth.trustLocalhost` 默认 `false`，本机 MCP/CLI/bridge 也必须带 token；`/api/v1/bridge/*` 只接受本机进程或 `role: bridge` token，远端 admin token 返回 `403 bridge_forbidden`。显式把 `trustLocalhost` 设为 `true` 的旧配置仍保留原行为，`dshlink doctor` 会把它判为 FAIL。 |
-| F2 单 token = 整节点 | **部分修复** | token 有 `role`（admin/bridge/peer/device）、可绑定 peer、可设 `expiresAt`；路由级 role 矩阵把 peer/device/bridge 的权限分开。仍没有 per-token 文件/工作区 scope，device 仍是「DSH 只读全可见」；手机 token 泄露仍等于该节点的 DSH 只读 + 受 `capabilities.methods` 限制的动作。 |
+| F2 单 token = 整节点 | **部分修复** | token 有 `role`（admin/bridge/peer/device）、可绑定 peer、可设 `expiresAt`；路由级 role 矩阵把 peer/device/bridge 的权限分开。仍没有 per-token 文件/工作区 scope：device 能看全部未排除的 DSH 视图，并**能提交 `capabilities.methods` 放行的动作**（手机发消息就靠这个，见 0.6）；手机 token 泄露等于该节点的 DSH 视图 + 被放行的动作，仍应短 TTL、按需吊销。 |
 | F3 身份自述 + relay | **已修复（绑定 peer 时）** | 绑定 peer 的 token 不能伪造 `from.name`（`identity_mismatch`），relay 只允许 admin（`relay_not_allowed`），inbox/outbox 按其身份过滤。未绑定 peer 的旧 token 仍按 admin 处理——应轮换。 |
 | F4 能力通道动作 | **缓解** | 路由 role 矩阵与 `capabilities.methods` 双层控制；手机应只给 `device` 或最小 methods，动作方法默认仍关闭。 |
 | F5 消息不按接收者过滤 | **已修复（绑定 peer 时）** | `GET /messages` 按绑定的 peer 过滤 `from`，`/messages/:id` 读他人消息返回 `403 not_your_message`，read 端点同样逐条校验；`/outbox` 只返回发给该 peer 的消息。 |

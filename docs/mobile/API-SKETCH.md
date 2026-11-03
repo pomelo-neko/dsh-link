@@ -1,6 +1,10 @@
-# dsh-link 移动端 API 速查（草案）
+# dsh-link 移动端 API 速查（已实现）
 
-配套文档：[MOBILE-CONTROL-FEASIBILITY.md](../MOBILE-CONTROL-FEASIBILITY.md)。本文件只列 App 需要的端点、字段与调用顺序，便于实现时对照；标「B 阶段」的端点为建议、当前节点未实现；标「0.4 已实现」的端点已随 dsh-link 0.4 落地（见文档第 14 节修订）。
+> **状态（0.6.0）：A 阶段已实现。** 实际 App 在 [`android/`](../../android/)，实现说明与验证见
+> [`CONTROL-APP.md`](CONTROL-APP.md) 与 [`android/README.md`](../../android/README.md)。本文件保留为
+> 接口速查与 B 阶段建议，不再只是草案。
+
+配套文档：[MOBILE-CONTROL-FEASIBILITY.md](../MOBILE-CONTROL-FEASIBILITY.md)。本文件只列 App 需要的端点、字段与调用顺序，便于实现时对照；标「B 阶段」的端点为建议、当前节点未实现；标「已实现」的端点已随 dsh-link 落地。
 
 ## 1. 连接与鉴权
 

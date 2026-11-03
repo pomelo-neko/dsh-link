@@ -33,7 +33,11 @@ export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.dshlink', '.
 export const SKIP_PATTERNS = [
   /^test[\\/]\.tmp[\\/]/,
   /^vendor[\\/]frp[\\/][^\\/]+-amd64[\\/]/,
-  /^.*\.log$/
+  // The Android controller app is built with SDK command-line tools into android/dist; that build
+  // output (classes, dex, zip) must never be copied into the deployed node tree.
+  /^android[\\/]dist[\\/]/,
+  // Local debug signing material belongs to the build machine, not to the deployed node.
+  /^android[\\/]debug\.keystore$/,
 ];
 /** Files that belong to the deployed machine only: reported as local, never copied or deleted. */
 export const LOCAL_PATTERNS = [

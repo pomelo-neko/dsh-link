@@ -5,6 +5,9 @@ node_modules/
 
 # ---- build output (regenerate with scripts/build-bundle.ps1) ----
 dist/
+android/dist/
+android/debug.keystore
+android/*.idsig
 
 # ---- vendored third-party frp binaries (download with: node scripts/fetch-vendor.mjs) ----
 vendor/frp/windows-amd64/

@@ -9,6 +9,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-03
+
+The "control it from the phone" release. Ships the first Android controller app on top of the
+0.5.0-hardened node. The app is a *controller*, not a node: it never joins the mesh, has no
+inbox/outbox, and only uses the node's DSH view plus the capability channel (a `device` token).
+
+### Added
+
+- **Android control app (`android/`).** Native Java app (minSdk 26, targetSdk 36, no Gradle or
+  AndroidX dependencies) that connects to one dsh-link node, lists its DSH workspaces and sessions,
+  follows a conversation with a snapshot + `sinceSeq` cursor while the screen is in the foreground,
+  and sends messages with `sessions.prompt` over `POST /api/v1/dsh/call` (optional `mode: "steer"`).
+  Built with the SDK command-line tools via `android/build-apk.ps1`; see `android/README.md`.
+- **`test/mobile-contract.test.mjs`.** Pins the exact node API contract the app depends on
+  (info → workspaces → sessions → transcript snapshot/increment → capability call → result) and the
+  `device` token boundary; runs when `DSH_HOME` points at a DSH installation.
+- `docs/mobile/CONTROL-APP.md`: implementation notes, API mapping, verification and the B-phase gap
+  list (SSE, device-token management, multi-node); screenshots under `docs/mobile/screenshots/`.
+
+### Fixed
+
+- **App transcript timestamps.** The node's transcript `time` field is epoch milliseconds, but the
+  message row formatted it as an ISO string and displayed raw milliseconds (e.g.
+  `#1313 · 工具调用 · 1793721695734`). It now formats numbers with `HH:mm:ss` and still accepts ISO
+  strings if a future node returns them. Caught during the emulator smoke test.
+
+### Changed
+
+- **The `device` role is documented precisely.** A device token may read the DSH view *and* submit
+  capability calls allowed by `capabilities.methods` (that is how the phone sends messages); it
+  still has no access to messages, files, peers, audit or the bridge control plane. The 0.5.0 notes
+  described it as a read-only viewer, which is only true for the message/control planes.
+- Root `README`/`README.zh-CN` and the docs index now cover the Android app; the feasibility study
+  is marked as implemented for phase A.
+- The bridge plugin reports version `0.6.0` so a node, its bridge and the app can be matched by
+  release; no bridge behaviour changed in this release.
+- `scripts/deploy-sync.mjs` ignores `android/dist/` (SDK build output) so a deploy never copies
+  classes/dex into the deployed node tree.
+
 ## [0.5.0] — 2026-11-03
 
 The "harden the node" release. Fixes the two findings of the 0.4.0 security audit (F1: a loopback
@@ -258,7 +297,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.0
 [0.5.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.5.0
 [0.4.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.4.0
 [0.3.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.3.0

@@ -70,6 +70,9 @@ test('deploy-sync: build output, scratch and vendored binaries are outside the c
   assert.equal(isSkipped('test/.tmp/unit/a.txt'), true);
   assert.equal(isSkipped('vendor/frp/windows-amd64/frpc.exe'), true);
   assert.equal(isSkipped('vendor/frp/SHA256SUMS.txt'), false, 'the tracked sums file still syncs');
+  assert.equal(isSkipped('android/dist/obj/classes/dev/dshlink/control/MainActivity.class'), true, 'Android build output stays out');
+  assert.equal(isSkipped('android/debug.keystore'), true, 'the local debug signing key stays out');
+  assert.equal(isSkipped('android/app/src/main/AndroidManifest.xml'), false, 'Android sources are part of the repository');
   assert.equal(isSkipped('src/server.mjs'), false);
 
   assert.equal(isLocal('dshlink.config.json'), true);

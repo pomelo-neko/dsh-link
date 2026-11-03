@@ -8,6 +8,7 @@
 - 三种连通方式：**局域网/公网直连**、**FRP STCP 内网穿透**（无公网端口，推荐）、**中继转发**（A→hub→B）。
 - 给 DSH 的两条接入路径：**MCP**（`dsh-mcp-client` 挂本机 `/mcp`，工具名 `mcp__dshlink__link_*`）和 **CLI/技能**（agent 用 pwsh 调 `dshlink`）。
 - **定向会话（0.4）**：消息可以点名对方机器上的具体 **Session**，回复自动带回发起会话；两端真实对话可以多轮交流，而不是全部落进桥的池会话。策略可控、可关闭。
+- **手机控制端（0.6）**：`android/` 里的 App 连到一台节点，用 `device` token 浏览该节点的 DSH 工作区/会话、前台增量看对话、通过 `sessions.prompt` 发消息。它是控制端，不是节点。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 
 ---
@@ -145,6 +146,26 @@ dshlink bind --thread msg_<根消息> --session session-yyyy
 那条会话。字段只决定 prompt 投到哪，不执行任何命令。策略、回退、线格式与排障见
 [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md)。
 
+### 手机控制端（0.6）
+
+[`android/`](android/) 里的安卓 App 是**控制端而不是节点**：它连到一台已有的 dsh-link 节点，列出该节点
+看到的 DSH 工作区/会话，屏幕在前台时按 `sinceSeq` 增量拉取对话，并通过能力通道往指定会话发消息。
+没有后台服务，也不在 App 不运行时轮询。
+
+```powershell
+# 节点侧：给手机铸造一个 device token（只能读 DSH 视图 + 调用被允许的能力方法）
+node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
+
+# 有 JDK 17+ 与 Android SDK 36 的机器上构建
+powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
+adb install android\dist\dshlink-control-0.1.0-debug.apk
+```
+
+节点需要 `dsh.enabled`、`dsh.exposeWorkspaces`、`dsh.exposeTranscripts`、`capabilities.enabled` 且
+`capabilities.methods` 含 `sessions.prompt`，并有一个常驻 bridge 执行排队的 prompt。手机经局域网或
+VPN（Tailscale/WireGuard）访问节点；**不要把节点裸奔在公网**，公网路径必须加 TLS。用法见
+[`android/README.md`](android/README.md)，接口与验证见 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md)。
+
 ## 3. 内网穿透（FRP STCP）
 
 两台机器都不在同一个局域网、也没有公网端口时，用一台公网服务器做 frps：
@@ -271,15 +292,16 @@ dsh-link/
 │   ├── reload.mjs          # 配置热重载（改 peer/token/根目录不用重启）
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
-├── test/                   # 162 项检查 / 20 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话）+ CLI 冒烟
-├── docs/                   # 架构、设计、协议、DSH 接入、FRP 部署、运维手册、排障手册
+├── android/                # 安卓控制端 App（纯 Java，无 Gradle 依赖）+ 手动构建脚本
+├── test/                   # 163 项检查 / 21 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、手机契约）+ CLI 冒烟
+├── docs/                   # 架构、设计、协议、DSH 接入、FRP 部署、运维手册、排障手册、手机端
 └── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递）
 ```
 
 ## 7. 验证
 
 ```powershell
-node test/run.mjs                     # 162 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、DSH 视图、doctor
+node test/run.mjs                     # 163 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、DSH 视图、手机契约、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 
@@ -289,7 +311,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
 
 其中 MCP 测试用的是 DSH 自己安装的 MCP TypeScript SDK（`@modelcontextprotocol/sdk` 1.x 或
 `@modelcontextprotocol/client` 2.x，均可自动发现），即 dsh-link 与 DSH 的 MCP 端点已被真实客户端验证过。
-定向会话也有端到端覆盖：HTTP 信封字段、回环 bind 端点、`link_reply` 自动 `targetSession`、桥的目标投递/策略拒绝回退/一批多目标。
+定向会话也有端到端覆盖：HTTP 信封字段、回环 bind 端点、`link_reply` 自动 `targetSession`、桥的目标投递/策略拒绝回退/一批多目标。`test/mobile-contract.test.mjs` 固定手机 App 依赖的节点接口（快照 + `sinceSeq`、能力调用、`device` token 边界），需要 `DSH_HOME` 指向真实 DSH 安装，否则跳过。
 
 **跨公网实测**（Windows 节点 ↔ WSL 节点，经阿里云 frps）：消息双向、文件拉取（sha256 一致）、
 文件推送、双向 ping 全部通过，详见 [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md)。

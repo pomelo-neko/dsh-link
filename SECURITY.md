@@ -51,12 +51,17 @@ Every inbound token can carry a `role`, an optional bound peer identity and an o
 `expiresAt`. A token without a role is treated as `admin` for compatibility with 0.4 configs —
 rotate those.
 
+The action allowance is not a role: a `device` token can submit any method listed in
+`capabilities.methods`, and an `admin` token is still refused when the method is not listed. A phone
+controller therefore needs a `device` token **and** `capabilities.methods` containing
+`sessions.prompt`; it never needs to hold an admin token.
+
 | Role | Can | Cannot |
 |---|---|---|
 | `admin` | everything the node API offers: peers/status/audit, messages, files, DSH view, capability calls, MCP | the bridge control plane from a remote address (use a local process or a `bridge` token) |
 | `bridge` | `/api/v1/bridge/*` (status, commands claim/result, heartbeat, bind) and read messages/DSH view | manage peers/tokens, post messages, files, MCP |
 | `peer` | exchange its own messages (inbox/outbox filtered by its bound identity), DSH view, capability calls | read another peer's messages, forge `from`, relay to a third node, manage the node |
-| `device` | read-only DSH view: workspaces, sessions, transcripts, capabilities, own queued call results | messages, files, bridge control plane, peers/tokens/audit/MCP |
+| `device` | DSH view (workspaces, sessions, transcripts, capabilities), capability calls allowed by `capabilities.methods` (a phone sends `sessions.prompt`), own queued call results | messages, files, bridge control plane, peers/tokens/audit/MCP |
 
 `auth.trustLocalhost` is only about the local process: with it off, the MCP client, the CLI and the
 bridge must all send their token (this is what `harden` + `install-dsh --token ...` configure).

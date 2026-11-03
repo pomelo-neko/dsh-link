@@ -16,7 +16,8 @@ Entry points, in the order most readers want them:
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | 症状 → 原因 → 处理，附一分钟体检清单 |
 | [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md) | 0.4 安全审计 + 0.5.0 修复状态：信任边界、token 角色、回环/FRP 绕过、残余风险 |
 | [`DIRECTED-SESSIONS.md`](DIRECTED-SESSIONS.md) | 0.4 定向会话：targetSession/originSession、绑定、桥策略、回退与线格式 |
-| [`MOBILE-CONTROL-FEASIBILITY.md`](MOBILE-CONTROL-FEASIBILITY.md) · [`mobile/API-SKETCH.md`](mobile/API-SKETCH.md) | 安卓控制端可行性、架构评分、同步协议与 API 草案（实现待定） |
+| [`MOBILE-CONTROL-FEASIBILITY.md`](MOBILE-CONTROL-FEASIBILITY.md) · [`mobile/API-SKETCH.md`](mobile/API-SKETCH.md) | 安卓控制端可行性、架构评分、同步协议与 API 草案 |
+| [`mobile/CONTROL-APP.md`](mobile/CONTROL-APP.md) · [`../android/README.md`](../android/README.md) | 0.6.0 已实现的安卓控制端：架构、节点前置、构建/安装、验证记录与截图 |
 | [`../SECURITY.md`](../SECURITY.md) | 信任模型与加固清单 |
 | [`../AIGC-Notice.md`](../AIGC-Notice.md) | AIGC 声明：本仓库完全由 AI 生成与维护 |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 版本历史 |
