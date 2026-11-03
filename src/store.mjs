@@ -36,10 +36,14 @@ export class MessageStore {
       outbox: path.join(dataDir, 'outbox.jsonl'),
       audit: path.join(dataDir, 'audit.jsonl'),
       state: path.join(dataDir, 'state.json'),
+      // Which local DSH Session speaks for a peer thread (see src/ops.mjs bindSession). Keeping
+      // it here, next to the mailbox, makes the binding survive a node restart mid-conversation.
+      bindings: path.join(dataDir, 'bindings.json'),
       inboxFiles: path.join(dataDir, 'inbox')
     };
     this._cache = new Map();
     this._state = null;
+    this._bindings = null;
   }
 
   async init() {
@@ -104,6 +108,66 @@ export class MessageStore {
     await fs.writeFile(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
     await fs.rename(tmp, this.paths.state);
     return state;
+  }
+
+  async _loadBindings() {
+    if (this._bindings) return this._bindings;
+    try {
+      const raw = JSON.parse(await fs.readFile(this.paths.bindings, 'utf8'));
+      this._bindings = isPlainObject(raw) ? raw : {};
+    } catch {
+      this._bindings = {};
+    }
+    return this._bindings;
+  }
+
+  async _saveBindings(bindings) {
+    const tmp = `${this.paths.bindings}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(bindings, null, 2) + '\n', 'utf8');
+    await fs.rename(tmp, this.paths.bindings);
+    return bindings;
+  }
+
+  /**
+   * Remember which local Session is the participant of a peer thread. The DSH host only reveals
+   * the calling Session *after* a tool ran, so the bridge pre-binds "thread -> session" here and
+   * the send path can then stamp that session onto the next message as `originSession`.
+   */
+  async setBinding(thread, info = {}) {
+    const key = String(thread ?? '').trim();
+    const sessionId = String(info.sessionId ?? '').trim();
+    if (!key || !sessionId) return null;
+    const bindings = await this._loadBindings();
+    const entry = {
+      thread: key,
+      sessionId,
+      peer: info.peer ? String(info.peer) : null,
+      updatedAt: nowIso()
+    };
+    bindings[key] = entry;
+    const keys = Object.keys(bindings);
+    if (keys.length > 500) {
+      keys.sort((a, b) => String(bindings[b]?.updatedAt ?? '').localeCompare(String(bindings[a]?.updatedAt ?? '')));
+      for (const stale of keys.slice(500)) delete bindings[stale];
+    }
+    await this._saveBindings(bindings);
+    return entry;
+  }
+
+  /** The Session bound to a peer thread, or null. */
+  async getBinding(thread) {
+    const key = String(thread ?? '').trim();
+    if (!key) return null;
+    const bindings = await this._loadBindings();
+    return isPlainObject(bindings[key]) ? bindings[key] : null;
+  }
+
+  async listBindings(limit = 50) {
+    const bindings = await this._loadBindings();
+    return Object.values(bindings)
+      .filter((entry) => isPlainObject(entry) && entry.sessionId)
+      .sort((a, b) => String(b?.updatedAt ?? '').localeCompare(String(a?.updatedAt ?? '')))
+      .slice(0, Math.max(1, Number(limit) || 50));
   }
 
   async append(box, record) {

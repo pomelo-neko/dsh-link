@@ -271,11 +271,13 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
 
   add('GET', `${API_PREFIX}/dsh/sessions/:id/transcript`, async (ctx) => {
     const q = ctx.url.searchParams;
+    const sinceSeq = q.get('sinceSeq');
     const result = await ops.dshTranscript({
       sessionId: ctx.params.id,
       limit: toInt(q.get('limit'), 100, { min: 1, max: 1000 }),
       offset: toInt(q.get('offset'), 0, { min: 0, max: 1000000 }),
-      tail: q.get('tail') === '1'
+      tail: q.get('tail') === '1',
+      sinceSeq: sinceSeq === null || sinceSeq === '' ? undefined : toInt(sinceSeq, 0, { min: 0 })
     });
     audit({ event: 'dsh_view_transcript', sessionId: ctx.params.id, messages: Array.isArray(result.messages) ? result.messages.length : 0, ip: ctx.auth.ip, token: ctx.auth.token?.label ?? 'localhost' });
     sendJson(ctx.res, 200, result);
@@ -328,6 +330,22 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
     requireLoopback(ctx);
     const body = await readJson(ctx.req, 256 * 1024);
     sendJson(ctx.res, 200, await ops.bridgeBeat(body));
+  });
+
+  // Directed session bindings (v0.4). The local bridge records "peer thread -> local Session"
+  // before prompting that Session, so the next outbound message can carry `originSession`
+  // even when the model does not pass one explicitly.
+  add('POST', `${API_PREFIX}/bridge/bind`, async (ctx) => {
+    requireLoopback(ctx);
+    const body = await readJson(ctx.req, 64 * 1024);
+    const result = await ops.bindSession({ thread: body.thread, sessionId: body.sessionId, peer: body.peer });
+    audit({ event: 'bridge_bind', thread: result.binding.thread, sessionId: result.binding.sessionId, peer: result.binding.peer ?? null });
+    sendJson(ctx.res, 200, result);
+  });
+
+  add('GET', `${API_PREFIX}/bridge/bind`, async (ctx) => {
+    requireLoopback(ctx);
+    sendJson(ctx.res, 200, await ops.binding({ thread: ctx.url.searchParams.get('thread') ?? '' }));
   });
 
   add('POST', '/mcp', async (ctx) => {

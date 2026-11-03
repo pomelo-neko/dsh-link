@@ -159,6 +159,7 @@ test('bridge: an arriving message wakes a session with the message text', async 
   const { request: prompt, signal } = fake.prompts[0];
   assert.equal(prompt.sessionId, 'session-bridge-test');
   assert.equal(prompt.requestId, 'link-bridge:session-bridge-test:msg_01aaa0001');
+  assert.equal(prompt.mode, 'queue', 'a topic batch appends a queued turn by default');
   assert.equal(typeof signal.throwIfAborted, 'function', 'prompt must be admitted with a caller signal');
   assert.equal(signal.aborted, false);
   const text = prompt.content[0].text;
@@ -655,10 +656,282 @@ test('bridge: a routed conversation that has disappeared falls back to the topic
   );
   assert.equal(afterFailure.routes.count, 0, 'a route to a missing session is forgotten');
 
-  // Second tick has no route to follow and opens a bridge session instead.
+  // Second tick has no route to follow and opens a bridge session instead. Wait for the prompt
+  // itself (the bridge may bind the thread over HTTP between create() and prompt()).
   await messagePoll(scheduled).callback();
-  await waitFor(() => fake.created.length === 1, 'the next tick to open a bridge session instead');
+  await waitFor(() => fake.prompts.length === 1 && fake.created.length === 1, 'the next tick to open a bridge session instead');
   assert.equal(fake.prompts.length, 1, 'only the fallback session was prompted');
   assert.equal(fake.prompts[0].request.sessionId, 'session-bridge-test');
 });
 
+
+/**
+ * 0.4: directed conversations. A peer can name the exact local Session a message belongs to;
+ * the bridge prompts that Session directly instead of opening a topic session, and records the
+ * thread -> Session binding so the answer can be addressed back to the peer's Session.
+ * Messages are accepted before startBridge() because installing the bridge fires one poll
+ * immediately: accepting after the install would race that first tick.
+ */
+test('bridge: a directed message wakes the named conversation and binds the thread', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-directed' });
+  t.after(() => node.close());
+
+  await node.ops.acceptMessage({
+    id: 'msg_directed_1',
+    ts: new Date().toISOString(),
+    from: { nodeId: 'node_laptop', name: 'LAPTOP-TEST', url: 'http://127.0.0.1:1' },
+    to: node.cfg.name,
+    thread: 'msg_directed_thread_1',
+    replyTo: null,
+    kind: 'message',
+    subject: '协同调试',
+    body: '请在这个会话里继续排查',
+    attachments: [],
+    targetSession: 'session-target-1',
+    originSession: 'session-origin-1'
+  });
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-directed');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-directed'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to wake the directed conversation');
+  const { request: prompt } = fake.prompts[0];
+  assert.equal(prompt.sessionId, 'session-target-1');
+  assert.equal(prompt.requestId, 'link-bridge:session-target-1:msg_directed_1');
+  assert.equal(prompt.mode, 'steer', 'a directed delivery interrupts the target at its next step boundary');
+  const text = prompt.content[0].text;
+  assert.match(text, /请在这个会话里继续排查/, 'the body reaches the directed session');
+  assert.match(text, /session-target-1/, 'the prompt names the session it was directed to');
+  assert.match(text, /session-origin-1/, 'the prompt names the peer conversation');
+  assert.match(text, /定向/, 'the prompt explains it is a directed delivery');
+  assert.equal(fake.created.length, 0, 'a directed message must not open a bridge session');
+
+  const binding = await node.ops.binding({ thread: 'msg_directed_thread_1' });
+  assert.equal(binding.binding.sessionId, 'session-target-1', 'the thread is bound so later replies carry originSession');
+  assert.equal(binding.binding.peer, 'LAPTOP-TEST');
+
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.directed === 1,
+    'the heartbeat to record the directed wake'
+  );
+  assert.equal(state.lastDirected.sessionId, 'session-target-1');
+  assert.equal(state.lastDirected.matched, 'target');
+  assert.equal(state.lastDirected.originSession, 'session-origin-1');
+  assert.equal(state.targets.enabled, true);
+  assert.equal(state.errors, 0);
+});
+
+test('bridge: a refused target falls back to the pool and explains the refusal', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-directed-denied' });
+  t.after(() => node.close());
+
+  await node.ops.acceptMessage({
+    id: 'msg_directed_denied',
+    ts: new Date().toISOString(),
+    from: { nodeId: 'node_laptop', name: 'LAPTOP-TEST', url: 'http://127.0.0.1:1' },
+    to: node.cfg.name,
+    thread: 'msg_directed_thread_denied',
+    replyTo: null,
+    kind: 'message',
+    subject: '不该投递',
+    body: '这条消息想进一个未授权的会话',
+    attachments: [],
+    targetSession: 'session-not-allowed'
+  });
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-directed-denied');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-directed-denied'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    targets: { allow: ['session-allowed'] },
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to fall back to a pool session');
+  const prompt = fake.prompts[0].request;
+  assert.equal(prompt.sessionId, 'session-bridge-test', 'the pool session handles the fallback');
+  assert.equal(prompt.mode, 'queue', 'a fallback topic delivery queues');
+  assert.equal(fake.created.length, 1);
+  const text = prompt.content[0].text;
+  assert.match(text, /session-not-allowed/, 'the prompt names the refused target');
+  assert.match(text, /不在 targets\.allow/, 'the prompt explains the policy refusal');
+  assert.match(text, /这条消息想进一个未授权的会话/, 'the message still reaches a session');
+
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.targets && snapshot.targets.allow.length === 1,
+    'the heartbeat to record the normalized target policy'
+  );
+  assert.equal(state.directed, 0, 'a fallback is not counted as directed');
+  assert.equal(state.lastDirected, null);
+});
+
+test('bridge: two directed targets in one batch wake two conversations in order', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-directed-batch' });
+  t.after(() => node.close());
+
+  const base = { from: { nodeId: 'node_laptop', name: 'LAPTOP-TEST', url: 'http://127.0.0.1:1' }, to: node.cfg.name, replyTo: null, kind: 'message', attachments: [] };
+  await node.ops.acceptMessage({ ...base, id: 'msg_directed_a', ts: '2026-11-02T10:00:00.000Z', thread: 'msg_directed_thread_a', subject: 'A', body: '给 A 会话', targetSession: 'session-target-a' });
+  await node.ops.acceptMessage({ ...base, id: 'msg_directed_b', ts: '2026-11-02T10:00:01.000Z', thread: 'msg_directed_thread_b', subject: 'B', body: '给 B 会话', targetSession: 'session-target-b' });
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-directed-batch');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-directed-batch'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 2, 'both directed sessions to be woken');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-target-a');
+  assert.equal(fake.prompts[1].request.sessionId, 'session-target-b');
+  assert.equal(fake.created.length, 0, 'directed messages never open bridge sessions');
+
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.directed === 2,
+    'the heartbeat to record both directed wakes'
+  );
+  assert.equal(state.notified, 2, 'both messages are counted as notified');
+});
+
+test('bridge: an explicit target wins over an existing thread route', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-directed-precedence' });
+  t.after(() => node.close());
+
+  // A local conversation asked on this thread earlier, so a route exists before the peer answers.
+  const sent = await node.ops.sendMessage({ to: 'LAPTOP-TEST', subject: '询问', body: '请把结果发回', thread: 'msg_thread_precedence' });
+
+  // The peer answers on the same thread but explicitly addresses another Session.
+  await node.ops.acceptMessage({
+    id: 'msg_directed_precedence',
+    ts: new Date().toISOString(),
+    from: { nodeId: 'node_laptop', name: 'LAPTOP-TEST', url: 'http://127.0.0.1:1' },
+    to: node.cfg.name,
+    thread: 'msg_thread_precedence',
+    replyTo: sent.message.id,
+    kind: 'message',
+    subject: 'Re: 询问',
+    body: '结果发给另一个会话',
+    attachments: [],
+    targetSession: 'session-target-2'
+  });
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-directed-precedence');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-directed-precedence'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+
+  // Install fires one poll immediately; register the route before that poll lands.
+  fake.fire('tools/result', {
+    name: 'mcp__dshlink__link_send_message',
+    arguments: { peer: 'LAPTOP-TEST' },
+    agent: { session: { id: 'session-asker' } }
+  }, { content: [{ type: 'text', text: 'message ' + sent.message.id + ' to LAPTOP-TEST: queued\n\n' + JSON.stringify({ message: sent.message }) }] });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to wake the explicit target');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-target-2', 'the explicit target beats the route');
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.directed === 1,
+    'the heartbeat to record the directed wake'
+  );
+  assert.equal(state.routed, 0, 'the routed conversation is not counted');
+});
+
+test('bridge: promptMode queue appends even a directed delivery instead of steering', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-mode-queue' });
+  t.after(() => node.close());
+
+  await node.ops.acceptMessage({
+    id: 'msg_mode_queue',
+    ts: new Date().toISOString(),
+    from: { nodeId: 'node_laptop', name: 'LAPTOP-TEST', url: 'http://127.0.0.1:1' },
+    to: node.cfg.name,
+    thread: 'msg_mode_queue_thread',
+    replyTo: null,
+    kind: 'message',
+    subject: '排队',
+    body: '这条定向消息也要排队',
+    attachments: [],
+    targetSession: 'session-mode-queue'
+  });
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-mode-queue');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-mode-queue'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    promptMode: 'queue',
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to prompt the directed session');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-mode-queue');
+  assert.equal(fake.prompts[0].request.mode, 'queue', 'promptMode queue wins over the automatic steer');
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.promptMode === 'queue',
+    'the heartbeat to record the configured prompt mode'
+  );
+  assert.equal(state.directed, 1, 'the delivery is still directed');
+});
+
+test('bridge: promptMode steer interrupts a topic delivery too', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-mode-steer' });
+  t.after(() => node.close());
+  await inboxMessage(node, 'msg_mode_steer', 'LAPTOP-TEST', '插话', '这条普通消息也要插话', '2026-11-02T12:00:00.000Z');
+
+  const scheduled = captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-mode-steer');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-mode-steer'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    promptMode: 'steer',
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to prompt a topic session');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-bridge-test');
+  assert.equal(fake.prompts[0].request.mode, 'steer', 'promptMode steer wins over the automatic queue');
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.promptMode === 'steer',
+    'the heartbeat to record the configured prompt mode'
+  );
+  assert.equal(state.directed, 0, 'a plain message is still a topic delivery');
+});

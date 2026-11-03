@@ -116,6 +116,17 @@ test('dsh access: read view, virtual workspace root and the capability channel',
   assert.ok(kinds.includes('user') && kinds.includes('assistant'), 'user and assistant text must be present: ' + kinds.join(','));
   assert.ok(transcript.body.messages.some((m) => m.text.includes('alpha 的第一个问题')));
   assert.ok(transcript.body.messages.some((m) => m.kind === 'reasoning' && m.text.includes('内部推理')));
+  const latest = transcript.body.latestSeq;
+  assert.ok(latest > 0, 'the transcript must report its head seq');
+  const incremental = await api(node, '/api/v1/dsh/sessions/' + dshHome.sessionA + '/transcript?sinceSeq=' + (latest - 1));
+  assert.equal(incremental.body.sinceSeq, latest - 1, 'the sinceSeq query parameter reaches the view');
+  assert.equal(incremental.body.latestSeq, latest);
+  assert.ok(incremental.body.total >= 1);
+  assert.ok(incremental.body.messages.every((m) => m.seq === latest), 'only messages after the cursor are returned');
+  const caughtUp = await api(node, '/api/v1/dsh/sessions/' + dshHome.sessionA + '/transcript?sinceSeq=' + latest);
+  assert.equal(caughtUp.body.total, 0);
+  assert.equal(caughtUp.body.messages.length, 0);
+  assert.equal(caughtUp.body.latestSeq, latest);
 
   // ---- 4. virtual workspaces root -----------------------------------------
   const listed = await api(node, '/api/v1/files?root=allws');

@@ -53,6 +53,7 @@ dsh web
         nodeUrl: http://127.0.0.1:8787      # 本机 dsh-link 节点
         workspacePath: "D:\\dshlink-bridge"  # 必填：专用空目录（不存在会自动创建）
         sessionId: ""                        # 可选：指定已有对话；留空=自动创建并记住
+        promptMode: auto                     # 0.4：auto | queue | steer（direct/route 用 steer 插话，topic 用 queue 排队）
         pollSeconds: 15                      # 轮询间隔（下限 2 秒）
         cooldownSeconds: 30                  # 两批消息之间的最小间隔，防止连环唤醒
         batchLimit: 20                       # 一次最多带多少条消息进 prompt
@@ -76,12 +77,27 @@ dsh web
           enabled: true                      # 关掉 = 回到纯话题池行为
           ttlSeconds: 86400                  # 路由记忆 24h
           max: 200                           # 最多记住多少条 thread → 会话
+        # ---- 0.4：定向会话（对端指定把消息投进哪条本机会话）----
+        targets:
+          enabled: true                      # 关掉 = 忽略 targetSession（回到 0.3 行为）
+          peers: []                          # 对端名 glob；空 = 任何已配置 peer
+          allow: []                          # 允许被定向的本机会话 id glob；空 = 任意
+          deny: []                           # 拒绝清单，永远优先于 allow
         # ---- 0.3：能力通道（对端可通过本机节点调用本机 DSH）----
         commandSeconds: 5                    # 轮询本机节点的命令队列；0 = 关闭
         commandBatch: 5                      # 每轮最多认领几条命令
 ```
 
-内置模板占位符：`{{node}}`（本机节点名）、`{{count}}`、`{{peers}}`、`{{lastId}}`、`{{messages}}`。
+内置模板占位符：`{{node}}`（本机节点名）、`{{count}}`、`{{peers}}`、`{{lastId}}`、`{{messages}}`；
+0.4 起还有 `{{targetNote}}`（定向失败/回退原因，正常为空）、`{{delivery}}`（`direct` | `route` | `topic`）、
+`{{targetSession}}`、`{{originSession}}`。旧的自定义模板不受影响。
+
+状态文件新增 `directed` / `lastDirected` / `targets` / `promptMode`：`lastDirected.matched = "target"` 表示上一条定向消息
+真正投进了目标会话。
+
+0.4 起 direct/route 投递默认用 DSH 的 `mode: "steer"` 唤醒——插到目标会话的下一个 step 边界，像人插话，
+不用排在长工具循环后面；topic 批量仍用 `mode: "queue"`（追加一个回合）。`promptMode: queue` 让所有唤醒都排队，
+`steer` 让所有唤醒都插话；默认 `auto` 按投递类型选择。
 
 ## 一个话题一个会话 + 自动归档（0.3）
 
@@ -123,6 +139,43 @@ dsh web
 消息不经过任何会话，登记不了路由——那类发送请在 `workspacePath` 收信。唤醒上限、冷却与防打环判据对
 路由唤醒同样生效。
 
+## 定向会话：对端指定投进哪条本机会话（0.4）
+
+0.3 的回信路由是**被动**的：只有"本机某会话先在某个 thread 上发过消息"，桥才知道回信该给谁。
+如果对端想主动把消息投进你机器上的**指定会话**（比如两个人各自在自己常用的对话里连续多轮协作），
+0.3 做不到——消息只会落进桥话题池。
+
+0.4 让信封可以直接携带 `targetSession`（收件方会话 id）与 `originSession`（发件方会话 id）：
+
+| 判据 | 行为 |
+|---|---|
+| 收到带 `targetSession` 的消息 | `targets` 策略放行且会话未死 → 直接 prompt 该会话，**不新建**桥会话 |
+| 之后 | 把 thread → 目标会话写进节点绑定（`bindings.json`），并登记本地 route；后续回复自动找到它 |
+| 投递优先级 | 显式 target > thread/replyTo route > 话题池 |
+| 投递方式 | direct/route 默认 `steer`（插话，插到下一步边界）；topic 批量 `queue`（排队）；`promptMode` 可覆盖 |
+| 被 `targets` 拒绝 | 回落到 route/话题池，prompt 里写明原因（`{{targetNote}}`） |
+| 目标会话不存在/已归档 | prompt 失败 → 标记死会话、清 route、水位不推进；下一轮回落 route/话题池，不丢消息 |
+| 对端没带 target | 完全按 0.3 的 route/话题池逻辑处理 |
+| 发消息时自动补 `originSession` | 本机会话在该 thread 上有绑定时自动填；`link_reply` 默认 `targetSession = 原消息的 originSession` |
+
+配置与策略（patch 里可直接热更新）：
+
+```yaml
+targets:
+  enabled: true
+  peers: ["LAPTOP-*"]        # 只允许这些对端定向投递（glob；空=任意已配置 peer）
+  allow: ["session-5f0c*"]   # 只允许这些本机会话（glob；空=任意）
+  deny: []                   # 永远优先于 allow
+```
+
+启动日志会打印一行 `directed sessions: on (…)`；`state.json` 的 `directed` 是累计定向投递次数，
+`lastDirected = { thread, sessionId, originSession, id, at, direction:"in", matched:"target" }`。
+**默认 open**（与"任何已配置 peer 都能唤醒会话"的既有姿态一致）；对不完全信任的 peer，用
+`peers` / `allow` 收紧。**开关关闭（`enabled: false`）时绑定/路由仍然登记**，只是不再按 target 投递，
+随时可以打开而不丢已有会话记忆。
+
+协议与端到端流程见 [`docs/DIRECTED-SESSIONS.md`](../../docs/DIRECTED-SESSIONS.md)。
+
 ## 能力通道：让对端读/驱动本机 DSH（0.3）
 
 对端调用本机节点的 `POST /api/v1/dsh/call` 时，节点把请求写进命令队列，bridge 每 `commandSeconds` 轮询
@@ -138,6 +191,9 @@ dsh web
 | `sessions.rename` | 动作 | 改会话标题 |
 | `sessions.archive` | 动作 | 归档会话 |
 | `bridge.status` | 读 | bridge 版本、能力、会话数 |
+
+`sessions.prompt` 还可带 `mode: "queue" | "steer"`（默认 `queue`；`steer` = 插话，把内容送进目标会话的下一个
+step 边界）。这个参数由 `link_call` 原样透传，未提供时保持 0.3 的排队行为。
 
 - 鉴权在**节点侧**：`capabilities.enabled` + `capabilities.methods`（可按 peer 覆盖）。bridge 只服务
   本机 loopback 的节点，自己不判定远端身份；
@@ -159,7 +215,11 @@ dsh web
   },
   "sessionsCreated": 4, "sessionsArchived": 2,
   "lastArchive": { "sessionId": "session-…", "reason": "wake-budget", "ok": true, "at": "…" },
-  "commands": { "ticks": 12, "executed": 1, "failed": 0, "lastError": null }   // 0.3 能力通道
+  "commands": { "ticks": 12, "executed": 1, "failed": 0, "lastError": null },   // 0.3 能力通道
+  "directed": 2,                // 0.4：累计定向投递次数
+  "lastDirected": { "thread": "msg_…", "sessionId": "session-…", "originSession": "session-…",
+                    "matched": "target", "direction": "in", "at": "…" },
+  "targets": { "enabled": true, "peers": [], "allow": [], "deny": [], "open": true }  // 0.4 策略快照
 }
 ```
 
@@ -256,4 +316,11 @@ dsh web
 6. **安装期异常不致命**：`ctx.effect` 抛错、`ctx.logger` 取值抛错时 `apply()` 不向外抛，host 照常启动；
 6b. **prompt 必须带 signal**：假 context 的 `prompt(request, signal)` 在缺 signal 时抛错，
    复刻 `ctx.sessionController.prompt` 包装层（它无条件调用 `signal.throwIfAborted()`）；
-7. `install-dsh --bridge` 生成的 patch 条目幂等（重复规划内容不变）。
+7. `install-dsh --bridge` 生成的 patch 条目幂等（重复规划内容不变）；
+8. **0.4 定向会话**：定向消息唤醒指定会话且不新建桥会话、thread 绑定写入节点、`state.directed` 记账；
+9. **策略拒绝回退**：`targets.allow` 不匹配时回落话题池，prompt 带拒绝原因且 `directed` 不增加；
+10. **一批多目标**：一次 tick 按顺序唤醒两个不同会话；
+11. **显式 target 优先于已有 route**：同 thread 上已有本机会话路由时，带 `targetSession` 的消息仍投目标会话；
+12. **绑定自动补 originSession**、`link_reply` 定向回原会话（`test/directed.test.mjs`、`test/mcp.test.mjs`）；
+13. **插话/排队模式**：`promptMode: auto` 下 direct/route 用 `steer`、topic 用 `queue`；`queue`/`steer` 强制覆盖；
+14. **能力通道 mode**：`sessions.prompt` 的 `mode` 透传、默认 queue、非法值拒绝（`test/bridge-commands.test.mjs`）。

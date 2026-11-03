@@ -484,17 +484,19 @@ export function createDshOps({ ctx, log, limits = {}, status } = {}) {
      * request id is derived from the command id when the caller supplied none, so a redelivered
      * command is deduplicated by the Host instead of prompting twice.
      */
-    'sessions.prompt': async ({ sessionId, text, requestId } = {}, context) => {
+    'sessions.prompt': async ({ sessionId, text, requestId, mode } = {}, context) => {
       const id = requireArg(sessionId, 'sessionId');
       const body = typeof text === 'string' ? text : '';
       if (!body.trim()) throw new Error('text is required');
+      const promptMode = mode === undefined || mode === null || mode === '' ? 'queue' : String(mode).trim();
+      if (promptMode !== 'queue' && promptMode !== 'steer') throw new Error("mode must be 'queue' or 'steer'");
       const controller = requireService('sessionController');
       if (typeof controller.prompt !== 'function') throw new Error('sessionController.prompt is unavailable');
       const commandId = context && context.id !== undefined && context.id !== null ? String(context.id) : '';
       const request = {
         sessionId: id,
         requestId: optionalString(requestId) || (commandId ? 'bridge-command:' + commandId : 'bridge-command:' + randomUUID()),
-        mode: 'queue',
+        mode: promptMode,
         content: [{ type: 'text', text: body }]
       };
       await withSignal(promptMs, (signal) => controller.prompt(request, signal));

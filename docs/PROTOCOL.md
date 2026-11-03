@@ -52,9 +52,17 @@ by the CLI take effect immediately.
   "body": "hello",
   "attachments": [
     { "name": "note.txt", "size": 14, "sha256": "...", "encoding": "base64", "contentBase64": "..." }
-  ]
+  ],
+  "targetSession": "session-5f0c…",
+  "originSession": "session-a1c9…"
 }
 ```
+
+`targetSession` / `originSession` (v0.4, both optional, clamped to 200 characters) address a DSH
+Session on the receiving / sending side. The receiving bridge may deliver the message straight into
+`targetSession` and, when a local thread binding exists, fills `originSession` on outbound messages
+automatically. Nodes that do not know these fields store and forward them unchanged. See
+[`DIRECTED-SESSIONS.md`](DIRECTED-SESSIONS.md).
 
 Delivery semantics:
 
@@ -89,13 +97,19 @@ straight from disk (no DSH process required). Enabled with `dsh.enabled`; transc
 | GET | `/api/v1/dsh/workspaces` | `{ home, count, workspaces: [ { id, title, path, sessions, lastActivityAt } ] }` |
 | GET | `/api/v1/dsh/sessions?workspace=&includeArchived=1&query=&limit=` | `{ count, sessions: [ { sessionId, workspaceId, title, titleSource, cwd, createdAt, updatedAt, sizeBytes, archived, messages, messagesExact } ] }` |
 | GET | `/api/v1/dsh/sessions/:id` | `{ session }` |
-| GET | `/api/v1/dsh/sessions/:id/transcript?limit=&offset=&tail=1` | `{ session, total, messages: [ { seq, time, role, kind, text, tool, truncated } ], truncated, corruptFrames }` |
+| GET | `/api/v1/dsh/sessions/:id/transcript?limit=&offset=&tail=1&sinceSeq=` | `{ session, total, messages: [ { seq, time, role, kind, text, tool, truncated } ], truncated, corruptFrames, latestSeq, sinceSeq }` |
 | GET | `/api/v1/dsh/capabilities` | `{ enabled, methods, catalog, bridge, queue }` |
 
 `messages` counts inside a session summary are a **lower bound** unless `messagesExact` is true
 (the index only scans the head of each log); `transcript().total` is exact.
-Sessions are located in `$DSH_HOME/sessions/<slug>/session-<uuid>/session.v3.jsonl.zstd`
-(concatenated zstd frames, JSONL inside) and grouped by the `storages/workspace.json` registry.
+Sessions are located in `$DSH_HOME/sessions/<slug>/session-<uuid>/session.vN.jsonl.zstd`
+(concatenated zstd frames, JSONL inside; the view picks the highest generation, so v3 and v4 logs
+both work) and grouped by the `storages/workspace.json` registry.
+
+`sinceSeq` (v0.4) is a durable incremental cursor: only messages with `seq > sinceSeq` are returned,
+and the response always reports `latestSeq` (head of the rendered transcript) plus the applied
+`sinceSeq` (or `null`). A client can poll `?tail=1&limit=1&sinceSeq=<lastSeq>` to discover changes and
+then fetch only the new range, without a freeze handshake.
 
 ## Capability channel (v0.3, off by default)
 
@@ -109,16 +123,30 @@ Peer → node → local bridge plugin (inside DSH) → DSH Host services, and ba
 | POST | `/api/v1/bridge/commands/:id/result` `{ ok, result }` / `{ ok:false, error }` | **loopback only** |
 | POST | `/api/v1/bridge/heartbeat` `{ version, capabilities, sessions, at }` | **loopback only** |
 | GET | `/api/v1/bridge/status` | **loopback only** |
+| POST | `/api/v1/bridge/bind` `{ thread, sessionId, peer }` | **loopback only** (v0.4) — record which local Session owns a thread |
+| GET | `/api/v1/bridge/bind?thread=` | **loopback only** (v0.4) — read a binding (or `null`) |
 
 Methods: `workspaces.list`, `sessions.list`, `sessions.read` (read) and `sessions.create`,
 `sessions.prompt`, `sessions.rename`, `sessions.archive` (actions, opt-in per node and per peer),
 plus `bridge.status`.
+
+`sessions.prompt` params accept an optional `mode`: `"queue"` (default, append a turn) or
+`"steer"` (interject at the session's next step boundary). It is passed through to DSH's
+`SessionController.prompt`; anything else is rejected.
 
 Queue semantics: one command per file under `<dataDir>/commands/<id>.json`; claiming creates
 `<id>.claim` with `O_EXCL` so exactly one bridge runs a command (a claim older than
 `capabilities.claimStaleSeconds` may be taken over); terminal states are immutable; non-terminal
 commands expire after `commandTtlSeconds`; results are clipped to `maxResultBytes`; at most
 `maxPending` commands wait at once. Every call is audited (`dsh_call`, `bridge_result`).
+
+## Directed conversation bindings (v0.4)
+
+`<dataDir>/bindings.json` maps `thread → { thread, sessionId, peer, updatedAt }` (500 newest kept,
+atomic replace). The bridge writes a binding before it prompts a Session for a thread; `sendMessage`
+reads it to fill `originSession` when a caller (for example `link_reply`) does not supply one.
+Bindings are local state: the `/api/v1/bridge/bind` endpoints reject non-loopback clients with
+`403 bridge_loopback_only` even when a valid token is presented.
 
 ## Virtual `workspaces` file root (v0.3)
 

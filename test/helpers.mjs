@@ -119,31 +119,48 @@ export async function makeNode(opts = {}) {
  */
 export function findMcpSdk() {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
-  const candidates = [];
-  if (process.env.DSH_MCP_SDK) candidates.push(process.env.DSH_MCP_SDK);
-  if (process.env.DSH_HOME) candidates.push(path.join(process.env.DSH_HOME, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm'));
-  if (home) candidates.push(path.join(home, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm'));
+  const legacy = [];
+  const modern = [];
+  if (process.env.DSH_MCP_SDK) legacy.push(process.env.DSH_MCP_SDK);
+  if (process.env.DSH_HOME) {
+    legacy.push(path.join(process.env.DSH_HOME, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm'));
+    modern.push(path.join(process.env.DSH_HOME, 'node_modules', '@modelcontextprotocol', 'client', 'dist', 'index.mjs'));
+  }
+  if (home) {
+    legacy.push(path.join(home, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm'));
+    modern.push(path.join(home, 'node_modules', '@modelcontextprotocol', 'client', 'dist', 'index.mjs'));
+  }
   try {
     // Works when the SDK is installed anywhere up the tree (npm i -D @modelcontextprotocol/sdk).
     const resolved = createRequire(import.meta.url).resolve('@modelcontextprotocol/sdk/client/index.js');
-    candidates.push(path.dirname(path.dirname(resolved)));
+    legacy.push(path.dirname(path.dirname(resolved)));
   } catch { /* not installed here */ }
-  for (const candidate of candidates) {
-    try { if (existsSync(path.join(candidate, 'client', 'index.js'))) return candidate; } catch { /* keep looking */ }
+  for (const candidate of legacy) {
+    try { if (existsSync(path.join(candidate, 'client', 'index.js'))) return { kind: 'sdk', base: candidate }; } catch { /* keep looking */ }
+  }
+  // MCP TypeScript SDK 2.x split the client into @modelcontextprotocol/client.
+  for (const candidate of modern) {
+    try { if (existsSync(candidate)) return { kind: 'client-v2', entry: candidate }; } catch { /* keep looking */ }
   }
   return null;
 }
 
 export async function mcpClientFor(url, token) {
-  const sdkBase = findMcpSdk();
-  if (!sdkBase) {
+  const sdk = findMcpSdk();
+  if (!sdk) {
     throw new Error(
-      'the MCP client SDK was not found — install @modelcontextprotocol/sdk, or point DSH_MCP_SDK at '
-      + '<node_modules>/@modelcontextprotocol/sdk/dist/esm (in a DSH installation it is under DSH_HOME)'
+      'the MCP client SDK was not found — install @modelcontextprotocol/sdk (or @modelcontextprotocol/client), '
+      + 'or point DSH_MCP_SDK at <node_modules>/@modelcontextprotocol/sdk/dist/esm (in a DSH installation it is under DSH_HOME)'
     );
   }
-  const { Client } = await import(pathToFileURL(path.join(sdkBase, 'client', 'index.js')).href);
-  const { StreamableHTTPClientTransport } = await import(pathToFileURL(path.join(sdkBase, 'client', 'streamableHttp.js')).href);
+  let Client;
+  let StreamableHTTPClientTransport;
+  if (sdk.kind === 'client-v2') {
+    ({ Client, StreamableHTTPClientTransport } = await import(pathToFileURL(sdk.entry).href));
+  } else {
+    ({ Client } = await import(pathToFileURL(path.join(sdk.base, 'client', 'index.js')).href));
+    ({ StreamableHTTPClientTransport } = await import(pathToFileURL(path.join(sdk.base, 'client', 'streamableHttp.js')).href));
+  }
   const client = new Client({ name: 'dsh-link-tests', version: '0.1.0' }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(new URL(url), {
     requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : undefined

@@ -642,6 +642,24 @@ test('dshops: sessions.prompt always passes an AbortSignal and a stable request 
   await assert.rejects(() => ops.methods['sessions.prompt']({ text: 'x' }), /sessionId is required/);
 });
 
+test('dshops: sessions.prompt honours an explicit queue or steer mode', async () => {
+  const host = fakeHost({});
+  const ops = createDshOps({ ctx: host.ctx });
+
+  await ops.methods['sessions.prompt']({ sessionId: 's1', text: 'interrupt the turn', mode: 'steer' });
+  assert.equal(host.prompts[0].request.mode, 'steer');
+  await ops.methods['sessions.prompt']({ sessionId: 's1', text: 'append a turn', mode: 'queue' });
+  assert.equal(host.prompts[1].request.mode, 'queue');
+  await ops.methods['sessions.prompt']({ sessionId: 's1', text: 'trimmed', mode: '  steer  ' });
+  assert.equal(host.prompts[2].request.mode, 'steer', 'the mode value is trimmed');
+  await ops.methods['sessions.prompt']({ sessionId: 's1', text: 'blank', mode: '' });
+  assert.equal(host.prompts[3].request.mode, 'queue', 'an empty mode falls back to queue');
+  await assert.rejects(
+    () => ops.methods['sessions.prompt']({ sessionId: 's1', text: 'x', mode: 'interrupt' }),
+    /mode must be 'queue' or 'steer'/
+  );
+});
+
 test('dshops: rename, archive, and bridge.status report normalized values', async () => {
   const host = fakeHost({ renameTo: 'Normalized title' });
   let statusCalls = 0;

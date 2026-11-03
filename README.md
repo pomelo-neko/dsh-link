@@ -20,6 +20,9 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - **Opt-in remote visibility (0.3).** With explicit switches, a peer can browse your DSH
   workspaces and sessions, read a transcript, or ask your bridge to create/prompt/archive a
   conversation. All of it is default-off.
+- **Directed conversations (0.4).** A message can name the **Session** it should land in on the
+  other machine, and replies carry the origin Session back — two real conversations can hold a
+  multi-turn exchange instead of everything landing in the bridge pool. Policy-gated, opt-out.
 - **Files stay inside declared roots.** Paths go through realpath validation, `.env` /
   `*.key` / `.ssh` are denied by default, writes are off by default, and transfers are
   sha256-checked on both ends.
@@ -32,6 +35,7 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - [Wire it into DSH](#wire-it-into-dsh)
 - [Wake a conversation automatically (bridge)](#wake-a-conversation-automatically-bridge)
 - [See and drive the other machine's DSH (0.3)](#see-and-drive-the-other-machines-dsh-03)
+- [Talk to a specific conversation (0.4)](#talk-to-a-specific-conversation-04)
 - [NAT traversal with FRP STCP](#nat-traversal-with-frp-stcp)
 - [Command reference](#command-reference)
 - [Security model](#security-model)
@@ -121,7 +125,11 @@ attachments, replies with `link_reply` and marks the message read.
 
 Since 0.3 the bridge is topic-aware: one conversation per topic, new conversation when a topic hits
 its wake budget, age limit or idle timeout, and retired conversations are archived through DSH's
-own registry (hidden from the sidebar, logs kept). Configuration, state file layout and the
+own registry (hidden from the sidebar, logs kept). Since 0.4 it also honours **directed messages**:
+when an incoming envelope names a `targetSession` and the bridge's `targets` policy allows it,
+the prompt goes straight into that conversation instead of a pool session, the thread is bound so
+later messages keep landing there, and the reply is addressed back to the originating conversation.
+Non-directed traffic keeps the topic behaviour. Configuration, state file layout and the
 self-check are documented in
 [`integrations/dsh-link-bridge/README.md`](integrations/dsh-link-bridge/README.md).
 
@@ -158,6 +166,31 @@ peer → your node → your bridge (inside DSH) → the DSH service, so they nee
 > Opening the DSH view lets a token-holding peer read **every workspace path and every
 > conversation** on the machine. Only enable it for peers you trust, and read
 > [`docs/DSH-ACCESS.md`](docs/DSH-ACCESS.md) first.
+
+## Talk to a specific conversation (0.4)
+
+Through 0.3 every incoming message woke a bridge conversation. 0.4 lets the sender name the
+**Session** that should receive it, and lets the receiver remember which local Session owns a
+thread, so replies flow back to the conversation that started the exchange — no bridge session in
+the middle, and no session id repeated on every turn.
+
+```powershell
+# sending side: discover the peer's conversations, then address one
+dshlink dsh sessions --peer bob-pc
+dshlink send --to bob-pc --thread msg_<root> --target-session session-xxxx --body "continue here"
+
+# receiving side: inspect or pin the thread → local Session binding
+dshlink bind --thread msg_<root>                 # show the current binding
+dshlink bind --thread msg_<root> --session session-yyyy
+```
+
+`targetSession` and `originSession` are ordinary envelope fields — relayed and synced unchanged,
+stored even by older nodes. The bridge delivers to the named Session when its `targets` policy
+permits it and otherwise falls back to the thread route or the topic pool, writing the reason into
+the prompt. On the way back, `link_reply` (and `dshlink send`) fill `originSession` from the
+binding, and the sender's bridge routes the answer into that Session. Everything is id-based: no
+command is executed, the fields only pick *where* a prompt goes. Policy, fallbacks, wire format and
+troubleshooting: [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md).
 
 ## NAT traversal with FRP STCP
 
@@ -208,7 +241,8 @@ and the dsh-link API itself is never exposed. See [`docs/FRP.md`](docs/FRP.md).
 | `serve` | Start the HTTP API + `/mcp`; `--auto-sync 30` re-pushes periodically, `--no-reload` disables hot reload |
 | `status` / `peers list\|add\|rm\|ping` | Local status, peer registry, liveness probes |
 | `token list\|new\|rm` | Manage inbound tokens (only the sha256 is stored; the plaintext is shown once) |
-| `send` / `inbox` / `show` / `sync` / `flush` | Messages: send, list, read one, pull the peer's queue, retry the outbox |
+| `send` / `inbox` / `show` / `sync` / `flush` | Messages: send (`--target-session` / `--origin-session` for directed delivery), list, read one, pull the peer's queue, retry the outbox |
+| `bind` | Show or set the thread → local Session binding that fills `originSession` on replies (0.4) |
 | `ls` / `pull` / `push` | List a directory, pull a file, push a file (needs `files.allowUpload: true` on the peer) |
 | `audit` | Local audit log (who pulled which file, when) |
 | `tunnel setup\|sync\|status\|share\|import\|stop\|config` | FRP tunnel configuration and process management |
@@ -223,7 +257,7 @@ Exit codes: `0` success, `2` usage/config error, `3` message still queued, `4` h
 
 `serve` re-reads the config file before every request, so adding a peer, a token or a file root
 takes effect immediately — no restart. `/api/v1/status` reports `runtime.configReloads`, and
-`dshlink doctor` compares the running process with the file on disk. Only `bind`, `port`,
+`dshlink doctor` compares the running process with the file on disk. Only the `bind` and `port` config keys,
 `limits.requestTimeoutMs` and the tunnel process itself still need a restart.
 
 ### Keep it running (Windows)
@@ -249,6 +283,7 @@ scheduled task (at logon, plus a periodic top-up) to survive reboots.
 | Audit | on | `audit.jsonl` records file access and message delivery |
 | DSH view (0.3) | off | `dsh.enabled`; `dsh.exposeTranscripts` gates conversation bodies |
 | Capability channel (0.3) | off | `capabilities.enabled` + method allow-list; action methods are never allowed by default, per-peer overrides exist, every call is audited |
+| Directed targets (0.4) | bridge: on, any peer | The bridge's `targets.{enabled,peers,allow,deny}` policy decides which peer may address which local Session; set `enabled: false` or narrow `peers`/`allow` to lock it down |
 
 **Loopback trust + a tunnel that terminates on loopback means inbound tokens are not checked on
 that path.** If your machines are joined over an untrusted network, set
@@ -274,30 +309,35 @@ dsh-link/
 │   ├── capabilities.mjs    # capability channel: command queue, policy, audit (0.3)
 │   └── pairing.mjs         # pairing codes + DSH install (MCP entry / skill / bridge)
 ├── integrations/
-│   ├── dsh-link-bridge/    # DSH Host plugin: wake a conversation on unread messages (0.3: topics + archive)
+│   ├── dsh-link-bridge/    # DSH Host plugin: wake a conversation on unread messages (0.3: topics + archive; 0.4: directed sessions)
 │   ├── dsh-skill/          # agent-facing skill (SKILL.md)
 │   ├── dsh-mcp-settings.example.yaml
 │   └── wan-lab/            # two-machine WAN test lab (WSL helper scripts)
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
-├── test/                   # 15 test files / 116 checks + CLI smoke script
-├── docs/                   # architecture, design, protocol, DSH access, FRP, operations, troubleshooting
+├── test/                   # 19 test files / 149 checks + CLI smoke script
+├── docs/                   # architecture, design, protocol, DSH access, directed conversations, FRP, operations, troubleshooting
 └── examples/               # sanitised config samples
 ```
 
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 116/116, ~10 s
+node test/run.mjs                                                        # 149 checks (frp/MCP suites skip if absent), ~7 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
 
 `test/frp.test.mjs` really starts `frps` plus two `frpc` processes and moves messages and files
 through the STCP tunnel only; it skips itself when you have not downloaded the frp binaries.
-The MCP test drives dsh-link through the `@modelcontextprotocol/sdk` that DSH itself uses, and
-`scripts/verify-bundle.ps1 -Bundle <zip> -PeerDataDir <throwaway-data-dir>` unpacks a built
-portable bundle and runs an end-to-end pairing against a node on the same machine.
+The MCP test drives dsh-link through the same MCP TypeScript SDK DSH uses (either
+`@modelcontextprotocol/sdk` 1.x or `@modelcontextprotocol/client` 2.x, auto-detected in the DSH
+installation). `scripts/verify-bundle.ps1 -Bundle <zip> -PeerDataDir <throwaway-data-dir>` unpacks
+a built portable bundle and runs an end-to-end pairing against a node on the same machine.
+
+The suite also covers the 0.4 directed path end to end: envelope fields over HTTP, the loopback
+bind endpoint, `link_reply`'s automatic `targetSession`, and the bridge's targeting, policy
+rejection, fallback and one-batch-many-targets behaviour.
 
 Cross-internet verification (Windows node ↔ WSL node through a public frps) is written up in
 [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md).
@@ -315,6 +355,8 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
   without zstd (older than 22.15) reports `zstd-unsupported` — use the bridge's capability channel
   instead.
 - Message counts in the session list are a lower bound (the index reads the head of each log).
+- Directed delivery needs node >= 0.4 to send the fields and node + bridge >= 0.4 on the receiving
+  side to honour `targetSession`; older peers store the fields and ignore them.
 - **No end-to-end encryption.** Traffic relies on the transport: loopback, a LAN you control, frp
   STCP with TLS, or your own HTTPS reverse proxy.
 
@@ -327,9 +369,12 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | HTTP API and message/file wire protocol |
 | [`docs/DSH-INTEGRATION.md`](docs/DSH-INTEGRATION.md) | MCP entry, skill install, bridge install, profile patch mechanics |
 | [`docs/DSH-ACCESS.md`](docs/DSH-ACCESS.md) | The 0.3 switches: read-only view, transcripts, capability actions, threat model |
+| [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md) | 0.4: addressing a peer Session, bindings, the bridge's targets policy, fallbacks, wire format |
 | [`docs/FRP.md`](docs/FRP.md) | Public `frps` deployment, STCP provider/visitor, TLS, verification |
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom → cause → fix, plus a one-minute health check |
+| [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) | Security audit (0.4): trust boundaries, token model, loopback/FRP bypass risk, hardening checklist |
+| [`docs/MOBILE-CONTROL-FEASIBILITY.md`](docs/MOBILE-CONTROL-FEASIBILITY.md) | Android control-app feasibility study (research; implementation decision pending) |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Why the pieces look the way they do |
 | [`SECURITY.md`](SECURITY.md) | Trust model and hardening checklist |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history |

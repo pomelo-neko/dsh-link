@@ -17,7 +17,8 @@ export const MCP_INSTRUCTIONS = [
   'link_push_file sends a local file into a peer (only if that peer allows uploads).',
   'Peer names come from link_peers; "self" means this machine.',
   'link_dsh_workspaces / link_dsh_sessions / link_dsh_transcript read the workspaces and conversations of this machine or a peer (0.3+ nodes with the DSH view enabled).',
-  'link_call runs a DSH capability (sessions.list, sessions.read, sessions.create, sessions.prompt, sessions.rename, sessions.archive, ...) through the bridge plugin of the target machine; actions need explicit authorization there.'
+  'link_call runs a DSH capability (sessions.list, sessions.read, sessions.create, sessions.prompt, sessions.rename, sessions.archive, ...) through the bridge plugin of the target machine; actions need explicit authorization there.',
+  'Directed conversations (v0.4): pass targetSession to address a message to a specific DSH Session on the peer, and originSession to tell the peer which of your Sessions is talking; link_reply reuses the answered message\'s originSession automatically, so two Sessions can keep replying into each other without the bridge in the middle.'
 ].join(' ')
 
 const TOOL_DEFS = [
@@ -42,6 +43,8 @@ const TOOL_DEFS = [
         body: { type: 'string', description: 'Message body (markdown/text).' },
         thread: { type: 'string', description: 'Thread id; defaults to a new thread rooted at this message.' },
         replyTo: { type: 'string', description: 'Message id being answered.' },
+        targetSession: { type: 'string', description: 'DSH Session id on the receiving node this message is addressed to. The receiving bridge delivers it into that conversation when its target policy allows; otherwise it falls back to the usual topic session.' },
+        originSession: { type: 'string', description: 'Your own DSH Session id (informational; tells the peer where to direct its answer). Defaults to the local binding of this thread when one exists.' },
         attachments: {
           type: 'array',
           description: 'Inline attachments (<= 512 KiB each).',
@@ -84,10 +87,15 @@ const TOOL_DEFS = [
   },
   {
     name: 'link_reply',
-    description: 'Reply to a received message, keeping it in the same thread.',
+    description: 'Reply to a received message, keeping it in the same thread. The reply is addressed to the Session that sent the original (targetSession defaults to its originSession), so a directed conversation stays direct.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'string', description: 'Inbox message id to answer.' }, body: { type: 'string' } },
+      properties: {
+        id: { type: 'string', description: 'Inbox message id to answer.' },
+        body: { type: 'string' },
+        targetSession: { type: 'string', description: 'DSH Session id on the peer this reply is addressed to. Defaults to the answered message\'s originSession.' },
+        originSession: { type: 'string', description: 'Your own DSH Session id; defaults to the answered message\'s targetSession or this thread\'s local binding.' }
+      },
       required: ['id', 'body'],
       additionalProperties: false
     }
@@ -182,7 +190,8 @@ const TOOL_DEFS = [
         sessionId: { type: 'string', description: 'Conversation id, e.g. session-<uuid>.' },
         limit: { type: 'number', description: 'Max messages (default 100).' },
         offset: { type: 'number', description: 'Skip this many messages.' },
-        tail: { type: 'boolean', description: 'Return the newest messages instead of the oldest.' }
+        tail: { type: 'boolean', description: 'Return the newest messages instead of the oldest.' },
+        sinceSeq: { type: 'number', description: 'Return only messages with seq greater than this (incremental polling); the response adds latestSeq and sinceSeq.' }
       },
       required: ['sessionId'],
       additionalProperties: false
@@ -263,6 +272,8 @@ async function callTool(name, args, ops) {
         body: args?.body,
         thread: args?.thread,
         replyTo: args?.replyTo,
+        targetSession: args?.targetSession,
+        originSession: args?.originSession,
         attachments: args?.attachments ?? []
       });
       const state = result.delivery.state === 'delivered' ? `delivered via ${result.delivery.via}` : `queued (${result.delivery.error ?? 'peer offline'})`;
@@ -292,6 +303,10 @@ async function callTool(name, args, ops) {
         subject: parent.subject ? `Re: ${parent.subject}` : undefined,
         thread: parent.thread ?? parent.id,
         replyTo: parent.id,
+        // Directed reply: address the answer to the Session that wrote the original, and present
+        // this node's own Session (the one the original was addressed to, or the thread binding).
+        targetSession: args?.targetSession ?? parent.originSession,
+        originSession: args?.originSession ?? parent.targetSession,
         kind: 'reply'
       });
       return textResult(`reply ${result.message.id} to ${result.message.to}`, { message: result.message, delivery: result.delivery });
@@ -355,7 +370,8 @@ async function callTool(name, args, ops) {
         sessionId: args?.sessionId,
         limit: args?.limit,
         offset: args?.offset,
-        tail: args?.tail === true
+        tail: args?.tail === true,
+        sinceSeq: args?.sinceSeq
       });
       const lines = (result.messages ?? []).map((m) => `[${m.seq ?? '?'}] ${m.role ?? m.kind ?? ''}: ${String(m.text ?? '').slice(0, 400)}`);
       return textResult(`${result.session?.title ?? args?.sessionId} on ${result.peer} — ${result.messages?.length ?? 0}/${result.total ?? '?'} message(s)\n${lines.join('\n')}`, result);

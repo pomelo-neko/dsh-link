@@ -77,6 +77,13 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     return { attachments: out, total };
   }
 
+  // Session references travel on the envelope but the node itself never interprets them; the
+  // receiving bridge enforces its own target policy. Keep them short and free of whitespace.
+  function sessionRef(value) {
+    const text = String(value ?? '').trim();
+    return text ? clampText(text, 200) : null;
+  }
+
   function buildMessage(input = {}) {
     const to = String(input.to ?? '').trim();
     if (!to) throw badRequest('a recipient (to) is required');
@@ -89,6 +96,11 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       to,
       thread: input.thread ?? null,
       replyTo: input.replyTo ?? null,
+      // Directed conversation (v0.4): targetSession names the DSH Session on the receiving
+      // node this message is addressed to; originSession names the sender's Session. Both are
+      // advisory to the transport and enforced by the receiving bridge (see targets.js).
+      targetSession: sessionRef(input.targetSession),
+      originSession: sessionRef(input.originSession),
       kind: input.kind ?? 'message',
       subject: clampText(input.subject ?? '', MAX_SUBJECT),
       body,
@@ -133,6 +145,10 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     const record = buildMessage(input);
     record.attachments = attachments;
     record.thread ??= record.replyTo ? (await store.get('inbox', record.replyTo))?.thread ?? record.replyTo : record.id;
+    // The bridge pre-binds a peer thread to the local Session that owns it (POST /api/v1/bridge/bind).
+    // Stamping that Session here means every outbound message tells the peer where to direct answers,
+    // even when the caller only passed thread/replyTo.
+    record.originSession ??= (await store.getBinding(record.thread))?.sessionId ?? null;
     const payload = Buffer.byteLength(JSON.stringify(record), 'utf8');
     if (payload > cfg.limits.maxMessageBytes) {
       throw tooLarge(`message is ${payload} bytes; limit is ${cfg.limits.maxMessageBytes}`, { size: payload });
@@ -413,10 +429,14 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     return { peer: cfg.name, session };
   }
 
-  async function dshTranscript({ peer, sessionId, limit, offset = 0, tail = false } = {}) {
+  async function dshTranscript({ peer, sessionId, limit, offset = 0, tail = false, sinceSeq } = {}) {
     if (!sessionId) throw badRequest('a sessionId is required');
+    const numericSeq = Number(sinceSeq);
+    const since = sinceSeq === undefined || sinceSeq === null || sinceSeq === '' || !Number.isFinite(numericSeq)
+      ? undefined
+      : Math.max(0, Math.trunc(numericSeq));
     if (!isSelf(peer)) {
-      return { peer, ...(await clientFor(peer).dshTranscript(sessionId, { limit, offset, tail: tail ? 1 : undefined })) };
+      return { peer, ...(await clientFor(peer).dshTranscript(sessionId, { limit, offset, tail: tail ? 1 : undefined, sinceSeq: since })) };
     }
     const view = dshGuard('transcripts');
     await requireViewOk(view);
@@ -431,6 +451,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
         limit: Math.max(1, Math.min(Number(limit) || maxMessages, maxMessages)),
         offset: Math.max(0, Number(offset) || 0),
         tail: tail === true,
+        sinceSeq: since,
         maxChars: Math.max(200, Number(cfg.dsh.transcriptMaxChars) || 8000)
       }))
     };
@@ -528,6 +549,26 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     return summarizeCommand(command);
   }
 
+  // ------------------------------------------- directed session bindings (v0.4, bridge) ---
+  // A binding is "this peer thread is handled by local Session X". The bridge writes it before
+  // prompting that Session, so replies leaving this node carry originSession even if the model
+  // does not pass one explicitly.
+  async function bindSession({ thread, sessionId, peer } = {}) {
+    const key = String(thread ?? '').trim();
+    if (!key) throw badRequest('a thread is required');
+    const session = String(sessionId ?? '').trim();
+    if (!session) throw badRequest('a sessionId is required');
+    const entry = await store.setBinding(key, { sessionId: session, peer });
+    if (!entry) throw badRequest('could not record the binding');
+    return { binding: entry };
+  }
+
+  async function binding({ thread } = {}) {
+    const key = String(thread ?? '').trim();
+    if (!key) throw badRequest('a thread is required');
+    return { thread: key, binding: await store.getBinding(key) };
+  }
+
   async function bridgeBeat(info = {}) {
     if (!presence) throw new LinkError(503, 'capabilities_unavailable', 'this node was started without the capability channel');
     await presence.beat({ ...info, at: info.at ?? nowIso() });
@@ -553,6 +594,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     listFiles, statFile, pullFile, pushFile, acceptMessage, deliver,
     dshWorkspaces, dshSessions, dshSession, dshTranscript,
     dshCapabilities, dshCall, dshCallLocal, dshCallResult,
-    claimCommands, completeCommand, bridgeBeat, bridgeStatus
+    claimCommands, completeCommand, bridgeBeat, bridgeStatus,
+    bindSession, binding
   };
 }

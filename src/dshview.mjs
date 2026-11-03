@@ -14,8 +14,11 @@ const FRAME_BOUNDARY_RETRIES = 4;
 const META_HEAD_BYTES = 64 * 1024;
 const META_HEAD_MAX_BYTES = 512 * 1024;
 const META_MAX_FRAMES = 24;
-const LOG_FILENAME = 'session.v3.jsonl.zstd';
-const LOG_FILE_RE = /\.jsonl(\.zstd)?$/i;
+// Session logs are generation-suffixed: session.jsonl (generation 0), session.v1.jsonl, ...
+// DSH keeps older generations on disk after a format upgrade (v3 -> v4 today), so the highest
+// generation present is the live log; a pre-1.0 flat `session.jsonl.zstd` still counts as 0.
+const LOG_FILE_RE = /^session(?:\.v([1-9][0-9]*))?\.jsonl(?:\.zstd)?$/i;
+const LEGACY_LOG_FILE_RE = /\.jsonl(?:\.zstd)?$/i;
 const SESSION_PREFIX = 'session-';
 const PROJCACHE_DIR = ['storages', 'session_projcache', 'sessions'];
 
@@ -508,7 +511,7 @@ function matchesQuery(meta, needle) {
 }
 
 function emptyTranscript() {
-  return { session: null, total: 0, messages: [], truncated: false, corruptFrames: 0 };
+  return { session: null, total: 0, messages: [], truncated: false, corruptFrames: 0, latestSeq: 0, sinceSeq: null };
 }
 
 // ------------------------------------------------------------------- the view
@@ -615,6 +618,18 @@ export function createDshView({ cfg = {}, logger, maxLogBytes } = {}) {
     return value;
   }
 
+  /** Generation encoded in a session log name; -1 for an unknown drift name, null to ignore. */
+  function logGeneration(name) {
+    const match = LOG_FILE_RE.exec(String(name));
+    if (match) return match[1] ? Number(match[1]) : 0;
+    return LEGACY_LOG_FILE_RE.test(String(name)) ? -1 : null;
+  }
+
+  /**
+   * Pick the live log in one session directory. DSH keeps older generations after a format
+   * upgrade (v3 and v4 coexist today), so generation dominates mtime; within a generation the
+   * newest/largest file wins, and an unrecognised *.jsonl drift name is only a last resort.
+   */
   async function findLogFile(dir) {
     let entries = [];
     try {
@@ -622,11 +637,17 @@ export function createDshView({ cfg = {}, logger, maxLogBytes } = {}) {
     } catch {
       return null;
     }
-    const files = entries.filter((entry) => entry.isFile());
-    const exact = files.find((entry) => entry.name === LOG_FILENAME);
-    if (exact) return path.join(dir, exact.name);
-    const drift = files.find((entry) => LOG_FILE_RE.test(entry.name));
-    return drift ? path.join(dir, drift.name) : null;
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const generation = logGeneration(entry.name);
+      if (generation === null) continue;
+      const file = path.join(dir, entry.name);
+      const stat = await statOrNull(file);
+      candidates.push({ file, generation, mtimeMs: stat ? stat.mtimeMs : 0, size: stat ? stat.size : 0 });
+    }
+    candidates.sort((a, b) => b.generation - a.generation || b.mtimeMs - a.mtimeMs || b.size - a.size || a.file.localeCompare(b.file));
+    return candidates.length > 0 ? candidates[0].file : null;
   }
 
   /** sessions/<slug>/<session>/session.v3.jsonl.zstd, plus the flatter layouts seen in the wild. */
@@ -875,13 +896,19 @@ export function createDshView({ cfg = {}, logger, maxLogBytes } = {}) {
   }
 
   /**
-   * Messages of one session: { session, total, messages, truncated, corruptFrames }.
+   * Messages of one session: { session, total, messages, truncated, corruptFrames, latestSeq, sinceSeq }.
    * limit defaults to 100 and is capped by cfg.transcriptMaxMessages. tail:true anchors the window
    * to the newest messages (offset then skips the newest ones); otherwise offset skips from the top.
    * maxChars defaults to cfg.transcriptMaxChars. Unknown sessions return an empty result with
    * session:null instead of throwing.
+   *
+   * sinceSeq is an incremental cursor: only messages whose durable event seq is greater than the
+   * given value are counted and returned, and latestSeq always reports the current head seq. A
+   * client can therefore poll `?tail=true&limit=1&sinceSeq=<last>` without re-reading the log, and
+   * replay after a reconnect without a separate freeze/coordination step. seq is monotonic in the
+   * append-only session log (compaction is recorded as start/end events inside it).
    */
-  async function transcript(sessionId, { limit = 100, offset = 0, tail = false, maxChars } = {}) {
+  async function transcript(sessionId, { limit = 100, offset = 0, tail = false, maxChars, sinceSeq } = {}) {
     const key = requireSessionId(sessionId);
     const index = await getIndex();
     const entry = index.byKey.get(key);
@@ -910,23 +937,31 @@ export function createDshView({ cfg = {}, logger, maxLogBytes } = {}) {
       byteLimited = read.truncatedBytes;
       writeTranscriptCache(key, { size: read.size, mtimeMs: Math.trunc(read.mtimeMs), chars, messages: shots, total, corruptFrames, byteLimited });
     }
+    const latestSeq = shots.reduce((max, message) => (Number.isFinite(message.seq) && message.seq > max ? message.seq : max), 0);
+    const afterSeq = Number.isFinite(Number(sinceSeq)) ? Math.max(0, Math.trunc(Number(sinceSeq))) : null;
+    const rows = afterSeq === null
+      ? shots
+      : shots.filter((message) => Number.isFinite(message.seq) && message.seq > afterSeq);
+    const visibleTotal = rows.length;
     const cap = Math.min(toInt(limit, 100, { min: 0, max: 100000 }), config.transcriptMaxMessages);
     const skip = toInt(offset, 0, { min: 0 });
     let start;
     let end;
     if (tail === true) {
-      end = Math.max(0, total - skip);
+      end = Math.max(0, visibleTotal - skip);
       start = Math.max(0, end - cap);
     } else {
-      start = Math.min(skip, total);
-      end = Math.min(total, start + cap);
+      start = Math.min(skip, visibleTotal);
+      end = Math.min(visibleTotal, start + cap);
     }
     return {
       session: cloneMeta(entry.meta),
-      total,
-      messages: shots.slice(start, end).map((message) => ({ ...message })),
-      truncated: start > 0 || end < total || byteLimited,
-      corruptFrames
+      total: visibleTotal,
+      messages: rows.slice(start, end).map((message) => ({ ...message })),
+      truncated: start > 0 || end < visibleTotal || byteLimited,
+      corruptFrames,
+      latestSeq,
+      sinceSeq: afterSeq
     };
   }
 

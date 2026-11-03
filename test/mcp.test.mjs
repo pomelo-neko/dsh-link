@@ -44,6 +44,37 @@ test('mcp: a real MCP client drives dsh-link tools over streamable HTTP', { skip
   assert.equal(inbox.messages[0].body, 'hello over mcp');
   assert.equal(inbox.messages[0].from.name, 'nodeA');
 
+  // 0.4: directed conversations travel through the MCP tool arguments too.
+  const directed = await client.callTool({
+    name: 'link_send_message',
+    arguments: { peer: 'nodeB', subject: 'directed', body: 'aim at a session', targetSession: 'session-remote-9', originSession: 'session-local-9' }
+  });
+  assert.ok(!directed.isError, textOf(directed));
+  const directedInbox = await b.ops.inbox({});
+  const aimed = directedInbox.messages.find((message) => message.body === 'aim at a session');
+  assert.equal(aimed.targetSession, 'session-remote-9');
+  assert.equal(aimed.originSession, 'session-local-9');
+
+  // A thread binding fills originSession without the caller passing it.
+  await a.ops.bindSession({ thread: 'msg_thread_bound_mcp', sessionId: 'session-local-mcp' });
+  const bound = await client.callTool({ name: 'link_send_message', arguments: { peer: 'nodeB', subject: 'bound', body: 'bound thread', thread: 'msg_thread_bound_mcp' } });
+  assert.ok(!bound.isError, textOf(bound));
+  const boundMessage = (await b.ops.inbox({ thread: 'msg_thread_bound_mcp' })).messages.find((message) => message.body === 'bound thread');
+  assert.equal(boundMessage.originSession, 'session-local-mcp');
+
+  // link_reply addresses the peer's origin session by default.
+  await a.ops.acceptMessage({
+    id: 'msg_inbound_directed_mcp', ts: new Date().toISOString(),
+    from: { nodeId: 'node_B', name: 'nodeB', url: 'http://127.0.0.1:1' },
+    to: a.cfg.name, thread: 'msg_thread_inbound_directed', replyTo: null, kind: 'message',
+    subject: '请回复', body: 'please answer', attachments: [], originSession: 'session-origin-remote'
+  });
+  const replied = await client.callTool({ name: 'link_reply', arguments: { id: 'msg_inbound_directed_mcp', body: 'answered' } });
+  assert.ok(!replied.isError, textOf(replied));
+  const answer = (await b.ops.inbox({ thread: 'msg_thread_inbound_directed' })).messages.find((message) => message.body === 'answered');
+  assert.equal(answer.targetSession, 'session-origin-remote', 'link_reply targets the message origin session');
+  assert.equal(answer.thread, 'msg_thread_inbound_directed');
+
   const listing = await client.callTool({ name: 'link_list_files', arguments: { peer: 'self', root: 'ws', path: 'src' } });
   assert.ok(!listing.isError, textOf(listing));
   assert.match(textOf(listing), /server\.mjs/);

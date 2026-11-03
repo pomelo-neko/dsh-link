@@ -14,6 +14,13 @@
 //     executed here with the Host services and answered back over loopback (lib/commands.js,
 //     lib/dshops.js).
 //
+// 0.4 adds directed conversations: an inbound message may name the exact local Session it is
+// addressed to (`targetSession`). The bridge checks a per-peer/per-session policy (lib/targets.js),
+// wakes that Session instead of the shared pool, and pre-binds the thread so the answer carries
+// this Session's id back as `originSession` — the peer can then keep replying into that Session.
+// Two DSH conversations can therefore talk to each other for many turns without a human choosing
+// a session each time.
+//
 // Zero runtime dependencies: polling uses global fetch, state is one JSON file, and the only
 // DSH services used are the public Host ones (ctx.sessionController, ctx.workspaceRegistry).
 import { promises as fs } from 'node:fs';
@@ -23,12 +30,13 @@ import { createCommandWorker } from './commands.js';
 import { createDshOps } from './dshops.js';
 import { TOPIC_DEFAULTS, normalizeTopicPolicy, planSession, poolSummary, recordUse, sweepPool, topicKeyFor, topicLabel } from './topics.js';
 import { forgetRoutesForSession, isSendTool, normalizeRoutePolicy, registerRoute, routeFor, routesSummary, sentMessageFromResult, sweepRoutes } from './routes.js';
+import { authorizeTarget, messagePeer, normalizeTargetPolicy, resolveTarget, targetsSummary } from './targets.js';
 
 /** Cordis plugin name. */
 export const name = 'dsh-link-bridge';
 
 /** Reported to the node in the bridge heartbeat, so a peer can tell which bridge answered. */
-export const BRIDGE_VERSION = '0.3.0';
+export const BRIDGE_VERSION = '0.4.0';
 
 /**
  * Host services required: create/resume/prompt a Session and group it in a Workspace.
@@ -44,6 +52,12 @@ const DEFAULTS = {
   token: '',
   workspacePath: '',
   sessionId: '',
+  // How an inbound batch enters the target Session:
+  //   'auto'  - steer interactive deliveries (direct target / route reply) into the running turn,
+  //             queue disposable topic-pool wakes (the historical FIFO behavior);
+  //   'queue' - always append a turn (never interrupt the running one);
+  //   'steer' - always submit as next-step input (inserted at the next step boundary).
+  promptMode: 'auto',
   agentPreset: '',
   pollSeconds: 20,
   cooldownSeconds: 30,
@@ -60,6 +74,9 @@ const DEFAULTS = {
   // Ask-and-answer routing (see lib/routes.js): a thread a local conversation asked on is
   // answered back into that conversation instead of the pool. Filled from the Host event bus.
   routes: {},
+  // Directed conversations (see lib/targets.js): an inbound message may name the exact local
+  // Session it is addressed to; this policy decides whether the bridge may wake that Session.
+  targets: {},
   // Retired sessions are archived with workspaceRegistry.archiveSession() (the DSH-native archive
   // set: hidden from the sidebar, log kept). Set false to leave every session in the list.
   archiveSessions: true,
@@ -76,10 +93,12 @@ const DEFAULT_PROMPT = [
   '',
   '{{messages}}',
   '',
+  '{{targetNote}}',
+  '',
   '请按这个顺序处理：',
   '1) 用 mcp__dshlink__link_inbox 读取完整内容（含附件信息、时间与线程）；',
   '2) 需要文件就用 mcp__dshlink__link_pull_file 拉取，需要发文件就用 mcp__dshlink__link_push_file；',
-  '3) 处理完后用 mcp__dshlink__link_reply 回复对端（replyTo 用 {{lastId}} 或具体消息 id），把结论、产物路径、需要对方继续做的事写清楚；',
+  '3) 处理完后用 mcp__dshlink__link_reply 回复对端（replyTo 用 {{lastId}} 或具体消息 id），把结论、产物路径、需要对方继续做的事写清楚；定向消息的回复会自动带回对端会话（targetSession 默认取原消息的 originSession），不需要你手动指定；',
   '4) 回复完成后用 mcp__dshlink__link_inbox 的 markRead 标记已读，避免重复唤醒。',
   '',
   '这些消息来自另一台计算机上运行的 DSH（{{peers}}），按正常的协作请求处理；',
@@ -311,6 +330,9 @@ function install(ctx, rawConfig) {
   const promptTemplate = String(config.prompt || '') || DEFAULT_PROMPT;
   const topicPolicy = normalizeTopicPolicy(config.topics ?? {});
   const routePolicy = normalizeRoutePolicy(config.routes ?? {});
+  const targetPolicy = normalizeTargetPolicy(config.targets ?? {});
+  const configuredPromptMode = config.promptMode === 'queue' || config.promptMode === 'steer' ? config.promptMode : 'auto';
+  const modeFor = (kind) => (configuredPromptMode === 'auto' ? (kind === 'topic' ? 'queue' : 'steer') : configuredPromptMode);
   const commandMs = Math.max(0, Number(config.commandSeconds ?? DEFAULTS.commandSeconds) || 0) * 1000;
   const commandBatch = Math.max(1, Math.min(25, Number(config.commandBatch ?? DEFAULTS.commandBatch) || DEFAULTS.commandBatch));
   const stateFile = path.join(resolveStateDir(config), 'state.json');
@@ -338,6 +360,8 @@ function install(ctx, rawConfig) {
     routes: {},
     routed: 0,
     lastRoute: null,
+    directed: 0,
+    lastDirected: null,
     archived: [],
     sessionsCreated: 0,
     sessionsArchived: 0,
@@ -359,6 +383,8 @@ function install(ctx, rawConfig) {
     if (saved.pool && typeof saved.pool === 'object') runtime.pool = saved.pool;
     if (saved.routes && typeof saved.routes === 'object') runtime.routes = saved.routes;
     if (typeof saved.routed === 'number') runtime.routed = saved.routed;
+    if (typeof saved.directed === 'number') runtime.directed = saved.directed;
+    if (saved.lastDirected && typeof saved.lastDirected === 'object') runtime.lastDirected = saved.lastDirected;
     if (Array.isArray(saved.archived)) runtime.archived = saved.archived.slice(-50);
     if (typeof saved.sessionsCreated === 'number') runtime.sessionsCreated = saved.sessionsCreated;
     if (typeof saved.sessionsArchived === 'number') runtime.sessionsArchived = saved.sessionsArchived;
@@ -468,19 +494,50 @@ function install(ctx, rawConfig) {
   }
 
   /**
+   * Tell the node "this peer thread is handled by this local Session" (POST /api/v1/bridge/bind).
+   * The node stamps the binding onto later outbound messages as `originSession`, so the peer can
+   * address its next directed reply to the same conversation. Never throws: the local route table
+   * already makes the current turn work, this only improves the next one.
+   */
+  async function bindThreadOnNode(thread, sessionId, peer) {
+    if (!thread || !sessionId) return false;
+    const guard = timeoutSignal(5000);
+    try {
+      const res = await fetch(baseUrl + '/api/v1/bridge/bind', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
+        body: JSON.stringify({ thread: String(thread), sessionId: String(sessionId), peer: peer ? String(peer) : null }),
+        signal: guard.signal
+      });
+      if (!res.ok) {
+        log.debug('bind ' + thread + ' -> ' + sessionId + ': HTTP ' + res.status);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      log.debug('bind ' + thread + ' -> ' + sessionId + ' failed: ' + errorText(error));
+      return false;
+    } finally {
+      guard.done();
+    }
+  }
+
+  /**
    * Record "this Session just sent a message on this thread" straight from the Host event bus.
    * The dsh-link send tools are ordinary tools, so `tools/result` carries both the calling agent
    * (and therefore its Session) and the message the node created: no new tool argument and no
    * cooperation from the agent is needed. A failure here must never affect the tool result.
    */
   function recordOutbound(exec, result) {
-    if (!routePolicy.enabled) return;
     if (!exec || typeof exec.name !== 'string' || !isSendTool(exec.name)) return;
     if (result && result.isError === true) return;
     const sessionId = exec.agent && exec.agent.session ? exec.agent.session.id : null;
     if (!sessionId) return;
     const sent = sentMessageFromResult(result, exec.arguments);
     if (!sent) return;
+    // Bindings matter for directed delivery even when ask-and-answer routing is switched off.
+    void bindThreadOnNode(sent.thread, sessionId, null);
+    if (!routePolicy.enabled) return;
     const entry = registerRoute(runtime.routes, {
       thread: sent.thread, messageId: sent.id, sessionId, now: Date.now(), policy: routePolicy
     });
@@ -489,10 +546,10 @@ function install(ctx, rawConfig) {
     log.debug('route: thread ' + sent.thread + ' -> ' + sessionId);
   }
 
-  if (routePolicy.enabled && typeof ctx.on === 'function') {
+  if (typeof ctx.on === 'function') {
     try {
       ctx.on('tools/result', (exec, result) => {
-        try { recordOutbound(exec, result); } catch (error) { log.debug('route registration failed: ' + errorText(error)); }
+        try { recordOutbound(exec, result); } catch (error) { log.debug('route/binding registration failed: ' + errorText(error)); }
       });
     } catch (error) {
       log.debug('could not subscribe to tools/result: ' + errorText(error));
@@ -526,77 +583,174 @@ function install(ctx, rawConfig) {
         log.debug('holding ' + messages.length + ' message(s) for the cooldown window');
         return;
       }
-      const newest = messages[messages.length - 1];
-      const topicKey = topicKeyFor(newest, topicPolicy);
-      const label = topicLabel(newest);
-      const threadId = topicKey;
-      const gate = wakeGate(runtime, threadId, now, limits);
-      if (!gate.ok) {
-        runtime.suppressed += 1;
-        runtime.lastSuppressed = {
-          at: new Date(now).toISOString(), thread: threadId, id: newest.id,
-          reason: gate.reason, dropped: !gate.soft
-        };
-        if (gate.soft) {
-          log.debug('holding back a wake for ' + threadId + ': ' + gate.reason);
-          return;
-        }
-        log.warn('loop guard: dropped a wake for ' + threadId + ' — ' + gate.reason);
-        runtime.watermark = { ts: String(newest.ts ?? ''), id: newest.id };
-        return;
-      }
       runtime.phase = 'session';
-      // A thread a local conversation asked on is answered back into that conversation; every
-      // other message keeps the one-session-per-topic behaviour.
-      const route = routeFor(runtime.routes, newest, { now, policy: routePolicy });
-      let sessionId = route && !runtime.deadSessions.has(route.sessionId) ? route.sessionId : null;
-      if (sessionId) {
-        runtime.routed += 1;
-        runtime.topic = { key: route.key, reason: 'route:' + route.matched, sessionId };
-        runtime.lastRoute = { thread: route.key, sessionId, id: newest.id, at: new Date().toISOString(), direction: 'in', matched: route.matched };
-        log.info('routed ' + newest.id + ' back into ' + sessionId + ' (thread ' + route.key + ', matched by ' + route.matched + ')');
-      } else {
-        sessionId = await ensureSessionFor(topicKey, label);
-        // Count the wake before prompting: a failed prompt then retries against the same session
-        // instead of opening a fresh one on every tick.
-        recordUse(runtime.pool, topicKey, { sessionId, label, now, messages: messages.length });
-      }
-      runtime.sessionId = sessionId;
-      const peers = [...new Set(messages.map((message) => (message.from && message.from.name) || '未知节点'))];
-      const text = renderPrompt(promptTemplate, {
-        node: runtime.node,
-        count: messages.length,
-        peers: peers.join(', '),
-        lastId: newest.id,
-        messages: renderMessages(messages, maxBodyChars)
-      });
-      runtime.phase = 'prompt';
-      const requestId = 'link-bridge:' + sessionId + ':' + newest.id;
-      const guard = promptSignal(60_000);
-      try {
-        // DSH 0.2.0 made `mode` a required field of SessionPromptRequest. 'queue' is what the bridge
-        // always meant (append to the session's inbox) and what the capability channel already sends.
-        await ctx.sessionController.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text }], requestId }, guard.signal);
-      } catch (error) {
-        // A session that disappeared between selection and prompt must not be reused forever.
-        if (/not found|unknown session|no such session/i.test(errorText(error))) {
-          runtime.deadSessions.add(sessionId);
-          const forgotten = forgetRoutesForSession(runtime.routes, sessionId);
-          if (forgotten) log.debug('forgot ' + forgotten + ' route(s) for missing session ' + sessionId);
+      // Plan one wake per delivery target (v0.4): an explicit targetSession wins, then the
+      // ask-and-answer route, then the usual one-session-per-topic pool. Messages that share a
+      // target share one prompt, and plans are processed in message order so the watermark can
+      // advance after each successful wake (a later failure no longer replays earlier prompts).
+      const plans = [];
+      const planIndex = new Map();
+      const planFor = (key, init) => {
+        let plan = planIndex.get(key);
+        if (!plan) {
+          plan = Object.assign({ key, messages: [], note: '', newest: null }, init);
+          planIndex.set(key, plan);
+          plans.push(plan);
         }
-        throw error;
-      } finally {
-        guard.done();
+        return plan;
+      };
+      const addPlan = (plan, message) => {
+        plan.messages.push(message);
+        plan.newest = message;
+      };
+      const topicPlanFor = (message, route) => {
+        if (route && !runtime.deadSessions.has(route.sessionId)) {
+          return planFor('session:' + route.sessionId, {
+            kind: 'route', sessionId: route.sessionId, matched: route.matched, routeKey: route.key,
+            topicKey: topicKeyFor(message, topicPolicy), label: topicLabel(message), peer: messagePeer(message)
+          });
+        }
+        const topicKey = topicKeyFor(message, topicPolicy);
+        return planFor('topic:' + topicKey, {
+          kind: 'topic', sessionId: null, matched: null, topicKey,
+          label: topicLabel(message), peer: messagePeer(message)
+        });
+      };
+      for (const message of messages) {
+        const peer = messagePeer(message);
+        const target = resolveTarget(message);
+        if (target) {
+          const decision = authorizeTarget(targetPolicy, message);
+          if (decision.ok && !runtime.deadSessions.has(decision.sessionId)) {
+            const plan = planFor('session:' + decision.sessionId, {
+              kind: 'direct', sessionId: decision.sessionId, matched: 'target',
+              topicKey: topicKeyFor(message, topicPolicy), label: topicLabel(message), peer
+            });
+            plan.kind = 'direct';
+            plan.sessionId = decision.sessionId;
+            plan.matched = 'target';
+            plan.note = '这组消息由对端定向投递给本机会话 ' + decision.sessionId
+              + (message.originSession ? '（对端会话 ' + message.originSession + '）' : '')
+              + '；请直接在这个会话里处理，并用 link_reply 回复（回复会自动回到对端会话）。';
+            addPlan(plan, message);
+            continue;
+          }
+          // Directed delivery is not possible (policy or dead session): fall back to route/pool,
+          // but tell the session what was asked for so it can still answer usefully.
+          const reason = decision.ok ? '该会话已不可用' : decision.reason;
+          const fallback = topicPlanFor(message, routeFor(runtime.routes, message, { now, policy: routePolicy }));
+          fallback.note = '对端原本要求把消息定向投递给会话 ' + target + '，但' + reason
+            + '；已改由当前会话处理，回复时可以用 targetSession 指定需要的会话。';
+          fallback.askedTarget = target;
+          addPlan(fallback, message);
+          continue;
+        }
+        addPlan(topicPlanFor(message, routeFor(runtime.routes, message, { now, policy: routePolicy })), message);
       }
-      recordWake(runtime, threadId, now);
-      runtime.watermark = { ts: String(newest.ts ?? ''), id: newest.id };
-      runtime.lastNotifyAt = now;
-      runtime.notified += messages.length;
-      log.info('woke session ' + sessionId + ' with ' + messages.length + ' message(s) from ' + peers.join(', ') + ' (through ' + newest.id + ')');
-      // No extra state write here: the heartbeat in the finally block below is a superset
-      // (same watermark/sessionId plus ticks/notified/errors). Writing twice per tick used to
-      // expose a partial state.json for a moment — an operator (or a test) reading the file
-      // right then would see the watermark but no errors/notified fields.
+      if (!plans.length) return;
+      const compareMessage = (a, b) => {
+        const at = String(a.ts ?? '');
+        const bt = String(b.ts ?? '');
+        if (at !== bt) return at < bt ? -1 : 1;
+        const ai = String(a.id ?? '');
+        const bi = String(b.id ?? '');
+        return ai < bi ? -1 : ai > bi ? 1 : 0;
+      };
+      plans.sort((a, b) => compareMessage(a.newest, b.newest));
+      let prompted = 0;
+      for (const plan of plans) {
+        const newest = plan.newest;
+        const threadId = topicKeyFor(newest, topicPolicy);
+        // Bindings and routes are keyed by the raw envelope thread (what a later reply carries),
+        // while the loop guard and topic pool use the prefixed topic key.
+        const thread = String(newest.thread ?? newest.id);
+        const gate = wakeGate(runtime, threadId, now, limits);
+        if (!gate.ok) {
+          runtime.suppressed += 1;
+          runtime.lastSuppressed = {
+            at: new Date(now).toISOString(), thread: threadId, id: newest.id,
+            reason: gate.reason, dropped: !gate.soft
+          };
+          if (gate.soft) {
+            // Keep this and every newer target for the next tick: the watermark must not jump
+            // over a message we deliberately held back.
+            log.debug('holding back a wake for ' + threadId + ': ' + gate.reason);
+            break;
+          }
+          log.warn('loop guard: dropped a wake for ' + threadId + ' — ' + gate.reason);
+          runtime.watermark = { ts: String(newest.ts ?? ''), id: newest.id };
+          continue;
+        }
+        let sessionId = plan.sessionId;
+        if (sessionId) {
+          if (plan.kind === 'route') {
+            runtime.routed += 1;
+            runtime.topic = { key: plan.routeKey, reason: 'route:' + plan.matched, sessionId };
+            runtime.lastRoute = { thread: plan.routeKey, sessionId, id: newest.id, at: new Date(now).toISOString(), direction: 'in', matched: plan.matched };
+            log.info('routed ' + newest.id + ' back into ' + sessionId + ' (thread ' + plan.routeKey + ', matched by ' + plan.matched + ')');
+          } else if (plan.kind === 'direct') {
+            runtime.directed += 1;
+            runtime.lastDirected = {
+              thread, sessionId, originSession: newest.originSession || null,
+              id: newest.id, at: new Date(now).toISOString(), direction: 'in', matched: 'target'
+            };
+            log.info('directed ' + newest.id + ' into ' + sessionId + (newest.originSession ? ' (from session ' + newest.originSession + ')' : ''));
+          }
+          // Keep the node-side binding current: later messages this Session sends carry
+          // originSession even when the model only passes thread/replyTo.
+          await bindThreadOnNode(thread, sessionId, plan.peer);
+          if (plan.kind !== 'topic') {
+            registerRoute(runtime.routes, { thread, messageId: newest.id, sessionId, now, policy: routePolicy });
+          }
+        } else {
+          sessionId = await ensureSessionFor(threadId, plan.label);
+          // Count the wake before prompting: a failed prompt then retries against the same session
+          // instead of opening a fresh one on every tick.
+          recordUse(runtime.pool, threadId, { sessionId, label: plan.label, now, messages: plan.messages.length });
+          await bindThreadOnNode(thread, sessionId, plan.peer);
+        }
+        runtime.sessionId = sessionId;
+        // 'queue' appends a turn; 'steer' submits next-step input into the turn that is already
+        // running (DSH interrupts it at the next step boundary). A directed/route delivery is a
+        // conversation, so it steers by default; a topic-pool flush stays FIFO.
+        const mode = modeFor(plan.kind);
+        const peers = [...new Set(plan.messages.map((message) => (message.from && message.from.name) || '未知节点'))];
+        const text = renderPrompt(promptTemplate, {
+          node: runtime.node,
+          count: plan.messages.length,
+          peers: peers.join(', '),
+          lastId: newest.id,
+          messages: renderMessages(plan.messages, maxBodyChars),
+          delivery: plan.kind === 'direct' ? 'direct' : plan.kind === 'route' ? 'route' : 'topic',
+          targetSession: sessionId,
+          originSession: newest.originSession || '',
+          targetNote: plan.note || ''
+        });
+        runtime.phase = 'prompt';
+        const requestId = 'link-bridge:' + sessionId + ':' + newest.id;
+        const guard = promptSignal(60_000);
+        try {
+          // DSH 0.2.0 made `mode` a required field of SessionPromptRequest.
+          await ctx.sessionController.prompt({ sessionId, mode, content: [{ type: 'text', text }], requestId }, guard.signal);
+        } catch (error) {
+          // A session that disappeared between selection and prompt must not be reused forever.
+          if (/not found|unknown session|no such session/i.test(errorText(error))) {
+            runtime.deadSessions.add(sessionId);
+            const forgotten = forgetRoutesForSession(runtime.routes, sessionId);
+            if (forgotten) log.debug('forgot ' + forgotten + ' route(s) for missing session ' + sessionId);
+          }
+          throw error;
+        } finally {
+          guard.done();
+        }
+        recordWake(runtime, threadId, now);
+        runtime.watermark = { ts: String(newest.ts ?? ''), id: newest.id };
+        runtime.lastNotifyAt = now;
+        runtime.notified += plan.messages.length;
+        prompted += 1;
+        log.info('woke session ' + sessionId + ' with ' + plan.messages.length + ' message(s) from ' + peers.join(', ') + ' (' + plan.kind + ', ' + mode + ', through ' + newest.id + ')');
+      }
+      if (prompted) runtime.phase = 'done';
     } catch (error) {
       runtime.errors += 1;
       runtime.lastError = errorText(error);
@@ -629,6 +783,7 @@ function install(ctx, rawConfig) {
         suppressed: runtime.suppressed,
         lastSuppressed: runtime.lastSuppressed,
         node: runtime.node,
+        promptMode: configuredPromptMode,
         workspacePath,
         pool: poolSummary(runtime.pool),
         topic: runtime.topic,
@@ -636,6 +791,9 @@ function install(ctx, rawConfig) {
         routeTable: runtime.routes,
         routed: runtime.routed,
         lastRoute: runtime.lastRoute,
+        directed: runtime.directed,
+        lastDirected: runtime.lastDirected,
+        targets: targetsSummary(targetPolicy),
         archived: runtime.archived.slice(-10),
         sessionsCreated: runtime.sessionsCreated,
         sessionsArchived: runtime.sessionsArchived,
@@ -647,9 +805,16 @@ function install(ctx, rawConfig) {
   }
 
   log.info('watching ' + baseUrl + ' every ' + (pollMs / 1000) + 's; workspace ' + workspacePath + (config.sessionId ? '; session ' + config.sessionId + ' (pinned)' : '; one session per topic'));
+  log.info('wake mode: ' + (configuredPromptMode === 'auto' ? 'auto (steer direct/route deliveries, queue topic batches)' : configuredPromptMode));
   log.info('loop guard: thread cooldown ' + limits.threadCooldownSeconds + 's, ' + limits.maxThreadWakes + ' wakes/thread per ' + Math.round(limits.threadWindowSeconds / 60) + 'min, ' + limits.maxWakesPerHour + ' wakes/hour overall');
   log.info('topic policy: strategy ' + topicPolicy.strategy + ', ' + topicPolicy.maxSessionWakes + ' wakes/session, session age ' + Math.round(topicPolicy.maxSessionAgeSeconds / 3600) + 'h, idle reset ' + Math.round(topicPolicy.topicIdleResetSeconds / 3600) + 'h, archive after ' + Math.round(topicPolicy.archiveIdleSeconds / 3600) + 'h idle, pool ' + topicPolicy.maxPoolSize + (config.archiveSessions === false ? ' (archiving off)' : ''));
   log.info('routing: ' + (routePolicy.enabled ? 'on (a thread asked locally is answered back into that conversation, ttl ' + Math.round(routePolicy.ttlSeconds / 3600) + 'h)' : 'off'));
+  const targetView = targetsSummary(targetPolicy);
+  log.info('directed sessions: ' + (targetView.enabled
+    ? (targetView.open
+      ? 'on (a peer may address any local Session by id)'
+      : 'on (peers: ' + (targetView.peers.length ? targetView.peers.join(', ') : 'any') + '; allow: ' + (targetView.allow.length ? targetView.allow.join(', ') : 'any') + (targetView.deny.length ? '; deny: ' + targetView.deny.join(', ') : '') + ')')
+    : 'off (inbound messages always go to route/topic sessions)'));
   log.info('state file: ' + stateFile);
   const mode = schedulePolling(ctx, () => { void tick(); }, pollMs);
   log.debug('poll scheduled via ' + mode);
@@ -669,6 +834,7 @@ function install(ctx, rawConfig) {
           errors: runtime.errors,
           sessions: Object.keys(runtime.pool).length,
           routed: runtime.routed,
+          directed: runtime.directed,
           archived: runtime.sessionsArchived,
           lastArchive: runtime.lastArchive
         })

@@ -7,6 +7,7 @@
 - 零运行时依赖：只用 Node 内置模块（`node:http` / `node:crypto` / `node:fs`），不需要 npm install。
 - 三种连通方式：**局域网/公网直连**、**FRP STCP 内网穿透**（无公网端口，推荐）、**中继转发**（A→hub→B）。
 - 给 DSH 的两条接入路径：**MCP**（`dsh-mcp-client` 挂本机 `/mcp`，工具名 `mcp__dshlink__link_*`）和 **CLI/技能**（agent 用 pwsh 调 `dshlink`）。
+- **定向会话（0.4）**：消息可以点名对方机器上的具体 **Session**，回复自动带回发起会话；两端真实对话可以多轮交流，而不是全部落进桥的池会话。策略可控、可关闭。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 
 ---
@@ -81,6 +82,8 @@ node bin\dshlink.mjs install-dsh --profile web --bridge --bridge-workspace "D:\d
 # 然后重启一次 DSH host（新插件条目在启动时装载）；之后改配置即时生效
 ```
 
+0.4 起桥还支持**定向投递**：来信信封里带 `targetSession` 且桥的 `targets` 策略放行时，prompt 直接进那条本机会话（而不是池会话），并把 thread 绑定下来，后续消息继续落在同一会话；回复自动带回发起的会话。未定向的消息仍走上面的话题逻辑。
+
 细节、配置项与自检方式见 [`integrations/dsh-link-bridge/README.md`](integrations/dsh-link-bridge/README.md)。
 
 ### 看到并访问对方的所有工作区与对话（0.3）
@@ -114,6 +117,28 @@ dshlink dsh call sessions.prompt --peer bob-pc --wait 30 --params '{"sessionId":
 
 桥不再永远复用同一个对话：同话题复用、超龄/超预算/闲置就新建，并把退休的对话**归档**（DSH 原生归档，
 侧边栏收起、日志保留）。这样「无关上下文被反复塞进同一个会话」的问题就消失了。配置与判据见插件 README。
+
+### 定向会话：和对方的指定对话连续交流（0.4）
+
+0.3 及以前，对端发来的消息一律唤醒桥自己的池会话。0.4 让发送方可以点名接收方机器上的**具体 Session**，
+并让接收方记住「这个 thread 归哪条本机会话」，于是回信能回到发起交流的那条对话——中间没有桥会话，
+多轮交流也不用每轮重复会话 id。
+
+```powershell
+# 发送方：先看对端有哪些对话，再指定一条
+dshlink dsh sessions --peer bob-pc
+dshlink send --to bob-pc --thread msg_<根消息> --target-session session-xxxx --body "接着这条聊"
+
+# 接收方：查看/固定 thread → 本机会话绑定
+dshlink bind --thread msg_<根消息>                 # 查看当前绑定
+dshlink bind --thread msg_<根消息> --session session-yyyy
+```
+
+`targetSession` / `originSession` 是普通信封字段（中继、sync 原样透传，旧节点也会存下来）；桥按
+`targets` 策略决定是否投进指定会话，被拒或目标不存在时回退到 thread 路由或话题池，并把原因写进 prompt。
+反方向上，`link_reply`（以及 `dshlink send`）会从绑定自动补 `originSession`，对方的桥再把回信路由回
+那条会话。字段只决定 prompt 投到哪，不执行任何命令。策略、回退、线格式与排障见
+[`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md)。
 
 ## 3. 内网穿透（FRP STCP）
 
@@ -155,7 +180,8 @@ frps 的 7000 端口，dsh-link 的 API 不直接对外。详见 [`docs/FRP.md`]
 | `serve` | 启动 HTTP API + `/mcp`；`--auto-sync 30` 可周期同步/重投；`--no-reload` 关掉配置热重载 |
 | `status` / `peers list\|add\|rm\|ping` | 本机状态、对端登记与探活 |
 | `token list\|new\|rm` | 管理入站 token（只存 sha256，明文仅显示一次） |
-| `send` / `inbox` / `show` / `sync` / `flush` | 发消息、收件箱、看单条、拉队列、重投 |
+| `send` / `inbox` / `show` / `sync` / `flush` | 发消息（`--target-session` / `--origin-session` 可定向）、收件箱、看单条、拉队列、重投 |
+| `bind` | 查看/设置 thread → 本机会话绑定（0.4；回复自动带 originSession） |
 | `ls` / `pull` / `push` | 列目录、拉文件、推文件（推送需对端 `files.allowUpload: true`） |
 | `audit` | 本机审计日志（谁在什么时候拉了哪个文件） |
 | `tunnel setup\|sync\|status\|share\|import\|stop\|config` | FRP 穿透的配置与进程管理 |
@@ -179,7 +205,7 @@ dshlink doctor        # node:config / node:hot-reload 两项告诉你进程与�
 0.2.0 及更早版本只在启动时读一次配置：之后用 CLI 加上的 peer 只有 CLI 自己看得见，
 运行中的节点 `send` 会报 `unknown peer: <名字>`（收消息却正常，因为入站只校验 token）——
 看起来像"配置写错了"，其实是进程里的配置过期。升级后问题消失；旧进程重启一次也可以。
-仍需重启的只有 `bind`/`port`、`limits.requestTimeoutMs` 这类进程级参数，以及隧道进程本身。
+仍需重启的只有配置项 `bind`/`port`、`limits.requestTimeoutMs` 这类进程级参数，以及隧道进程本身。
 
 遇到说不通的现象（`unknown peer`、队列状态"自己变回去"、隧道归属不清等），先看
 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)——按症状、原因、处理三段列出，附一分钟体检清单。
@@ -211,6 +237,7 @@ DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启�
 | 审计 | 开 | `audit.jsonl` 记录文件访问与消息投递 |
 | DSH 视图（0.3） | 关闭 | `dsh.enabled` 才开放工作区/对话读取；`dsh.exposeTranscripts` 单独控制对话正文 |
 | 能力通道（0.3） | 关闭 | `capabilities.enabled` + 方法白名单；**动作方法（新建/发消息/改名/归档）默认不放行**，可按 peer 覆盖；命令只走本机 loopback，远端一律由节点裁决；每次调用写审计 |
+| 定向投递（0.4） | 桥默认开启、任意对端 | 桥的 `targets.{enabled,peers,allow,deny}` 决定哪个对端能向哪条本机会话投递；可关闭或收紧 |
 
 > 打开 DSH 视图 = 让持有 token 的对端读到本机**全部工作区路径与全部对话内容**（对话里可能有凭据、
 > 隐私、内部代码）。只在你信任这些对端时打开；动作能力更进一步——`sessions.prompt` 等于让对方驱动
@@ -235,15 +262,15 @@ dsh-link/
 │   ├── reload.mjs          # 配置热重载（改 peer/token/根目录不用重启）
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
-├── test/                   # 116 项检查 / 15 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载与桥）+ CLI 冒烟
+├── test/                   # 149 项检查 / 19 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话）+ CLI 冒烟
 ├── docs/                   # 架构、设计、协议、DSH 接入、FRP 部署、运维手册、排障手册
-└── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话）
+└── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递）
 ```
 
 ## 7. 验证
 
 ```powershell
-node test/run.mjs                     # 116/116：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、DSH 视图、doctor
+node test/run.mjs                     # 149 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、DSH 视图、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 
@@ -251,8 +278,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
 只经过 STCP 隧道（visitor 端口 `127.0.0.1:19130/19131`）流动，并检查 frpc 日志里的
 `start proxy success` / `start visitor success`。没有 frp 二进制时该用例自动跳过。
 
-其中 MCP 测试用的是 DSH 自己安装的 `@modelcontextprotocol/sdk`（`dsh-mcp-client` 的底层库），
-即 dsh-link 与 DSH 的 MCP 端点已被真实客户端验证过。
+其中 MCP 测试用的是 DSH 自己安装的 MCP TypeScript SDK（`@modelcontextprotocol/sdk` 1.x 或
+`@modelcontextprotocol/client` 2.x，均可自动发现），即 dsh-link 与 DSH 的 MCP 端点已被真实客户端验证过。
+定向会话也有端到端覆盖：HTTP 信封字段、回环 bind 端点、`link_reply` 自动 `targetSession`、桥的目标投递/策略拒绝回退/一批多目标。
 
 **跨公网实测**（Windows 节点 ↔ WSL 节点，经阿里云 frps）：消息双向、文件拉取（sha256 一致）、
 文件推送、双向 ping 全部通过，详见 [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md)。
@@ -263,10 +291,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
 - FRP 侧只生成 STCP 配置，不代管公网 frps 的部署与证书。
 - 大文件没有分片/断点续传（HTTP Range 已支持单段下载，客户端尚未用）。
 - 消息默认内联附件上限 512 KiB；更大的文件走文件 API。
-- 配置热重载覆盖 peers / tokens / 共享目录 / `dsh` / `capabilities`；`bind`/`port`、`limits.requestTimeoutMs` 与隧道进程仍需重启。
+- 配置热重载覆盖 peers / tokens / 共享目录 / `dsh` / `capabilities`；配置项 `bind`/`port`、`limits.requestTimeoutMs` 与隧道进程仍需重启。
 - DSH 视图是**磁盘直读**：DSH 换会话日志格式（当前 v3）时需要升级 dsh-link；无 zstd 的 Node（<22.15）
   会报 `zstd-unsupported`，此时改用 bridge 的能力通道读。
 - 会话摘要里的 `messages` 是下界（索引只扫日志头部），要精确条数用 `transcript` 的 `total`。
+- 定向投递需要发送端节点 ≥ 0.4、接收端节点与桥 ≥ 0.4 才会生效；旧节点会存下字段但忽略。
 - 尚无端到端加密（依赖 frps 的 TLS/网络可信）；仅在可信网络或加反代后使用。
 
 ## 9. 导出给其他 DSH 使用（客户端发行包）

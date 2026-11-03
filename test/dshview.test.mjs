@@ -465,7 +465,63 @@ test('dshview: transcript() supports limit, offset and tail', async () => {
   assert.equal(beyond.messages.length, 0);
   assert.equal(beyond.total, 6);
   const unknown = await view.transcript('session-00000000-0000-4000-8000-000000000000');
-  assert.deepEqual(unknown, { session: null, total: 0, messages: [], truncated: false, corruptFrames: 0 });
+  assert.deepEqual(unknown, { session: null, total: 0, messages: [], truncated: false, corruptFrames: 0, latestSeq: 0, sinceSeq: null });
+});
+
+test('dshview: transcript() filters by sinceSeq and reports the head seq', async () => {
+  const built = await fixture();
+  const view = await viewFor(built.home);
+  const whole = await view.transcript(S1);
+  assert.equal(whole.latestSeq, 12, 'latestSeq is the newest durable seq in the log');
+  assert.equal(whole.sinceSeq, null, 'no cursor means no filtering');
+
+  const incremental = await view.transcript(S1, { sinceSeq: 9 });
+  assert.equal(incremental.sinceSeq, 9);
+  assert.equal(incremental.total, 3);
+  assert.deepEqual(incremental.messages.map((message) => message.seq), [10, 11, 12]);
+  assert.equal(incremental.latestSeq, 12);
+  assert.equal(incremental.truncated, false);
+
+  const paged = await view.transcript(S1, { sinceSeq: 8, limit: 1 });
+  assert.equal(paged.total, 5);
+  assert.equal(paged.messages.length, 1);
+  assert.equal(paged.truncated, true);
+
+  const newest = await view.transcript(S1, { sinceSeq: 9, tail: true, limit: 1 });
+  assert.deepEqual(newest.messages.map((message) => message.seq), [12]);
+
+  const caughtUp = await view.transcript(S1, { sinceSeq: 12 });
+  assert.equal(caughtUp.total, 0);
+  assert.deepEqual(caughtUp.messages, []);
+  assert.equal(caughtUp.latestSeq, 12);
+
+  const junk = await view.transcript(S1, { sinceSeq: 'not-a-number' });
+  assert.equal(junk.sinceSeq, null, 'a junk cursor is ignored rather than breaking the poll');
+  assert.equal(junk.total, 6);
+  const negative = await view.transcript(S1, { sinceSeq: -3 });
+  assert.equal(negative.sinceSeq, 0, 'negative cursors clamp to the start');
+  assert.equal(negative.total, 6);
+});
+
+test('dshview: the newest session log generation wins when v3 and v4 coexist', async () => {
+  const built = await fixture();
+  const home = path.join(TMP, 'multi-generation-home');
+  const sessionId = 'session-88888888-8888-4888-8888-888888888888';
+  const dir = path.join(home, 'sessions', 'proj-v4', BARE(sessionId));
+  await writeLog(path.join(dir, 'session.v3.jsonl.zstd'), logOf(
+    frameOf([sessionEvent(BARE(sessionId), PROJ_A), titleEvent('v3 title', 1), userEvent(2, 'only in v3')])
+  ));
+  await writeLog(path.join(dir, 'session.v4.jsonl.zstd'), logOf(
+    frameOf([{ ...sessionEvent(BARE(sessionId), PROJ_A), version: 4 }, titleEvent('v4 title', 1)]),
+    frameOf([userEvent(3, 'only in v4'), assistantEvent(4, [{ type: 'text', text: 'v4 answer' }])])
+  ));
+  const view = await viewFor(home);
+  const result = await view.transcript(sessionId);
+  assert.equal(result.session.title, 'v4 title', 'metadata comes from the live generation');
+  assert.deepEqual(result.messages.map((message) => message.text), ['only in v4', 'v4 answer']);
+  assert.equal(result.latestSeq, 4);
+  const sessions = await view.sessions({ includeArchived: true });
+  assert.equal(sessions.find((entry) => entry.sessionId === sessionId).title, 'v4 title');
 });
 
 test('dshview: transcript() survives corrupt frames and keeps later messages', async () => {
@@ -581,7 +637,7 @@ test('dshview: a missing, empty or broken DSH home never throws', async () => {
   assert.deepEqual(await empty.workspaces(), []);
   assert.deepEqual(await empty.sessions(), []);
   assert.equal(await empty.session(S1), null);
-  assert.deepEqual(await empty.transcript(S1), { session: null, total: 0, messages: [], truncated: false, corruptFrames: 0 });
+  assert.deepEqual(await empty.transcript(S1), { session: null, total: 0, messages: [], truncated: false, corruptFrames: 0, latestSeq: 0, sinceSeq: null });
   assert.equal(await empty.registry(), null);
   assert.equal(empty.stats().indexed, 0);
   assert.equal(Number.isFinite(Date.parse(empty.stats().lastScanAt)), true, 'the scan ran and recorded its time');

@@ -30,6 +30,8 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
   doctor      本机自检：配置/目录/端口/MCP/对端/隧道            --json
   token       管理入站 token: list | new | rm                 list|new --label|rm --id
   send        给对端发消息（离线排队，之后 flush/sync）       --to --subject --body|--body-file --attach --thread
+                                                              --target-session <对端会话> --origin-session <本机会话>
+  bind        查看/登记 thread 与本机 DSH 会话的绑定            --thread T [--session S] [--peer P]
   inbox       读取收到的消息                                 --unread --limit --thread --peer --mark-read --json
   show        查看单条消息                                    --id --box inbox|outbox
   sync        从对端拉取其为我们暂存的消息                     --from --limit
@@ -43,7 +45,7 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
   dsh         访问对方 DSH 的工作区 / 对话（需对端节点 ≥0.3.0）
               dsh workspaces [--peer P]      列出工作区
               dsh sessions [--peer P] [--workspace W] [--archived] [--query Q]
-              dsh transcript <sessionId> [--peer P] [--limit N] [--tail]
+              dsh transcript <sessionId> [--peer P] [--limit N] [--tail] [--since-seq N]
               dsh capabilities [--peer P]    对端能力清单 + bridge 心跳
               dsh call <method> [--peer P] [--params '<json>'] [--wait N]
               dsh result <commandId>         补取异步命令结果
@@ -412,6 +414,8 @@ async function cmdSend(args) {
     body: body ?? '',
     thread: flagString(args.thread),
     replyTo: flagString(args['reply-to']),
+    targetSession: flagString(args['target-session']),
+    originSession: flagString(args['origin-session']),
     kind: flagString(args.kind) ?? 'message',
     attachments: await attachmentSpecs(args, roots)
   });
@@ -450,6 +454,22 @@ async function cmdInbox(args) {
   return out(result, flagBool(args.json), human);
 }
 
+async function cmdBind(args) {
+  const { ops } = await loadCtx(args);
+  const asJson = flagBool(args.json);
+  const thread = flagString(args.thread) ?? args._[0];
+  if (!thread) throw new LinkError(2, 'usage', 'bind --thread <thread-id> [--session <session-id>] [--peer P]');
+  const sessionId = flagString(args.session);
+  if (!sessionId) {
+    const result = await ops.binding({ thread });
+    return out(result, asJson, result.binding
+      ? `${result.binding.thread} -> ${result.binding.sessionId}${result.binding.peer ? ` (peer ${result.binding.peer})` : ''} updated ${result.binding.updatedAt}`
+      : `no binding for ${thread}`);
+  }
+  const result = await ops.bindSession({ thread, sessionId, peer: flagString(args.peer) });
+  return out(result, asJson, `${result.binding.thread} -> ${result.binding.sessionId} (bound)`);
+}
+
 async function cmdShow(args) {
   const { ops } = await loadCtx(args);
   const message = await ops.readMessage({ id: flagString(args.id) ?? args._[0], box: flagString(args.box) ?? 'inbox' });
@@ -459,6 +479,8 @@ async function cmdShow(args) {
     `time    ${message.ts}`,
     message.subject ? `subject ${message.subject}` : null,
     message.thread ? `thread  ${message.thread}` : null,
+    message.targetSession ? `target  ${message.targetSession}` : null,
+    message.originSession ? `origin  ${message.originSession}` : null,
     (message.attachments ?? []).length ? `attach  ${message.attachments.map((a) => `${a.name} (${formatBytes(a.size)})`).join(', ')}` : null,
     '',
     message.body
@@ -803,16 +825,19 @@ async function cmdDsh(args) {
 
   if (sub === 'transcript') {
     const sessionId = flagString(args.id) ?? (args._ ?? [])[1];
-    if (!sessionId) throw new LinkError(2, 'missing_argument', 'usage: dshlink dsh transcript <sessionId> [--peer P] [--limit N] [--tail]');
+    if (!sessionId) throw new LinkError(2, 'missing_argument', 'usage: dshlink dsh transcript <sessionId> [--peer P] [--limit N] [--tail] [--since-seq N]');
+    const sinceFlag = flagString(args['since-seq']);
     const result = await ops.dshTranscript({
       peer,
       sessionId,
       limit: Number(flagString(args.limit) ?? 100),
       offset: Number(flagString(args.offset) ?? 0),
-      tail: flagBool(args.tail)
+      tail: flagBool(args.tail),
+      sinceSeq: sinceFlag === undefined ? undefined : Number(sinceFlag)
     });
     const lines = (result.messages ?? []).map((m) => `--- [${m.seq ?? '?'}] ${m.role ?? ''} ${m.kind ?? ''}\n${m.text ?? ''}`);
-    return out(result, asJson, `${result.session?.title ?? sessionId} — ${result.messages?.length ?? 0}/${result.total ?? '?'} message(s) on ${result.peer}\n${lines.join('\n')}`);
+    const cursor = result.sinceSeq === null || result.sinceSeq === undefined ? '' : `, after seq ${result.sinceSeq}`;
+    return out(result, asJson, `${result.session?.title ?? sessionId} — ${result.messages?.length ?? 0}/${result.total ?? '?'} message(s) on ${result.peer} (latest seq ${result.latestSeq ?? '?'}${cursor})\n${lines.join('\n')}`);
   }
 
   if (sub === 'capabilities') {
@@ -868,7 +893,7 @@ async function cmdDsh(args) {
 
 const COMMANDS = {
   init: cmdInit, serve: cmdServe, status: cmdStatus, peers: cmdPeers, token: cmdToken,
-  send: cmdSend, inbox: cmdInbox, show: cmdShow, sync: cmdSync, flush: cmdFlush, outbox: cmdOutbox,
+  send: cmdSend, bind: cmdBind, inbox: cmdInbox, show: cmdShow, sync: cmdSync, flush: cmdFlush, outbox: cmdOutbox,
   ls: cmdLs, pull: cmdPull, push: cmdPush, audit: cmdAudit, tunnel: cmdTunnel,
   invite: cmdInvite, doctor: cmdDoctor, 'install-dsh': cmdInstallDsh, dsh: cmdDsh,
   help: async (args) => { out({}, flagBool(args.json), HELP); }

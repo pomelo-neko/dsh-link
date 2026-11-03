@@ -9,8 +9,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-02
+
+The "talk to a specific conversation" release.
+
 ### Added
 
+- **Directed conversations.** A peer message can name the DSH Session that should receive it
+  (`targetSession`), and the sender can identify its own Session (`originSession`). The bridge
+  delivers such a message straight into that Session — one prompt per target, in arrival order —
+  and persists the thread→Session binding through the node (`POST /api/v1/bridge/bind`).
+  `link_reply` / `dshlink reply` default the answer's `targetSession` to the original message's
+  `originSession`, so two DSH instances can hold a multi-round conversation between two chosen
+  conversations instead of two bridge pools. Policy: `targets.enabled` / `peers` / `allow` /
+  `deny` glob lists; a refused or missing target falls back to the route/topic Session with the
+  reason written into the prompt, and the local route is still registered so follow-ups without
+  `targetSession` land in the same Session.
+- **Steering wake-ups.** The bridge now chooses DSH's `SessionPromptRequest.mode` per delivery:
+  directed and route wake-ups use `steer` (interject at the target Session's next step boundary),
+  while topic batches keep `queue` (append a turn), so a peer reply lands like a person interjecting
+  instead of waiting behind a long tool loop. `promptMode: auto|queue|steer` overrides the split;
+  the resolved mode is in `state.json` and the startup log. The capability channel's
+  `sessions.prompt` accepts the same optional `mode` (`queue` default) and validates it.
+- **Incremental transcripts.** `GET /api/v1/dsh/sessions/:id/transcript` accepts `sinceSeq` and
+  returns `latestSeq` + the applied `sinceSeq`, so a client can poll for changes and fetch only the
+  new messages without re-reading the log or negotiating a freeze position. Exposed in the
+  `link_dsh_transcript` MCP tool and as `dshlink dsh transcript --since-seq N`.
+- `dshlink send --target-session/--origin-session`, `dshlink bind --thread <id> [--session <id>]`,
+  and the two fields in `dshlink show`; the MCP tools `link_send_message` / `link_reply` gained
+  the matching arguments (and `link_reply` reuses `originSession` automatically).
+- [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md) — design, two-machine
+  conversation flow, authorization model, fallbacks and troubleshooting.
 - `scripts/deploy-sync.mjs` — the repository and the tree DSH actually runs
   (`<DSH_HOME>/plugins/vendored/dsh-link`) drift apart silently; `--check` classifies every file
   (missing / different / stale / local to the machine) and exits non-zero on drift, `--apply --write`
@@ -22,7 +51,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
   tool argument and no agent cooperation is needed) and the reply is prompted straight into that
   Session instead of the topic pool. Missing sessions expire/fall back to the pool;
   `routes.enabled: false` restores the old behaviour.
-
 - `scripts/gen-secrets.mjs` — generate the three credentials a deployment needs (frp `auth.token`,
   STCP `secretKey`, dsh-link inbound token + its sha256) without openssl, printing ready-to-paste
   config snippets; `--count`, `--name`, `--json`.
@@ -37,20 +65,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ### Fixed
 
-- **DSH 0.2.0 compatibility**: `SessionPromptRequest.mode` became a required field, so the
-  bridge's wake-up prompt now sends `mode: 'queue'` like the capability channel already did.
-  Verified live against DSH 0.2.0-rc.2: wake-up, ask-and-answer routing and the capability
-  channel (`workspaces.list`) all pass, and the disk-read DSH view is unaffected (session logs
-  are still v3/v4).
-
+- **DSH 0.2.0 compatibility**: `SessionPromptRequest.mode` became a required field. Every bridge
+  wake-up now sends a mode (`steer` for directed/route deliveries, `queue` for topic batches) and
+  the capability channel defaults to `queue`; verified live against DSH 0.2.0-rc.2 (wake-up,
+  ask-and-answer routing and `workspaces.list` all pass).
+- **Session-log v4.** Newer DSH writes `session.v4.jsonl.zstd`; the disk-read view only looked for
+  `session.v3.jsonl.zstd`, which would make whole conversations vanish from the DSH view after an
+  upgrade. It now accepts every `session.vN.jsonl.zstd` and reads the highest generation present.
 - The bridge no longer writes `state.json` twice per wake-up. The intermediate write lacked
   `errors`, `notified` and `ticks`, so a reader that polled the file at the wrong moment could
   see a heartbeat without those fields (found by running the suite on Linux).
 
 ### Changed
 
-- `test/mcp.test.mjs` and `test/reload.test.mjs` skip themselves when the MCP client SDK is not
-  installed, instead of failing: the SDK ships with DSH, not with this repository.
+- The bridge registers thread→Session bindings even when `routes.enabled: false`: the binding is
+  what lets a later reply carry `originSession`, and it is independent of ask-and-answer routing.
+- The bridge `state.json` heartbeat now includes `directed`, `lastDirected`, the normalized
+  `targets` policy and `promptMode`, and the startup log prints the directed-session policy and the
+  wake mode next to the route one.
+- `test/mcp.test.mjs` and `test/reload.test.mjs` skip themselves when no MCP client SDK is
+  installed instead of failing; they auto-detect both `@modelcontextprotocol/sdk` 1.x and
+  `@modelcontextprotocol/client` 2.x (the one DSH ships), so they run wherever DSH is installed.
 - `scripts/verify-vendor.mjs` gained `--platform` and `--strict`; a missing (not yet downloaded)
   frp binary is reported but is not an error unless you ask for `--strict`.
 - `scripts/verify-bundle.ps1` requires `-PeerDataDir` explicitly: it mutates that node's data
@@ -149,5 +184,6 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.4.0
 [0.3.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.3.0
