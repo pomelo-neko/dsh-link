@@ -92,7 +92,7 @@ dsh web
 ```
 
 内置模板占位符：`{{node}}`（本机节点名）、`{{count}}`、`{{peers}}`、`{{lastId}}`、`{{messages}}`；
-0.4 起还有 `{{targetNote}}`（定向失败/回退原因，正常为空）、`{{delivery}}`（`direct` | `route` | `topic`）、
+0.4 起还有 `{{targetNote}}`（定向失败/回退原因，正常为空）、`{{delivery}}`（`direct` | `route` | `binding` | `topic`）、
 `{{targetSession}}`、`{{originSession}}`。旧的自定义模板不受影响。
 
 状态文件新增 `directed` / `lastDirected` / `targets` / `promptMode`：`lastDirected.matched = "target"` 表示上一条定向消息
@@ -157,8 +157,9 @@ dsh web
 | 何时登记 | 在任意工作区用 `link_send_message` / `link_reply` 发消息时，DSH 把这次工具调用（含发起会话）交给桥，桥记下 `thread → 会话`。**不必传自己的会话 id，也不需要 agent 配合** |
 | 何时命中 | 对端回复落在同一 thread，或 `replyTo` 命中你那条消息 |
 | 命中之后 | 直接 `sessionController.prompt` 那个会话，**不建**桥会话、不动话题池 |
-| 命中不到 | 回落到话题池：照旧在 `workspacePath` 建/复用会话 |
-| 发起会话已消失 | 桥忘掉该路由（prompt 失败即视为死会话），下一条消息回落到话题池 |
+| 命中不到 | 先查节点侧 thread 绑定（0.6.1，见下），仍没有才回落到话题池 |
+| 发起会话已消失 | 桥忘掉该路由（prompt 失败即视为死会话），下一条消息回落到绑定/话题池 |
+| 桥/Host 重启后 | route 表从 `state.json` 的 `routeTable` 恢复（0.6.1；摘要字段 `routes` 不参与恢复） |
 | 有效期 | `routes.ttlSeconds`（默认 24h）；超过 `routes.max` 时按最久未用淘汰 |
 | 关掉 | `routes.enabled: false` |
 
@@ -178,11 +179,11 @@ dsh web
 |---|---|
 | 收到带 `targetSession` 的消息 | `targets` 策略放行且会话未死 → 直接 prompt 该会话，**不新建**桥会话 |
 | 之后 | 把 thread → 目标会话写进节点绑定（`bindings.json`），并登记本地 route；后续回复自动找到它 |
-| 投递优先级 | 显式 target > thread/replyTo route > 话题池 |
+| 投递优先级 | 显式 target > thread/replyTo route > 节点 thread 绑定（0.6.1）> 话题池 |
 | 投递方式 | direct/route 默认 `steer`（插话，插到下一步边界）；topic 批量 `queue`（排队）；`promptMode` 可覆盖 |
 | 被 `targets` 拒绝 | 回落到 route/话题池，prompt 里写明原因（`{{targetNote}}`） |
 | 目标会话不存在/已归档 | prompt 失败 → 标记死会话、清 route、水位不推进；下一轮回落 route/话题池，不丢消息 |
-| 对端没带 target | 完全按 0.3 的 route/话题池逻辑处理 |
+| 对端没带 target | 完全按 route/绑定/话题池逻辑处理 |
 | 发消息时自动补 `originSession` | 本机会话在该 thread 上有绑定时自动填；`link_reply` 默认 `targetSession = 原消息的 originSession` |
 
 配置与策略（patch 里可直接热更新）：
@@ -200,6 +201,21 @@ targets:
 **默认 open**（与"任何已配置 peer 都能唤醒会话"的既有姿态一致）；对不完全信任的 peer，用
 `peers` / `allow` 收紧。**开关关闭（`enabled: false`）时绑定/路由仍然登记**，只是不再按 target 投递，
 随时可以打开而不丢已有会话记忆。
+
+### 路由跨重启不丢（0.6.1）
+
+route 表只在 bridge 进程内存里，0.6.0 及以前每次重启都会丢；下一条回信找不到发起会话，就会按话题池
+新开一个桥会话（升级线程里出现过的 `session-5a0f4db8…` 就是这个原因）。0.6.1 两层修复：
+
+1. 心跳文件里本来就把原始表写成 `routeTable`、摘要写成 `routes`，但启动时错误地把 `routes` 赋给了运行时表，
+   于是所有 route 被 `sweepRoutes` 当畸形清掉。现在优先恢复 `routeTable`，并兼容旧版把原始表直接写在
+   `routes` 下的形态。
+2. 内存里仍没有 route 时，按 thread 向节点查绑定（`GET /api/v1/bridge/bind?thread=…`，数据在
+   `bindings.json`，节点与 Host 重启都还在）：命中且会话未死 → prompt 它、重建 route、标记
+   `lastRoute.matched = "binding"`，prompt 里 `{{delivery}} = binding` 并附带说明。
+
+话题池线程**不走**第 2 层兜底：话题的轮换/闲置归档策略必须继续决定它由哪个会话处理，否则已退役的
+旧会话会被绑定复活。定向消息、回信线程等交互线程才享受 binding 兜底。
 
 协议与端到端流程见 [`docs/DIRECTED-SESSIONS.md`](../../docs/DIRECTED-SESSIONS.md)。
 
@@ -262,6 +278,9 @@ step 边界）。这个参数由 `link_call` 原样透传，未提供时保持 0
 
 - `state.json` 在 0.3 里多了 `pool` / `sessionsCreated` / `sessionsArchived` / `lastArchive` / `commands` 字段；
   只有 `pool` 出现才说明跑的是 0.3（0.2.x 没有话题池）。
+- 0.4 起还有 `promptMode` / `directed` / `lastDirected` / `targets`；0.6.1 起 `routeTable` 是运行时 route 表的
+  真实快照（`routes` 只是给人看的摘要），重启恢复只看 `routeTable`。binding 兜底命中时
+  `lastRoute.matched = "binding"`。
 
 ## 定位：协作与同步，不是"无人值守代理"
 
@@ -350,4 +369,6 @@ step 边界）。这个参数由 `link_call` 原样透传，未提供时保持 0
 11. **显式 target 优先于已有 route**：同 thread 上已有本机会话路由时，带 `targetSession` 的消息仍投目标会话；
 12. **绑定自动补 originSession**、`link_reply` 定向回原会话（`test/directed.test.mjs`、`test/mcp.test.mjs`）；
 13. **插话/排队模式**：`promptMode: auto` 下 direct/route 用 `steer`、topic 用 `queue`；`queue`/`steer` 强制覆盖；
-14. **能力通道 mode**：`sessions.prompt` 的 `mode` 透传、默认 queue、非法值拒绝（`test/bridge-commands.test.mjs`）。
+14. **能力通道 mode**：`sessions.prompt` 的 `mode` 透传、默认 queue、非法值拒绝（`test/bridge-commands.test.mjs`）；
+15. **0.6.1 重启恢复**：预写 `routes` 摘要 + `routeTable` 原始表，重启后回信仍投原会话（不新开桥会话）；
+16. **0.6.1 binding 兜底**：thread 没有 route 时按节点绑定投回本机会话，`routed` 记账、`lastRoute.matched = binding`。

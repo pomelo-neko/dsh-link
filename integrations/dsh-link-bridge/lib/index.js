@@ -21,6 +21,12 @@
 // Two DSH conversations can therefore talk to each other for many turns without a human choosing
 // a session each time.
 //
+// 0.6.1 makes that durable across restarts: the in-memory route table is restored from the
+// persisted `routeTable` (not from the `routes` summary), and a thread with no route falls back to
+// the node's thread binding (bindings.json survives both node and Host restarts) before opening a
+// fresh pool session. A reply in an existing thread therefore lands in the same conversation even
+// after DSH was rebooted.
+//
 // Zero runtime dependencies: polling uses global fetch, state is one JSON file, and the only
 // DSH services used are the public Host ones (ctx.sessionController, ctx.workspaceRegistry).
 import { promises as fs } from 'node:fs';
@@ -36,7 +42,7 @@ import { authorizeTarget, messagePeer, normalizeTargetPolicy, resolveTarget, tar
 export const name = 'dsh-link-bridge';
 
 /** Reported to the node in the bridge heartbeat, so a peer can tell which bridge answered. */
-export const BRIDGE_VERSION = '0.6.0';
+export const BRIDGE_VERSION = '0.6.1';
 
 /**
  * Host services required: create/resume/prompt a Session and group it in a Workspace.
@@ -370,6 +376,20 @@ function install(ctx, rawConfig) {
     commands: null
   };
 
+  /**
+   * The persisted route table lives in `routeTable`; `routes` is only a human-readable summary
+   * ({enabled,count,...}). Older builds wrote the raw table straight into `routes`, so accept both
+   * shapes: a summary is detectable by its boolean `enabled` field.
+   */
+  function routeTableFromState(saved) {
+    if (!saved || typeof saved !== 'object') return null;
+    const table = saved.routeTable;
+    if (table && typeof table === 'object' && !Array.isArray(table)) return table;
+    const legacy = saved.routes;
+    if (legacy && typeof legacy === 'object' && !Array.isArray(legacy) && typeof legacy.enabled !== 'boolean') return legacy;
+    return null;
+  }
+
   async function loadStateOnce() {
     if (runtime.loaded) return;
     runtime.loaded = true;
@@ -381,7 +401,8 @@ function install(ctx, rawConfig) {
     if (Array.isArray(saved.wakeTimes)) runtime.wakeTimes = saved.wakeTimes.filter((at) => typeof at === 'number');
     if (typeof saved.suppressed === 'number') runtime.suppressed = saved.suppressed;
     if (saved.pool && typeof saved.pool === 'object') runtime.pool = saved.pool;
-    if (saved.routes && typeof saved.routes === 'object') runtime.routes = saved.routes;
+    const restoredRoutes = routeTableFromState(saved);
+    if (restoredRoutes) runtime.routes = restoredRoutes;
     if (typeof saved.routed === 'number') runtime.routed = saved.routed;
     if (typeof saved.directed === 'number') runtime.directed = saved.directed;
     if (saved.lastDirected && typeof saved.lastDirected === 'object') runtime.lastDirected = saved.lastDirected;
@@ -523,6 +544,33 @@ function install(ctx, rawConfig) {
   }
 
   /**
+   * Ask the node which local Session owns a peer thread (GET /api/v1/bridge/bind?thread=...).
+   * Bindings survive bridge restarts (they live in the node's data directory), so they are the
+   * durable fallback when the in-memory route table was lost or never had this thread. Never throws.
+   */
+  async function bindingOnNode(thread) {
+    if (!thread) return null;
+    const guard = timeoutSignal(5000);
+    try {
+      const res = await fetch(baseUrl + '/api/v1/bridge/bind?thread=' + encodeURIComponent(String(thread)), {
+        headers: token ? { authorization: 'Bearer ' + token } : {},
+        signal: guard.signal
+      });
+      if (!res.ok) {
+        log.debug('binding lookup for ' + thread + ': HTTP ' + res.status);
+        return null;
+      }
+      const body = await res.json();
+      return body && body.binding && typeof body.binding === 'object' ? body.binding : null;
+    } catch (error) {
+      log.debug('binding lookup for ' + thread + ' failed: ' + errorText(error));
+      return null;
+    } finally {
+      guard.done();
+    }
+  }
+
+  /**
    * Record "this Session just sent a message on this thread" straight from the Host event bus.
    * The dsh-link send tools are ordinary tools, so `tools/result` carries both the calling agent
    * (and therefore its Session) and the message the node created: no new tool argument and no
@@ -616,6 +664,45 @@ function install(ctx, rawConfig) {
           label: topicLabel(message), peer: messagePeer(message)
         });
       };
+      // The in-memory route table is lost when the bridge (or DSH) restarts, but the node keeps
+      // thread -> Session in bindings.json. Consult it before falling back to a fresh pool session:
+      // this is what keeps a multi-turn thread in the same conversation across restarts.
+      const bindingCache = new Map();
+      const bindingFor = async (thread) => {
+        const key = String(thread);
+        if (bindingCache.has(key)) return bindingCache.get(key);
+        const binding = await bindingOnNode(key);
+        bindingCache.set(key, binding);
+        return binding;
+      };
+      const fallbackPlanFor = async (message, note = '') => {
+        const route = routeFor(runtime.routes, message, { now, policy: routePolicy });
+        let plan;
+        let reason = '';
+        if (route && !runtime.deadSessions.has(route.sessionId)) {
+          plan = topicPlanFor(message, route);
+        } else {
+          const thread = String(message.thread ?? message.id);
+          // A topic-pool thread is owned by the pool: its rotation/budget policy must keep deciding
+          // which Session handles it, so never resurrect a retired topic Session here. Bindings are
+          // the fallback for interactive threads (directed / ask-and-answer), which have no pool entry.
+          const pooled = runtime.pool[topicKeyFor(message, topicPolicy)];
+          const binding = pooled ? null : await bindingFor(thread);
+          if (binding && typeof binding.sessionId === 'string' && binding.sessionId
+            && !runtime.deadSessions.has(binding.sessionId)) {
+            plan = planFor('session:' + binding.sessionId, {
+              kind: 'binding', sessionId: binding.sessionId, matched: 'binding', routeKey: thread,
+              topicKey: topicKeyFor(message, topicPolicy), label: topicLabel(message), peer: messagePeer(message)
+            });
+            reason = '该线程在本机会话 ' + binding.sessionId + ' 的绑定仍然有效，已按节点绑定投回；';
+          } else {
+            plan = topicPlanFor(message, null);
+          }
+        }
+        const extra = [note, reason].filter(Boolean).join(' ');
+        if (extra && !String(plan.note || '').includes(extra)) plan.note = [extra, plan.note].filter(Boolean).join(' ');
+        return plan;
+      };
       for (const message of messages) {
         const peer = messagePeer(message);
         const target = resolveTarget(message);
@@ -638,14 +725,14 @@ function install(ctx, rawConfig) {
           // Directed delivery is not possible (policy or dead session): fall back to route/pool,
           // but tell the session what was asked for so it can still answer usefully.
           const reason = decision.ok ? '该会话已不可用' : decision.reason;
-          const fallback = topicPlanFor(message, routeFor(runtime.routes, message, { now, policy: routePolicy }));
-          fallback.note = '对端原本要求把消息定向投递给会话 ' + target + '，但' + reason
-            + '；已改由当前会话处理，回复时可以用 targetSession 指定需要的会话。';
+          const fallback = await fallbackPlanFor(message,
+            '对端原本要求把消息定向投递给会话 ' + target + '，但' + reason
+            + '；已改由当前会话处理，回复时可以用 targetSession 指定需要的会话。');
           fallback.askedTarget = target;
           addPlan(fallback, message);
           continue;
         }
-        addPlan(topicPlanFor(message, routeFor(runtime.routes, message, { now, policy: routePolicy })), message);
+        addPlan(await fallbackPlanFor(message), message);
       }
       if (!plans.length) return;
       const compareMessage = (a, b) => {
@@ -683,9 +770,9 @@ function install(ctx, rawConfig) {
         }
         let sessionId = plan.sessionId;
         if (sessionId) {
-          if (plan.kind === 'route') {
+          if (plan.kind === 'route' || plan.kind === 'binding') {
             runtime.routed += 1;
-            runtime.topic = { key: plan.routeKey, reason: 'route:' + plan.matched, sessionId };
+            runtime.topic = { key: plan.routeKey, reason: plan.kind + ':' + plan.matched, sessionId };
             runtime.lastRoute = { thread: plan.routeKey, sessionId, id: newest.id, at: new Date(now).toISOString(), direction: 'in', matched: plan.matched };
             log.info('routed ' + newest.id + ' back into ' + sessionId + ' (thread ' + plan.routeKey + ', matched by ' + plan.matched + ')');
           } else if (plan.kind === 'direct') {
@@ -721,7 +808,7 @@ function install(ctx, rawConfig) {
           peers: peers.join(', '),
           lastId: newest.id,
           messages: renderMessages(plan.messages, maxBodyChars),
-          delivery: plan.kind === 'direct' ? 'direct' : plan.kind === 'route' ? 'route' : 'topic',
+          delivery: plan.kind === 'direct' ? 'direct' : plan.kind === 'route' ? 'route' : plan.kind === 'binding' ? 'binding' : 'topic',
           targetSession: sessionId,
           originSession: newest.originSession || '',
           targetNote: plan.note || ''

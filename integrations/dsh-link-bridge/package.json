@@ -1,6 +1,6 @@
 {
   "name": "dsh-link-bridge",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Wake a DSH conversation automatically when dsh-link messages arrive (one Session per topic, retired sessions archived), deliver a peer's message into the exact Session it names (directed conversations), and serve the peer capability channel: list/read/create/prompt/rename/archive conversations on this machine on request.",
   "type": "module",
   "main": "lib/index.js",

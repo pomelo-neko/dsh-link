@@ -9,6 +9,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-04
+
+The "keep the conversation after a reboot" patch. Ask-and-answer routes were lost on every
+bridge/Host restart, which showed up as a peer's reply opening a brand-new bridge Session instead
+of returning to the conversation that started the thread (observed in the 0.6.0 upgrade thread:
+the reply landed in `session-5a0f4db8…` rather than the Session that asked).
+
+### Fixed
+
+- **Routes survive a bridge restart.** The heartbeat writes the raw route table as `routeTable` and a
+  human-readable summary as `routes`, but the loader assigned `saved.routes` to the runtime table.
+  Every restart therefore replaced the table with the summary, `sweepRoutes` discarded its keys as
+  malformed, and the next reply in an existing thread fell into the topic pool. The loader now
+  restores `routeTable` and still accepts the older shape where the raw table lived under `routes`.
+- **Thread bindings are a second routing fallback.** When a thread has no in-memory route (for
+  example right after a restart), the bridge asks the node
+  (`GET /api/v1/bridge/bind?thread=…`; `bindings.json` survives both node and Host restarts) and
+  prompts the bound Session, re-registering the route. Topic-pool threads are excluded so their
+  rotation/idle policy keeps deciding when a topic moves to a fresh Session, and a refused/absent
+  target still falls back as before.
+- A binding hit is reported as `delivery: "binding"`, `routed`/`lastRoute.matched: "binding"` and a
+  note in the prompt, so the wake is diagnosable from `state.json` and the transcript.
+
+### Changed
+
+- Bridge version `0.6.1` (the node `package.json` follows the release); no node API change.
+- `test/bridge.test.mjs` adds two regressions: a restart restores the route table, and a thread
+  without a route is routed by the node binding.
+
 ## [0.6.0] — 2026-11-03
 
 The "control it from the phone" release. Ships the first Android controller app on top of the
@@ -297,7 +326,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.1
 [0.6.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.0
 [0.5.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.5.0
 [0.4.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.4.0

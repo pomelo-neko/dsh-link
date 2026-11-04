@@ -935,3 +935,100 @@ test('bridge: promptMode steer interrupts a topic delivery too', async (t) => {
   );
   assert.equal(state.directed, 0, 'a plain message is still a topic delivery');
 });
+
+/**
+ * 0.6.1: routes must survive a bridge restart. The heartbeat writes the raw table as `routeTable`
+ * and a human-readable summary as `routes`; the old loader assigned the summary to the runtime
+ * table, so every restart silently lost every route and a multi-turn thread fell back to a fresh
+ * pool session (observed after the 0.6.0 Host restart).
+ */
+test('bridge: a restarted bridge restores its route table from routeTable, not the summary', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-route-restore' });
+  t.after(() => node.close());
+
+  captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-route-restore');
+  await fs.mkdir(stateDir, { recursive: true });
+  const now = Date.now();
+  await fs.writeFile(path.join(stateDir, 'state.json'), JSON.stringify({
+    sessionId: 'session-old',
+    watermark: 'msg_old',
+    watermarkTs: '2026-09-11T09:00:00.000Z',
+    watermarkId: 'msg_old',
+    lastNotifyAt: 0,
+    // The summary shape that used to poison runtime.routes, alongside the real table.
+    routes: { enabled: true, count: 1, sessions: 1, ttlSeconds: 86400, last: { thread: 'msg_thread_restored', sessionId: 'session-route-restored', at: now } },
+    routeTable: {
+      msg_thread_restored: {
+        thread: 'msg_thread_restored', sessionId: 'session-route-restored', messageIds: ['msg_out_1'],
+        createdAt: now - 1000, lastAt: now - 1000, hits: 2
+      }
+    }
+  }));
+  await inboxMessage(node, 'msg_restart_reply', 'LAPTOP-TEST', 'Re: 询问', '重启之后也要回到原会话', new Date().toISOString(), 'msg_thread_restored');
+
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-route-restore'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to wake the routed conversation after restart');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-route-restored');
+  assert.equal(fake.created.length, 0, 'a restored route must not open a bridge session');
+  assert.match(fake.prompts[0].request.content[0].text, /重启之后也要回到原会话/);
+
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.routed === 1,
+    'the heartbeat to record the routed wake'
+  );
+  assert.equal(state.lastRoute.sessionId, 'session-route-restored');
+  assert.equal(state.lastRoute.matched, 'thread');
+  assert.equal(state.routes.count, 1, 'the restored table must be persisted back as a table (count 1)');
+  assert.equal(state.errors, 0);
+});
+
+/**
+ * 0.6.1 fallback: even when the bridge lost every route, the node keeps thread -> Session in
+ * bindings.json (written by the bridge itself on an earlier turn). A reply on such a thread must
+ * land back in that Session instead of opening a new pool session.
+ */
+test('bridge: a thread without a route falls back to the node thread binding', async (t) => {
+  await resetTmp();
+  const node = await makeNode({ name: 'bridge-node-binding' });
+  t.after(() => node.close());
+  await node.ops.bindSession({ thread: 'msg_thread_bound', sessionId: 'session-bound-in', peer: 'LAPTOP-TEST' });
+  await inboxMessage(node, 'msg_binding_reply', 'LAPTOP-TEST', 'Re: 对接', '按节点绑定回到原会话', new Date().toISOString(), 'msg_thread_bound');
+
+  captureSchedule(t);
+  const fake = fakeCtx();
+  const stateDir = path.join(TMP, 'bridge-state-binding');
+  startBridge(fake.ctx, {
+    nodeUrl: node.url,
+    workspacePath: path.join(TMP, 'bridge-ws-binding'),
+    pollSeconds: 60,
+    cooldownSeconds: 0,
+    stateDir
+  });
+
+  await waitFor(() => fake.prompts.length === 1, 'the bridge to wake the bound conversation');
+  assert.equal(fake.prompts[0].request.sessionId, 'session-bound-in');
+  assert.equal(fake.created.length, 0, 'the binding must not open a bridge session');
+  assert.match(fake.prompts[0].request.content[0].text, /按节点绑定回到原会话/);
+  assert.match(fake.prompts[0].request.content[0].text, /绑定/, 'the prompt explains that the binding routed it');
+
+  const state = await waitForState(
+    path.join(stateDir, 'state.json'),
+    (snapshot) => snapshot.routed === 1,
+    'the heartbeat to record the binding-routed wake'
+  );
+  assert.equal(state.lastRoute.sessionId, 'session-bound-in');
+  assert.equal(state.lastRoute.matched, 'binding');
+  assert.equal(state.errors, 0);
+});
+

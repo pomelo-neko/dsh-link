@@ -178,17 +178,37 @@ Delivery precedence for each inbound message:
 1. **direct** — `targetSession` exists, policy allows it, and the Session is not dead → prompt that
    Session. The thread is bound to it and a route is registered so later messages can find it again.
 2. **route** — an existing `thread` (or `replyTo`) route points at a live local Session → prompt it.
-3. **topic** — otherwise the topic pool decides (0.3 behaviour, bridge workspace).
+3. **binding** — the thread has no in-memory route, but the node's `bindings.json` still maps it to a
+   live local Session → prompt that Session and re-register the route (0.6.1).
+4. **topic** — otherwise the topic pool decides (0.3 behaviour, bridge workspace).
 
 When a target is refused or unavailable the message is **not dropped**: the bridge renders the
-reason into `{{targetNote}}` and delivers through the route/topic path, so the conversation still
-continues in a bridge session. Rejections/fallbacks are counted in `state.directed` /
+reason into `{{targetNote}}` and delivers through the route/binding/topic path, so the conversation
+still continues in a bridge session. Rejections/fallbacks are counted in `state.directed` /
 `state.lastDirected` (absent when not directed) and visible in the prompt text.
+
+### Durability across restarts (0.6.1)
+
+The in-memory route table lives only in the bridge process, so a restart used to lose every route;
+the next reply in an existing thread then opened a fresh topic session. Two fixes make routing
+survive a reboot:
+
+* The heartbeat stores the raw table as `routeTable` and a summary as `routes`. The loader restores
+  `routeTable` (and accepts the pre-0.6.1 shape where the raw table was written under `routes`);
+  previously it assigned the summary to the runtime table and every route was swept as malformed.
+* If no route exists, the bridge asks the node for the thread binding
+  (`GET /api/v1/bridge/bind?thread=…`). Bindings live in the node data directory, so they survive
+  both node and Host restarts; a hit is prompted, re-bound and its route re-registered. Topic-pool
+  threads are excluded from this fallback so their rotation and idle policy keep deciding when a
+  topic moves to a fresh Session.
+
+A binding-routed wake is labelled `delivery: "binding"` in the prompt, and
+`state.lastRoute.matched = "binding"` in `state.json`.
 
 ### Prompt template additions
 
 The default template now includes `{{targetNote}}` (empty, or the fallback explanation) and can use
-`{{delivery}}` (`direct` | `route` | `topic`), `{{targetSession}}` and `{{originSession}}`.
+`{{delivery}}` (`direct` | `route` | `binding` | `topic`), `{{targetSession}}` and `{{originSession}}`.
 Custom templates that do not use them keep working.
 
 ## Queue vs steer
@@ -233,7 +253,7 @@ wake-ups.
 | Target refused by `targets` | Delivered via route/topic with the reason in the prompt and `{{targetNote}}`. |
 | Session already archived/dead | Same fallback; dead ids are remembered for this process run. |
 | Peer has no binding for a thread | Its reply simply has no `originSession`; the receiver's thread route still replies to the conversation (if one asked there). |
-| Bridge restarted | Bindings persist in `bindings.json`; routes persist in `state.json`; watermark prevents double wakes. |
+| Bridge restarted | Bindings persist in `bindings.json`; routes are restored from `state.json` (`routeTable`) since 0.6.1, and a thread with no route falls back to the node binding before the topic pool; watermark prevents double wakes. |
 | Both bridges auto-answering each other | The 0.3 loop guard still applies to directed wakes: `threadCooldownSeconds` (soft hold) and `maxThreadWakes`/`threadWindowSeconds` + `maxWakesPerHour` (hard drops), recorded in `state.suppressed`. |
 
 ## Security notes
@@ -257,8 +277,10 @@ wake-ups.
 * `test/directed.test.mjs` — envelope round-trip over HTTP, bind endpoint (loopback, round-trip,
   missing thread), automatic `originSession` from a binding.
 * `test/bridge.test.mjs` — directed wake + thread binding + `state.directed`, refused-target
-  fallback with explanation, two targets in one batch, explicit target beating a route, and the
-  `promptMode` matrix (auto: direct/route `steer`, topic `queue`; forced `queue`/`steer`).
+  fallback with explanation, two targets in one batch, explicit target beating a route, the
+  `promptMode` matrix (auto: direct/route `steer`, topic `queue`; forced `queue`/`steer`), and the
+  0.6.1 regressions: a restarted bridge restores its `routeTable`, and a thread without a route is
+  routed by the node binding.
 * `test/bridge-commands.test.mjs` — `sessions.prompt` `mode` pass-through, default `queue`, and
   rejection of values other than `queue`/`steer`.
 * `test/mcp.test.mjs` — `link_send_message` field pass-through, `originSession` from a binding,
