@@ -223,8 +223,13 @@ node over the Aliyun relay; the phone side had **no** LAN/VPN route to the node)
    8787 path; the node did not open any new public port.
 4. **Failure path**: when the visitor cannot start (bad binary/relay unreachable) the app reports
    "中转启动失败" with the tail of the frpc log instead of hanging or pretending to connect.
-5. **Architecture coverage**: arm64-v8a frpc is packaged and signed, but this round only exercised
-   the x86_64 emulator path; the first real-phone run is the remaining check.
+5. **Real-phone arm64 (2026-11-04)**: the user installed the arm64 APK on a real phone, connected
+   through the Aliyun relay, listed workspaces and sessions, and sent a message into an existing DSH
+   Session; the node audit recorded that `sessions.prompt` command
+   (`cmd_01m6k11b50303a94cfc1c6`, 10:17:54Z). The arm64-v8a frpc inside the APK is therefore
+   verified executable end-to-end. Note that, with the node's `trustLocalhost: true`, the audit
+   labels these STCP requests as localhost/admin rather than by the device token; closing that
+   bypass is the production-hardening item in section 5.
 
 The node test suite is unchanged by the app release (`node test/run.mjs`: 166 tests, 165 pass,
 1 skipped for the missing frp binary).

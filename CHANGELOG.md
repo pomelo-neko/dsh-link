@@ -24,8 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
     needs a token-checking gateway or client certificates.
   - Verified on Android 16 / API 36 x86_64: app-started frpc became healthy in ~50 ms, connected to
     the real node 0.6.2 over the Aliyun relay, opened `session-1aa41492…`, and sent a prompt that
-    the real DSH agent answered `TUNNEL_OK`. arm64 is packaged but not yet exercised on a real
-    phone.
+    the real DSH agent answered `TUNNEL_OK`. Verified again on a real arm64 phone: the user
+    connected through the relay, listed workspaces/sessions, and sent a message into an existing DSH
+    Session (node audit recorded `sessions.prompt cmd_01m6k11b50303a94cfc1c6`).
   - `android/README.md`, `docs/mobile/CONTROL-APP.md`, READMEs and screenshots updated; the node,
     CLI and bridge are unchanged (still 0.6.2).
 

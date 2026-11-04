@@ -337,8 +337,11 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   - **失败路径**：故意让 frpc 连不上（或删掉 native lib）时，App 在 20 秒内弹窗
     “中转启动失败”，正文带 `frpc` 日志尾部；不会静默假装连接成功。
 
+  - **真机 arm64（2026-11-04，用户实测）**：手机经内置 STCP 中转连接成功，能打开工作区/会话列表，
+    并从控制端把一条消息发进已有 DSH 会话；节点 audit 记录了该 `sessions.prompt` 命令
+    `cmd_01m6k11b50303a94cfc1c6`（10:17:54Z）。APK 里的 arm64 frpc 因此也已验证可执行。
+
   已知边界：本机 `auth.trustLocalhost=true`，所以经 STCP 到达 8787 的请求实际上绕过了
-  dsh-link token；这条路径只用于本机自用测试。真机 arm64 未在本轮实测（模拟器只验证 x86_64
-  路径），但 APK 已打包并签名 arm64 版 frpc。
+  dsh-link token（本例 audit 里记为 localhost/admin）；这条路径只用于本机自用测试。
 
 > 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.2.0，二者独立演进。
