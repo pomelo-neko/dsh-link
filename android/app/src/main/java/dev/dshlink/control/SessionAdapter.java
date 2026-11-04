@@ -59,16 +59,37 @@ final class SessionAdapter extends BaseAdapter {
         }
         JSONObject session = items.get(position);
         String title = Ui.sessionTitle(session);
+        boolean subagent = isSubagent(session);
+        if (subagent) title = "子智能体 · " + title;
         if (session.optBoolean("archived", false)) title = "（已归档）" + title;
         row.title.setText(title);
         StringBuilder sub = new StringBuilder();
-        String updated = Ui.shortIso(session.optString("updatedAt", ""));
+        String updated = Ui.shortIso(Ui.text(session, "updatedAt"));
         if (!updated.isEmpty()) sub.append("最后活动 ").append(updated);
         int messages = session.optInt("messages", -1);
         if (messages >= 0) sub.append(" · ").append(messages).append(" 条消息");
-        sub.append("\n").append(session.optString("sessionId", ""));
+        if (subagent) {
+            String parentId = Ui.text(session, "parentSession");
+            if (!parentId.isEmpty()) sub.append(" · 父会话 ").append(shortId(parentId));
+            int depth = session.optInt("delegationDepth", 0);
+            if (depth > 0) sub.append(" · 深度 ").append(depth);
+        }
+        sub.append("\n").append(Ui.text(session, "sessionId"));
         row.subtitle.setText(sub.toString());
         return row.container;
+    }
+
+    /** True when the DSH view marks this Session as one created by a subagent delegation. */
+    static boolean isSubagent(JSONObject session) {
+        if (session == null) return false;
+        if ("subagent".equals(Ui.text(session, "origin"))) return true;
+        if (!Ui.text(session, "parentSession").isEmpty()) return true;
+        return session.optInt("delegationDepth", 0) > 0;
+    }
+
+    private static String shortId(String sessionId) {
+        String id = sessionId.startsWith("session-") ? sessionId.substring(8) : sessionId;
+        return id.length() > 8 ? id.substring(0, 8) : id;
     }
 
     private static final class Row {

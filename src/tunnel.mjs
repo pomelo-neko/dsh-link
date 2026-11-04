@@ -109,6 +109,22 @@ export function frpConfigToml(cfg) {
   lines.push(`localPort = ${cfg.port}`);
   lines.push('transport.useEncryption = true');
   lines.push('transport.useCompression = false');
+  const gateway = cfg.gateway;
+  if (gateway?.enabled === true && gateway.provider?.secretKey) {
+    // The phone/remote-controller path must land on the token gateway, not on the node API:
+    // a tunneled request arrives from 127.0.0.1 and would otherwise enjoy the localhost fallback.
+    lines.push('');
+    lines.push('# --- provider: publish the token gateway (phone / remote controller) ---');
+    lines.push('[[proxies]]');
+    lines.push(`name = ${tomlString(gateway.provider.name ?? 'dshlink-phone')}`);
+    lines.push('type = "stcp"');
+    lines.push(`secretKey = ${tomlString(gateway.provider.secretKey)}`);
+    lines.push(`allowUsers = [${allowUsers.map(tomlString).join(', ')}]`);
+    lines.push('localIP = "127.0.0.1"');
+    lines.push(`localPort = ${gateway.port}`);
+    lines.push('transport.useEncryption = true');
+    lines.push('transport.useCompression = false');
+  }
   const visitors = visitorsFor(cfg);
   if (visitors.length) {
     lines.push('');
@@ -214,6 +230,10 @@ export class TunnelManager {
       logTail = text.split('\n').slice(-12).join('\n');
     } catch { /* no log yet */ }
     const visitors = visitorsFor(this.cfg);
+    const gateway = this.cfg.gateway;
+    const gatewayProvider = gateway?.enabled === true && gateway.provider?.secretKey
+      ? { name: gateway.provider.name ?? 'dshlink-phone', localPort: gateway.port }
+      : null;
     return {
       enabled: !!this.cfg.tunnel?.enabled,
       serverAddr: this.cfg.tunnel?.serverAddr ?? null,
@@ -224,6 +244,7 @@ export class TunnelManager {
       pid: running ? pid : null,
       reason: running ? null : (pid ? `pid ${pid} is not alive` : 'not started'),
       visitors,
+      gatewayProvider,
       visitorPortsListening: await Promise.all(visitors.map(async (v) => ({ peer: v.peer, port: v.bindPort, listening: await portListening(v.bindAddr, v.bindPort) }))),
       logTail
     };

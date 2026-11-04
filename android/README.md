@@ -4,9 +4,11 @@
 dsh-link 节点，把该节点看到的 DSH 工作区/会话/transcript 显示在手机上，并通过节点的能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.2.0`，minSdk 26，targetSdk 36
+- 包名：`dev.dshlink.control`，版本 `0.3.0`，minSdk 26，targetSdk 36
 - 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX、无第三方依赖**
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
+- 0.3.0：连接后可选择该节点网络里**直连**的其他节点并远程读写/发消息；标注子智能体会话；
+  连续的工具调用/结果折叠成一行，点击展开；内置 STCP 中转改指 **8788 token 网关**
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -18,27 +20,37 @@ dsh-link 节点，把该节点看到的 DSH 工作区/会话/transcript 显示�
 
 ```text
 连接节点 (URL + token)
-  └─ 工作区列表          GET /api/v1/dsh/workspaces
-       └─ 会话列表        GET /api/v1/dsh/sessions?workspace=…
-            └─ 会话界面    GET /api/v1/dsh/sessions/{id}/transcript?tail=1&limit=200
+  ├─ 网络扫描           GET /api/v1/network/nodes?depth=2&maxNodes=50
+  │    └─ 选择直连节点后，后续 DSH 请求都带 &peer=<节点名>（经入口节点转发）
+  └─ 工作区列表          GET /api/v1/dsh/workspaces[?peer=…]
+       └─ 会话列表        GET /api/v1/dsh/sessions?workspace=…[&peer=…]
+            └─ 会话界面    GET /api/v1/dsh/sessions/{id}/transcript?tail=1&limit=200[&peer=…]
                  ├─ 前台增量  GET …/transcript?sinceSeq=<lastSeq>&limit=200   （每 2.5 s）
                  ├─ 更早消息  GET …/transcript?tail=1&offset=<loaded>&limit=200
-                 └─ 发送     POST /api/v1/dsh/call { sessions.prompt, waitSeconds:20 }
-                              └─ 未完成时 GET /api/v1/dsh/call/{commandId} 轮询到终态
+                 └─ 发送     POST /api/v1/dsh/call { sessions.prompt, waitSeconds:20, peer? }
+                              └─ 未完成时 GET /api/v1/dsh/call/{commandId} 轮询到终态（仅入口节点）
 ```
 
-| 连接后（主界面） | 工作区里的会话 | 会话内容 + 输入区 |
-|---|---|---|
-| ![main](../docs/mobile/screenshots/main.png) | ![sessions](../docs/mobile/screenshots/sessions.png) | ![transcript](../docs/mobile/screenshots/transcript.png) |
+> 截图说明：0.3.0 的主界面（含“控制节点”下拉框）、会话列表（“子智能体 ·”前缀与
+> “（3 个子智能体）”计数）、展开的工具组，以及经 8788 网关中转连接后的界面都已验证；
+> 这些截图含真实主机名/局域网地址/会话标题，**不随仓库提交**，仅本地留存在 `test/.tmp/`
+> （已 gitignore）。UI 细节见 `docs/mobile/CONTROL-APP.md` §4 与本文 §7。
 
-0.2.0 内置阿里云 STCP 中转（勾选后不填节点地址，App 自己启动 frpc visitor）：
+0.3.0 内置阿里云 STCP 中转（勾选后不填节点地址，App 自己启动 frpc visitor，落到 8788 网关）；
+经中转连接与收到的真实 DSH 回复见 `docs/mobile/CONTROL-APP.md` §4。
 
-| 中转模式连接 | 经中转收到真实 DSH 回复 |
-|---|---|
-| ![tunnel main](../docs/mobile/screenshots/tunnel-main.png) | ![tunnel transcript](../docs/mobile/screenshots/tunnel-transcript.png) |
-
+- **节点选择（0.3.0）**：连接成功后 App 额外拉一次 `/api/v1/network/nodes?depth=2`，把入口节点
+  网络里的节点放进“控制节点”下拉框。默认选当前节点（本机直连）；选中另一个**直连**节点后，
+  工作区/会话/transcript/发送全部带 `peer=<节点名>`，由入口节点转发。经其他节点中转才能到
+  的二跳节点只展示、不可选（避免入口节点变成整网代理）。
+- **子智能体标注（0.3.0）**：会话列表对 `origin:"subagent"`、有父会话或 `delegationDepth>0` 的
+  条目标题加“子智能体 · ”，副标题显示父会话前 8 位与深度；工作区行显示“（N 个子智能体）”。
+- **工具调用折叠（0.3.0）**：连续的工具调用/工具结果行折叠成一行
+  （`#seq · 工具调用 · N 条 · HH:mm:ss · 点击展开`），点开后才显示每条的工具名与正文；
+  折叠只影响显示，不影响原始消息。
 - **只读模式**：若 `/api/v1/info` 显示 `capabilities.enabled=false` 或 `methods` 不含
-  `sessions.prompt`，App 顶部提示“只读模式”并禁用输入框；浏览功能不受影响。
+  `sessions.prompt`，App 顶部提示“只读模式”并禁用输入框；浏览功能不受影响。远程节点则看
+  它自己的能力白名单（被拒绝时 App 显示对端返回的错误）。
 - 命令由节点上的 **dsh-link-bridge**（DSH Host 插件）执行，因此发送要求 DSH host 正在运行、
   bridge 未被禁用。命令的 `result.accepted=true` 只表示 bridge 已受理，模型的回复要继续看
   transcript 增量。
@@ -102,47 +114,55 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
    手机填 `http://<节点IP>:8787`。若用 Tailscale/WireGuard，节点只需 bind 到 VPN 地址，
    公网不暴露任何端口。
 2. **反代 + TLS**：在节点前放 Caddy/Nginx，给手机一个 HTTPS 域名；App 支持 https。
-3. **内置阿里云 STCP 中转（0.2.0，跨公网）**：App 自己带 frpc，勾选复选框后无需填节点地址，
-   由手机直接经 frps 连接到节点已有的 STCP provider。详见 2.4。**不要把明文 8787 直接暴露到公网。**
+3. **内置阿里云 STCP 中转（0.2.0 起，0.3.0 改进：跨公网）**：App 自己带 frpc，勾选复选框后
+   无需填节点地址，由手机经 frps 连接到节点发布给手机的 STCP provider（`dshlink-phone`），
+   落到 **8788 token 网关**。详见 2.4。**不要把明文 8787 直接暴露到公网。**
 
 App 允许 cleartext HTTP（`usesCleartextTraffic="true"`），这是为局域网/VPN/STCP 场景准备的；
 公网路径必须由 STCP 的 TLS 或反代承担加密。
 
-### 2.4 内置阿里云 STCP 中转（0.2.0）
+### 2.4 内置阿里云 STCP 中转（0.2.0 起；0.3.0 经 8788 网关）
 
 手机不在节点局域网时，不需要 VPN，也不需要节点开公网端口：把 frpc 的 STCP **visitor** 跑在手机里。
 0.2.0 把 Linux x86_64（模拟器）和 arm64（真机）的 frpc 作为 `libfrpc.so` 打进 APK，启动时
 解压证书/配置到应用私有目录，执行 visitor，在本机 `127.0.0.1:18788` 打开一个端口；App 随后
-像连普通节点一样连这个本地端口。节点侧仍然是原来那个 STCP **provider**（例如
-`dshlink-desktop-e4nrkp6` → `127.0.0.1:8787`），frps 是阿里云 `203.0.113.10:16443`。
+像连普通节点一样连这个本地端口。
+
+0.3.0 改变了隧道落点：节点侧由 `dshlink tunnel sync` 额外发布一个 **指向 8788 网关**的 STCP
+provider（默认名 `dshlink-phone`，配置来自 `gateway.provider`），不再是旧的 8787 provider。
+所以手机 → frps → `dshlink-phone` → `127.0.0.1:8788` → 网关校验 device token → 8787。
+网关对每个请求都要求 token 且**不信任回环来源**，因此 STCP 凭据本身不再能绕过 dsh-link 认证；
+audit 里能看到真实 device 角色。frps 仍是阿里云 `203.0.113.10:16443`。
 
 前提（缺一不可）：
 
-- 节点侧 frpc 正在运行，且配置里有一个 STCP provider 指向节点 `127.0.0.1:8787`
-  （本机是 `C:\Users\example\.dshlink\frp\frpc.toml` 里的 `dshlink-desktop-e4nrkp6`）；
+- 节点 `gateway.enabled=true`、`gateway.provider.secretKey` 已填，且节点侧 frpc 配置里有
+  对应的 STCP provider（`dshlink tunnel sync` 会自动生成；本机是
+  `C:\Users\example\.dshlink\frp\frpc.toml` 里的 `dshlink-phone` → localPort 8788）；
 - 手机能出站访问 frps 的 `serverPort`（16443/TCP）；
-- 构建前要在本地生成 `android/app/src/main/assets/tunnel/`（frpc.toml + 三份证书）。这个目录
-  含共享凭据，已被 `.gitignore` 忽略、不进仓库；模板与生成步骤见
+- 构建前要在本地生成 `android/app/src/main/assets/tunnel/`（frpc.toml + 三份证书），其中
+  `serverName` 必须是节点发布给手机的那个 provider 名（`dshlink-phone`）。这个目录含共享凭据，
+  已被 `.gitignore` 忽略、不进仓库；模板与生成步骤见
   [`android/tunnel/README.md`](tunnel/README.md)。换环境时必须替换，且**不要把这个 APK
   公开分发**。
 
-App 里的操作：打开 App → 勾选“通过阿里云 STCP 中转” → 填 device token → 点“连接”。URL 输入框
-会被禁用并显示本地 visitor 地址 `http://127.0.0.1:18788`。首次连接会等待最多 20 秒让 frpc
-登录 frps、注册 visitor；失败时弹窗会带 `frpc` 日志尾部。成功后所有请求都走
-手机 → frps → 节点 provider，与局域网连接完全相同。
+App 里的操作：打开 App → 勾选“通过阿里云 STCP 中转至 8788 网关” → 填 device token → 点“连接”。
+URL 输入框会被禁用并显示本地 visitor 地址 `http://127.0.0.1:18788`。首次连接会等待最多 20 秒
+让 frpc 登录 frps、注册 visitor；失败时弹窗会带 `frpc` 日志尾部。成功后所有请求都走
+手机 → frps → 节点 provider → 8788 网关，与局域网连接完全相同，只是必须带 device token。
 
 自测（本机，不经手机）：
 
 ```powershell
-# 用仓库里的 frpc 起一个 visitor，模拟手机侧
+# 用仓库里的 frpc 起一个 visitor，模拟手机侧（provider 名必须与节点一致）
 & D:\dsh-home\plugins\vendored\dsh-link\vendor\frp\windows-amd64\frpc.exe -c C:\Users\example\.dshlink\frp\frpc-visitor-phone.toml
-Invoke-WebRequest http://127.0.0.1:18788/healthz   # 应返回 {"ok":true,...}
+Invoke-WebRequest http://127.0.0.1:18788/healthz   # 无 token 应是 401（网关拒绝），而不是 200
 ```
 
 > 安全警告：`assets/tunnel/` 里的 frpc 配置包含 frps auth token、mTLS 客户端证书/私钥和 STCP
-> `secretKey`。它们等价于“能连到这个节点 8787 的凭据”；本机节点 `auth.trustLocalhost` 仍为
-> `true`，经 STCP 到达的请求源地址是回环，等于**绕过 dsh-link token**。因此 0.2.0 只适合
-> 自用/内测；公开分发前应改为“节点前置 token 网关 + 独立 STCP provider”，并轮换这些凭据。
+> `secretKey`。它们等价于“能连到节点 8788 网关的凭据”，但**不再等价于节点 API 权限**：
+> 网关仍要求 device token，且拒绝 `/mcp`、`/api/v1/bridge/*`。泄露后仍应轮换 frps token、
+> 重签 mTLS 证书、更换 STCP secretKey 并吊销 device token。不要把 APK 公开分发。
 
 ## 3. 构建（无 Gradle）
 
@@ -183,13 +203,14 @@ aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 产物：
 
 ```text
-android/dist/dshlink-control-0.2.0-debug.apk
+android/dist/dshlink-control-0.3.0-debug.apk
 ```
 
 这是 **debug 签名**的 APK，适合自用/内测；上架或长期分发请换成自己的 release keystore
 （`build-apk.ps1` 里的 `keytool`/`apksigner` 两步）。
 
-0.2.0 起 APK 还包含：
+0.2.0 起 APK 还包含（0.3.0 把隧道指向 8788 网关，`frpc.toml` 的 provider 名相应改为
+`dshlink-phone`）：
 
 - `assets/tunnel/{frpc.toml,ca.crt,client.crt,client.key}`：内置 visitor 配置与证书（本地生成，
   不进仓库）；
@@ -202,7 +223,7 @@ android/dist/dshlink-control-0.2.0-debug.apk
 ### 3.3 安装
 
 ```powershell
-D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.2.0-debug.apk
+D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.3.0-debug.apk
 ```
 
 或者把 APK 传到手机点击安装（需允许“安装未知来源应用”）。
@@ -210,17 +231,21 @@ D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.2
 ## 4. 使用
 
 1. 打开 App，填节点地址（如 `http://192.0.2.20:8787` 或 `http://100.64.0.5:8787`）
-   和 2.2 生成的 device token，点“连接”。不在同一局域网时勾选“通过阿里云 STCP 中转”，
-   地址框会自动禁用并由 App 启动内置 frpc（见 2.4）。
+   和 2.2 生成的 device token，点“连接”。不在同一局域网时勾选“通过阿里云 STCP 中转至 8788
+   网关”，地址框会自动禁用并由 App 启动内置 frpc（见 2.4）。
 2. 连接成功后看到工作区列表；点进工作区看会话；archived 会话默认隐藏，可勾选“显示已归档”。
+   顶部“控制节点”下拉框列出入口节点可见的节点：选另一个**直连**节点即可远程浏览/发消息
+   （0.3.0；经中转的二跳节点只展示不可选）。
 3. 点会话进入 transcript：
    - 前台时每 2.5 s 自动拉 `sinceSeq` 增量；按返回键/切后台即停止；
    - 顶部“加载更早”向前翻页；
-   - 底部输入框发送消息；勾选“插话（steer）”用 steer 模式，否则 queue。
+   - 底部输入框发送消息；勾选“插话（steer）”用 steer 模式，否则 queue；
+   - 连续的工具调用/结果默认折叠成一行（“#seq · 工具调用 · N 条 · 点击展开”），点击展开/收起。
 4. 顶部状态栏会显示当前节点、只读提示或错误原因；token/URL 错误、能力未开、命令超时
    都有对应提示。
 
-App 不保存多个节点配置（只有一组 URL + token），也不在后台同步；换节点重新填即可。
+App 不保存多个节点配置（只有一组入口 URL + token），也不在后台同步；换入口节点重新填即可。
+远程节点的发送结果不轮询命令 id，只提示“已提交 · 由 <节点> 处理”，回复看 transcript 增量。
 
 ### 4.1 真机连接（USB / 局域网 / VPN）
 
@@ -229,7 +254,7 @@ App 不保存多个节点配置（只有一组 URL + token），也不在后台�
 1. **USB（最省事，不依赖 Wi-Fi/防火墙）**：手机开 USB 调试并连电脑，然后
    ```powershell
    adb reverse tcp:8787 tcp:8787
-   adb install -r android\dist\dshlink-control-0.2.0-debug.apk
+   adb install -r android\dist\dshlink-control-0.3.0-debug.apk
    ```
    App 里节点地址填 http://127.0.0.1:8787 （手机上的 127.0.0.1 经 adb reverse 转到电脑的
    8787）。拔线或重启 adb 后需要重新执行 adb reverse。
@@ -240,9 +265,10 @@ App 不保存多个节点配置（只有一组 URL + token），也不在后台�
    首次连接若被防火墙拦截，在“允许应用通过防火墙”里勾选 Node.js 的专用网络。
 3. **VPN / 虚拟局域网**（Tailscale、WireGuard、ZeroTier 等）：手机装同一 VPN，节点 bind
    改为 VPN 网卡地址或 0.0.0.0，App 填 VPN 地址。适合跨公网，不需要把 8787 暴露到公网。
-4. **内置阿里云 STCP 中转（0.2.0，手机不在任何同一网络）**：节点侧已有指向 8787 的 STCP
-   provider，手机 App 勾选“通过阿里云 STCP 中转”即可；不用改节点 bind、不用开公网端口、
-   不用装 VPN。前提与安全边界严格见 2.4。
+4. **内置阿里云 STCP 中转（0.2.0 起；0.3.0 经 8788 网关，手机不在任何同一网络）**：节点侧
+   已发布指向 8788 网关的 STCP provider（`dshlink-phone`），手机 App 勾选“通过阿里云 STCP
+   中转至 8788 网关”即可；不用改节点 bind、不用开公网端口、不用装 VPN。设备 token 仍必填。
+   前提与安全边界严格见 2.4。
 
 device token 在节点上生成（--ttl-days 到期自动失效，手机丢失可 token rm --id 吊销）：
 
@@ -257,14 +283,13 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 
 ## 5. 安全说明（必读）
 
-- **传输**：公网必须走 VPN（Tailscale/WireGuard 等）、HTTPS 反代或 0.2.0 的内置 STCP 中转；
+- **传输**：公网必须走 VPN（Tailscale/WireGuard 等）、HTTPS 反代或内置 STCP 中转；
   明文 HTTP 仅限可信局域网。
-- **内置中转凭据（0.2.0 新增风险）**：APK 的 `assets/tunnel/` 里有 frps auth token、mTLS 客户端
-  证书/私钥和 STCP `secretKey`；拿到 APK 的人可以连上节点的 STCP provider。本机
-  `auth.trustLocalhost=true` 又让经隧道来的请求（源地址 127.0.0.1）**绕过 dsh-link token**。
-  所以：APK 只私下给自己/信任的人；不要上传应用商店或公开链接；泄露后要换 frps token、
-  重签 mTLS 证书、改 STCP secretKey，并考虑把节点 `trustLocalhost` 关掉。正式分发前建议
-  在节点前加一个只认 token 的网关，再给手机单独开一个指向网关的 STCP provider。
+- **内置中转凭据（0.2.0 新增；0.3.0 已有网关兜底）**：APK 的 `assets/tunnel/` 里有 frps auth
+  token、mTLS 客户端证书/私钥和 STCP `secretKey`；拿到 APK 的人可以连到节点的 STCP provider。
+  0.3.0 起该 provider 指向 **8788 网关**，网关对每个请求都要求 device token 且不信任回环来源，
+  所以 STCP 凭据不再等于节点 API 权限；但 APK 仍只私下给自己/信任的人，不要上传应用商店或
+  公开链接。泄露后要换 frps token、重签 mTLS 证书、改 STCP secretKey，并吊销 device token。
 - **token**：device token 存在 App 的 `SharedPreferences`（应用私有，但未加密）；手机丢失
   请在节点上 `token rm --id` 吊销。token 可以只给 30 天有效期。
 - **最小权限**：device token 不能读写消息、不能管理 peers、不能碰 bridge 控制面；它仍能读
@@ -276,16 +301,19 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   - 每个入口都要 token，且 token 有上限频率（`limits.maxRequestsPerMinute`）；
   - 不要启用 `relay` 或不必要的 `files.allowUpload`；
   - 若使用反代，TLS 由反代终止，节点仍只听内网/回环。
-- **节点侧**：如果手机走内置 STCP，节点 8787 仍然只应由 frpc 的 provider 指向；不要同时把
-  8787 直接映射到公网。STCP 只保证“没有 secretKey 连不上”，不替代 token；0.2.0 的样例配置
-  因为 `trustLocalhost=true` 实际是 token 旁路，务必只在自己的机器上测试。
+- **节点侧**：如果手机走内置 STCP，节点发布的是指向 **8788 网关**的 `dshlink-phone` provider；
+  8787 本身只应由本机 CLI/bridge 使用，不要映射到公网。STCP 只保证“没有 secretKey 连不上”，
+  不替代 token；网关已经强制 token，但 device token 仍应设有效期并定期轮换。
 - 这是 **debug APK**，没有代码混淆、没有证书固定；不要从不明来源安装二次打包的 APK。
 
 ## 6. 已知限制
 
 - **没有推送/SSE**：会话更新靠前台每 2.5 s 轮询；退到后台就停止，没有通知栏提醒。
 - **没有离线缓存**：断网后重新进入页面会从头拉。
-- **单节点**：一个 App 实例只连一个节点。
+- **单入口节点**：一个 App 实例只保存一组入口 URL + token；0.3.0 可以切换到该入口节点的
+  直连 peer，但经其他节点中转（`via` 非空）的二跳节点只展示、不可控制。
+- **远程发送不跟踪命令 id**：远程节点的 `POST /dsh/call` 只返回“已提交”，命令状态在 peer 的
+  队列里；结果通过 transcript 增量看。
 - **只做浏览与发消息**：不能新建/重命名/归档会话，不能发附件，不能看文件根。
 - **命令依赖 bridge**：DSH host 或 bridge 不在线时，发送命令会 pending→expired（默认 120 s）。
 - **Android 版本**：minSdk 26（Android 8.0）及以上；targetSdk 36。
@@ -297,7 +325,7 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 ## 7. 验证
 
 - 构建：`android/build-apk.ps1` 退出码 0；`aapt2 dump badging` 显示
-  `package dev.dshlink.control`、`versionName 0.2.0`、`minSdk 26`、`targetSdk 36`。
+  `package dev.dshlink.control`、`versionName 0.3.0`、`minSdk 26`、`targetSdk 36`。
 - `apksigner verify --print-certs` 通过。
 - API 契约（本机 node:test，`DSH_HOME` 指向真实 DSH 时运行）：
   `node --test test/mobile-contract.test.mjs` —— 覆盖 App 用到的 info / workspaces / sessions /
@@ -329,10 +357,10 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     `starting /data/app/.../lib/x86_64/libfrpc.so -c /data/user/0/dev.dshlink.control/files/tunnel/frpc.toml`，
     约 50 ms 后 `tunnel is healthy on port 18788`；`adb shell ps -A` 看到 `libfrpc.so` 子进程；
     主界面状态“已连接 · 11 个工作区 · 可发送”，节点 `alice-pc · dsh-link 0.6.2`，
-    URL 框禁用并显示 `http://127.0.0.1:18788`（`test/.tmp/tunnel-main.png`）。
+    URL 框禁用并显示 `http://127.0.0.1:18788`。
   - **真实跨公网发送**：经中转打开 `[phone-e2e] 短回复`（`session-1aa41492…`），发送
     `phone tunnel e2e: reply with the single word TUNNEL_OK`；transcript 出现 `#37 · 用户`、
-    `#39 · 思考`、`#39 · DSH` 正文 `TUNNEL_OK`，截图 `docs/mobile/screenshots/tunnel-transcript.png`。
+    `#39 · 思考`、`#39 · DSH` 正文 `TUNNEL_OK`。
     全程请求是 手机 → frps → 节点已有 STCP provider → 8787，节点没有新开公网端口。
   - **失败路径**：故意让 frpc 连不上（或删掉 native lib）时，App 在 20 秒内弹窗
     “中转启动失败”，正文带 `frpc` 日志尾部；不会静默假装连接成功。
@@ -341,7 +369,31 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     并从控制端把一条消息发进已有 DSH 会话；节点 audit 记录了该 `sessions.prompt` 命令
     `cmd_01m6k11b50303a94cfc1c6`（10:17:54Z）。APK 里的 arm64 frpc 因此也已验证可执行。
 
-  已知边界：本机 `auth.trustLocalhost=true`，所以经 STCP 到达 8787 的请求实际上绕过了
-  dsh-link token（本例 audit 里记为 localhost/admin）；这条路径只用于本机自用测试。
+  历史边界（0.3.0 已修复）：0.2.0 的隧道落到 8787，本机 `auth.trustLocalhost=true` 使经 STCP
+  到达的请求绕过 dsh-link token（当时 audit 记为 localhost/admin）。0.3.0 改为落到 8788 网关，
+  每请求校验 token 且不信任回环来源。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.2.0，二者独立演进。
+- 0.3.0 冒烟（2026-11-04，Android 16 / API 36 x86_64 模拟器；真实节点 dsh-link **0.7.0**，
+  已启用 8788 网关与 `dshlink-phone` STCP provider）：
+  - **APK**：`dshlink-control-0.3.0-debug.apk` 11,986,025 bytes，versionCode 4 / versionName
+    0.3.0；debug 签名通过。隧道模板指向 `dshlink-phone` provider；`TunnelManager.healthy()`
+    改为“有 HTTP 响应即健康”（网关对无 token 探针回 401 也算隧道已通）。
+  - **网关路径**：勾选中转后连接成功，状态“已连接 · 11 个工作区 · alice-pc ·
+    可发送”，summary“节点 alice-pc · dsh-link 0.7.0 · 网络 2 个节点 · 2 可达”；
+    局域网直连 `http://192.0.2.100:8787` 同样可用。网关侧：无 token /healthz → 401，
+    device token info 200，`/api/v1/peers` 与 `/mcp` → 403；`/dsh/call` 经 bridge 完成。
+  - **网络扫描与节点切换**：连接测试节点 `NODE-A-TEST`（8797，peer 含 DESKTOP）后下拉框显示
+    2 个节点；选 DESKTOP 后状态为“控制 alice-pc（经 NODE-A-TEST 中转）”，远程加载
+    11 个工作区、8 个会话（3 个子智能体）与 223 条 transcript；二跳节点会提示暂不支持并回退。
+  - **远程发送**：经 NODE-A 中转打开 `session-1aa41492…` 发送 `remote e2e from NODE-A: reply
+    REMOTE_OK`，transcript 出现 `#46 · 用户`、`#47 · 用户`、`#49 · DSH` = `REMOTE_OK`。
+  - **子智能体与 JSON null 修复**：工作区行显示“共 8 个会话（3 个子智能体）”，3 行带
+    “子智能体 · ”前缀。此前 `JSONObject.optString(key, fallback)` 把 `JSONObject.NULL` 读成
+    字符串 `"null"`，导致 8/8 都被当成子智能体、工具行显示 `tool: null`；新增
+    `Ui.text(object, key)`（null 安全）并在所有 adapter 使用。
+  - **工具折叠**：`#414 · 工具调用 · 2 条 · 10:38:46 · 点击展开`，点击后变“点击收起”并显示
+    工具调用 JSON 与工具结果正文；折叠只影响显示。
+  - 全程 `logcat` 无崩溃；主界面/会话列表/transcript 截图仅本地留存（`test/.tmp/`，
+    含真实主机名/局域网地址，不提交仓库）。
+
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.3.0，与节点/CLI 独立演进（当前节点 0.7.0）。

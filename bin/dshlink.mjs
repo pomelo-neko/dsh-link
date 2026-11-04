@@ -7,6 +7,7 @@ import { MessageStore } from '../src/store.mjs';
 import { FileRoots } from '../src/fsroot.mjs';
 import { createOps } from '../src/ops.mjs';
 import { createLinkServer } from '../src/server.mjs';
+import { GATEWAY_POLICY_SUMMARY, createGateway } from '../src/gateway.mjs';
 import {
   createInboundToken, defaultDataDir, defaultNodeName, loadConfig, normalizeRoot, saveConfig, sealTokens, slugName
 } from '../src/config.mjs';
@@ -214,6 +215,22 @@ async function cmdServe(args) {
       : () => ({ version: DSHLINK_VERSION, pid: process.pid, startedAt, configPath: cfg.configPath, configReloads: null, configLastReloadAt: null, configLastError: null })
   });
   const info = await link.listen({ port: cfg.port, bind: cfg.bind });
+  // The gateway is opt-in (config: "gateway": { "enabled": true }). It fronts the same node API on
+  // a loopback token-checked port, so an frp/STCP-forwarded phone request cannot ride in on the
+  // node's localhost trust. A configured gateway that cannot start is a hard error: silently
+  // serving without the token check it was meant to add would be worse than not starting.
+  let gateway = null;
+  let gatewayInfo = null;
+  if (cfg.gateway?.enabled === true) {
+    gateway = createGateway({ cfg, getConfig: () => cfg, logger });
+    try {
+      gatewayInfo = await gateway.listen({ port: cfg.gateway.port, bind: cfg.gateway.bind });
+    } catch (err) {
+      await gateway.close();
+      await link.close();
+      throw new LinkError(2, 'gateway_listen_failed', `gateway could not listen on ${cfg.gateway.bind}:${cfg.gateway.port}: ${err?.message ?? String(err)}`);
+    }
+  }
   const autoSyncSec = Number(flagString(args['auto-sync']) ?? 0);
   console.log(`dsh-link node "${cfg.name}" listening on ${info.url}`);
   console.log(`  MCP endpoint : ${info.url}/mcp`);
@@ -222,6 +239,7 @@ async function cmdServe(args) {
   if (persisted) console.log(`  sealed ${persisted} plaintext token(s) in the config file`);
   console.log(`  DSH view     : ${cfg.dsh.enabled ? `on (workspaces ${cfg.dsh.exposeWorkspaces ? 'yes' : 'no'}, transcripts ${cfg.dsh.exposeTranscripts ? 'yes' : 'no'}, home ${cfg.dsh.home || process.env.DSH_HOME || '(auto)'})` : 'off (set "dsh": { "enabled": true } or run: dshlink dsh enable)'}`);
   console.log(`  capabilities : ${cfg.capabilities.enabled ? `on (${cfg.capabilities.methods.length} method(s))` : 'off'}`);
+  if (gatewayInfo) console.log(`  gateway      : ${gatewayInfo.url} -> ${gatewayInfo.upstream} (${GATEWAY_POLICY_SUMMARY})`);
   console.log(`  config       : ${cfg.configPath} (${watcher ? `hot-reload every ${watcher.intervalMs}ms` : 'reload disabled'})`);
   let tunnel = null;
   if (cfg.tunnel.enabled && cfg.tunnel.autoStart) {
@@ -247,6 +265,7 @@ async function cmdServe(args) {
   const shutdown = async (signal) => {
     console.log(`\nreceived ${signal}, shutting down`);
     if (timer) clearInterval(timer);
+    if (gateway) await gateway.close();
     await link.close();
     process.exit(0);
   };

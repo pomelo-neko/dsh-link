@@ -66,6 +66,7 @@ export class LinkClient {
   health() { return this._fetch('GET', '/healthz'); }
   info() { return this._fetch('GET', `${API_PREFIX}/info`); }
   listPeers(probe = false) { return this._fetch('GET', `${API_PREFIX}/peers`, { query: probe ? { probe: '1' } : {} }); }
+  networkNodes(query) { return this._fetch('GET', `${API_PREFIX}/network/nodes`, { query }); }
   deliverMessage(message) { return this._fetch('POST', `${API_PREFIX}/messages`, { body: message }); }
   inbox(query) { return this._fetch('GET', `${API_PREFIX}/messages`, { query }); }
   outbox(query) { return this._fetch('GET', `${API_PREFIX}/outbox`, { query }); }

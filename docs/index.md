@@ -10,6 +10,7 @@ Entry points, in the order most readers want them:
 | [`DSH-INTEGRATION.md`](DSH-INTEGRATION.md) | MCP 条目、技能安装、桥插件安装、profile patch 机制 |
 | [`DSH-ACCESS.md`](DSH-ACCESS.md) | 0.3 的只读视图 / 转录 / 动作能力：开关、威胁模型、建议组合 |
 | [`PROTOCOL.md`](PROTOCOL.md) | HTTP API 与消息/文件线协议 |
+| [`GATEWAY.md`](GATEWAY.md) | 0.7 回环令牌网关：为什么需要、8788 反代、角色策略、手机/STCP provider 接法、排障 |
 | [`DESIGN.md`](DESIGN.md) | 设计取舍（为什么是这样） |
 | [`FRP.md`](FRP.md) | frps 部署、STCP provider/visitor、TLS、混用手工 frpc 的坑 |
 | [`WAN-VERIFICATION.md`](WAN-VERIFICATION.md) | 跨公网实测记录与复现步骤 |

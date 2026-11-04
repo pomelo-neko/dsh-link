@@ -41,6 +41,85 @@ export const DEFAULT_LIMITS = {
   maxRequestsPerMinute: 1200
 };
 
+// Loopback token gateway: a separate 127.0.0.1 listener that always requires a token before it
+// proxies to the real node API. It exists because a request that reaches the API through an
+// frp/STCP tunnel arrives from 127.0.0.1, and an old config with auth.trustLocalhost: true would
+// otherwise let it through without a token (src/server.mjs authorize). The gateway never trusts
+// the source address: no valid token, no request.
+// Optional STCP provider for the gateway: when set, the generated frpc.toml publishes the gateway
+// port (not the plain API port) under this name, so a phone/remote controller can reach the
+// token-checking listener without opening a new public port. The phone's visitor must use the same
+// secretKey; leave secretKey null to skip generating the provider.
+export const DEFAULT_GATEWAY_PROVIDER = { name: 'dshlink-phone', secretKey: null };
+
+export const DEFAULT_GATEWAY = {
+  enabled: false,
+  bind: '127.0.0.1',
+  port: 8788,
+  upstream: 'http://127.0.0.1:8787',
+  maxBodyBytes: 2 * 1024 * 1024,
+  timeoutMs: 60_000,
+  provider: { ...DEFAULT_GATEWAY_PROVIDER }
+};
+
+/** True for loopback addresses: 127.0.0.0/8, ::1 and IPv4-mapped IPv6 loopback. */
+export function isLoopbackAddress(value) {
+  const address = String(value ?? '').trim().toLowerCase();
+  if (!address) return false;
+  if (address === 'localhost' || address === '::1' || address === '0:0:0:0:0:0:0:1') return true;
+  const v4 = address.startsWith('::ffff:') ? address.slice(7) : address;
+  const parts = v4.split('.');
+  return parts.length === 4 && parts[0] === '127' && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+function gatewayInt(value, fallback, min, max) {
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  const n = Math.trunc(parsed);
+  return n >= min && n <= max ? n : fallback;
+}
+
+function normalizeGatewayProvider(raw) {
+  const source = isPlainObject(raw) ? raw : {};
+  const name = typeof source.name === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(source.name.trim())
+    ? source.name.trim()
+    : DEFAULT_GATEWAY_PROVIDER.name;
+  const secret = typeof source.secretKey === 'string' ? source.secretKey.trim() : '';
+  const secretKey = secret && secret !== 'CHANGE_ME' ? secret : DEFAULT_GATEWAY_PROVIDER.secretKey;
+  return { name, secretKey };
+}
+
+function normalizeGatewayUpstream(value) {
+  if (typeof value !== 'string' || !value.trim()) return DEFAULT_GATEWAY.upstream;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return DEFAULT_GATEWAY.upstream;
+    // The gateway forwards the request path as-is, so upstream is an origin (no base path).
+    return url.origin;
+  } catch {
+    return DEFAULT_GATEWAY.upstream;
+  }
+}
+
+/**
+ * Normalize the gateway config section. Tolerant by design: a typo must not keep the node from
+ * booting, so every invalid value falls back to the safe default instead of throwing. The bind
+ * address is forced to loopback (the gateway is not meant to be reachable directly).
+ */
+export function normalizeGatewayConfig(raw) {
+  const source = isPlainObject(raw) ? raw : {};
+  const bind = typeof source.bind === 'string' && isLoopbackAddress(source.bind) ? source.bind.trim() : DEFAULT_GATEWAY.bind;
+  return {
+    enabled: source.enabled === true,
+    bind,
+    port: gatewayInt(source.port, DEFAULT_GATEWAY.port, 1, 65535),
+    upstream: normalizeGatewayUpstream(source.upstream),
+    maxBodyBytes: gatewayInt(source.maxBodyBytes, DEFAULT_GATEWAY.maxBodyBytes, 1, 512 * 1024 * 1024),
+    timeoutMs: gatewayInt(source.timeoutMs, DEFAULT_GATEWAY.timeoutMs, 1, 3_600_000),
+    provider: normalizeGatewayProvider(source.provider)
+  };
+}
+
 // Inbound token roles. A token without a role is a legacy token and behaves as "admin".
 //   admin  - full control (local tooling, installation)
 //   bridge - only what the local dsh-link-bridge plugin needs: read inbox/read marks + bridge channel
@@ -80,6 +159,7 @@ export function defaultConfig(overrides = {}) {
     files: { allowUpload: false, roots: [], deny: [...DEFAULT_DENY] },
     dsh: normalizeDshViewConfig({}),
     capabilities: normalizeCapabilityConfig({}),
+    gateway: normalizeGatewayConfig({}),
     peers: [],
     relay: { enabled: true },
     log: { level: 'info' }
@@ -146,6 +226,7 @@ export function normalizeConfig(raw, baseDir) {
     limits: { ...defaults.limits, ...(raw.limits ?? {}) },
     dsh: normalizeDshViewConfig(raw.dsh ?? {}),
     capabilities: normalizeCapabilityConfig(raw.capabilities ?? {}),
+    gateway: normalizeGatewayConfig(raw.gateway),
     files: {
       allowUpload: raw.files?.allowUpload === true,
       deny: Array.isArray(raw.files?.deny) ? raw.files.deny.map(String) : [...DEFAULT_DENY],

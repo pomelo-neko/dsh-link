@@ -21,6 +21,9 @@ android/native/
 android/frp-arm64/
 android/frp_*.tar.gz
 
+# ---- screenshots (real host names / LAN addresses; kept out of the repo) ----
+docs/mobile/screenshots/
+
 # ---- local configs / data dirs ----
 dshlink.config.json
 .dshlink/

@@ -1,7 +1,7 @@
 // dsh-link: shared utilities (ids, hashing, auth compare, errors, JSON body I/O, globs).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
-export const DSHLINK_VERSION = '0.6.2';
+export const DSHLINK_VERSION = '0.7.0';
 export const API_PREFIX = '/api/v1';
 
 export class LinkError extends Error {

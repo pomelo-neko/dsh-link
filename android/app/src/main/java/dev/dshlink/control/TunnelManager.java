@@ -108,7 +108,10 @@ final class TunnelManager {
             conn.setReadTimeout(1200);
             conn.setRequestMethod("GET");
             int status = conn.getResponseCode();
-            return status == 200;
+            // The visitor port only answers once the tunnel is up. Past 0.7 it lands on the
+            // token-checking gateway, which answers 401 to this unauthenticated probe - that
+            // still proves the tunnel is connected, so any HTTP answer counts as healthy.
+            return status > 0;
         } catch (IOException err) {
             return false;
         } finally {

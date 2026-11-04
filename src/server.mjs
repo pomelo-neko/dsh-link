@@ -27,6 +27,7 @@ function routeRoleTable() {
     ['GET /healthz', null],
     ['GET ' + API_PREFIX + '/info', ALL_ROLES],
     ['GET ' + API_PREFIX + '/peers', ['admin']],
+    ['GET ' + API_PREFIX + '/network/nodes', DSH_ROLES],
     ['GET ' + API_PREFIX + '/status', ['admin']],
     ['POST ' + API_PREFIX + '/messages', ['admin', 'peer']],
     ['GET ' + API_PREFIX + '/messages', READ_ROLES],
@@ -375,8 +376,20 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
     }
   }
 
+  add('GET', `${API_PREFIX}/network/nodes`, async (ctx) => {
+    const q = ctx.url.searchParams;
+    const result = await ops.networkNodes({
+      depth: q.get('depth') ?? undefined,
+      maxNodes: q.get('maxNodes') ?? undefined,
+      timeoutMs: q.get('timeoutMs') ?? undefined
+    });
+    audit({ event: 'network_scan', count: result.count, total: result.total, partial: result.partial, ip: ctx.auth.ip, token: ctx.auth.token?.label ?? 'localhost' });
+    sendJson(ctx.res, 200, result);
+  });
+
   add('GET', `${API_PREFIX}/dsh/workspaces`, async (ctx) => {
-    const result = await ops.dshWorkspaces({});
+    const peer = ctx.url.searchParams.get('peer') ?? undefined;
+    const result = await ops.dshWorkspaces({ peer });
     audit({ event: 'dsh_view_workspaces', count: result.count, ip: ctx.auth.ip, token: ctx.auth.token?.label ?? 'localhost' });
     sendJson(ctx.res, 200, result);
   });
@@ -384,6 +397,7 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   add('GET', `${API_PREFIX}/dsh/sessions`, async (ctx) => {
     const q = ctx.url.searchParams;
     const result = await ops.dshSessions({
+      peer: q.get('peer') ?? undefined,
       workspace: q.get('workspace') ?? undefined,
       includeArchived: q.get('includeArchived') === '1' || q.get('archived') === '1',
       query: q.get('query') ?? undefined,
@@ -394,13 +408,14 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   });
 
   add('GET', `${API_PREFIX}/dsh/sessions/:id`, async (ctx) => {
-    sendJson(ctx.res, 200, await ops.dshSession({ sessionId: ctx.params.id }));
+    sendJson(ctx.res, 200, await ops.dshSession({ peer: ctx.url.searchParams.get('peer') ?? undefined, sessionId: ctx.params.id }));
   });
 
   add('GET', `${API_PREFIX}/dsh/sessions/:id/transcript`, async (ctx) => {
     const q = ctx.url.searchParams;
     const sinceSeq = q.get('sinceSeq');
     const result = await ops.dshTranscript({
+      peer: q.get('peer') ?? undefined,
       sessionId: ctx.params.id,
       limit: toInt(q.get('limit'), 100, { min: 1, max: 1000 }),
       offset: toInt(q.get('offset'), 0, { min: 0, max: 1000000 }),
@@ -412,7 +427,7 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   });
 
   add('GET', `${API_PREFIX}/dsh/capabilities`, async (ctx) => {
-    sendJson(ctx.res, 200, await ops.dshCapabilities({}));
+    sendJson(ctx.res, 200, await ops.dshCapabilities({ peer: ctx.url.searchParams.get('peer') ?? undefined }));
   });
 
   add('POST', `${API_PREFIX}/dsh/call`, async (ctx) => {
@@ -426,9 +441,8 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
       tokenId: ctx.auth.token?.id ?? null
     };
     const target = body.peer && body.peer !== cfg.name && body.peer !== 'self' ? String(body.peer) : '';
-    if (target && role !== 'admin') {
-      throw new LinkError(403, 'relay_not_allowed', 'only an admin token may forward a capability call to another node');
-    }
+    // DSH_ROLES already limits this route to admin/peer/device. A device token may relay a
+    // capability call to a configured peer; the peer still enforces its own allowlist.
     const result = target
       ? await ops.dshCall({ peer: target, method: body.method, params: body.params, waitSeconds: body.waitSeconds })
       : await ops.dshCallLocal({ method: body.method, params: body.params, waitSeconds: body.waitSeconds, origin });

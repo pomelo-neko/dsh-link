@@ -1,14 +1,14 @@
 # Build the dsh-link Android control app without Gradle.
 #
 #   powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
-#   powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSdk -VersionName 0.2.0
+#   powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSdk -VersionName 0.3.0
 #
 # Requires: Android SDK with build-tools;36.0.0 and platforms;android-36, plus a JDK (17+).
 # Uses only aapt2 / javac / d8 / zipalign / apksigner from the SDK, so no network and no Gradle.
 param(
     [string]$Sdk = "D:\AndroidSdk",
-    [string]$VersionName = "0.2.0",
-    [int]$VersionCode = 3
+    [string]$VersionName = "0.3.0",
+    [int]$VersionCode = 4
 )
 
 $ErrorActionPreference = "Continue"

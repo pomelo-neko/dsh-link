@@ -367,6 +367,7 @@ function fakeHost(options = {}) {
     workspaceRegistry: {
       list: () => workspaces,
       get: (id) => workspaces.find((workspace) => workspace.id === id),
+      resolveByPath: async (dir) => workspaces.find((workspace) => workspace.path === dir),
       create: async (dir, title) => ({ id: 'ws_new', path: dir, title }),
       archiveSession: async (sessionId) => { archived.push(sessionId); archiveSet.push(sessionId); },
       get archivedSessionIds() { return [...archiveSet]; }
@@ -601,9 +602,14 @@ test('dshops: sessions.create sends one location and applies the title through r
   assert.deepEqual(host.renamed, [{ sessionId: 'session-new-1', title: 'Remote title' }]);
   assert.deepEqual(created, { sessionId: 'session-new-1', title: 'Remote title' });
 
+  // A cwd naming a registered workspace becomes workspaceId, so the Host attaches the
+  // session to that workspace instead of leaving it ungrouped.
   const bare = await ops.methods['sessions.create']({ cwd: TMP });
-  assert.deepEqual(host.created[1], { cwd: TMP });
+  assert.deepEqual(host.created[1], { workspaceId: 'ws_1' });
   assert.deepEqual(bare, { sessionId: 'session-new-1', title: '' });
+
+  const stranger = await ops.methods['sessions.create']({ cwd: TMP + '-stranger' });
+  assert.deepEqual(host.created[2], { cwd: TMP + '-stranger' });
 });
 
 test('dshops: sessions.create reports a rename miss without failing the creation', async () => {

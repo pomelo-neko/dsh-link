@@ -17,7 +17,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="连接一个 dsh-link 节点，浏览它连接的 DSH 工作区与会话。只在连接或刷新时传输数据。"
+        android:text="连接一个 dsh-link 节点，浏览它连接的 DSH 网络、工作区与会话。只在连接或刷新时传输数据。"
         android:textSize="12sp"
         android:textColor="#6B7280"
         android:paddingBottom="12dp" />
@@ -42,8 +42,30 @@
         android:id="@+id/tunnel_check"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="通过阿里云 STCP 中转（自动启动内置 frpc，忽略上方地址）"
+        android:text="通过阿里云 STCP 中转至 8788 网关（内置 frpc；需要 device token）"
         android:textSize="12sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="控制节点："
+            android:textSize="13sp"
+            android:textColor="#374151" />
+
+        <Spinner
+            android:id="@+id/node_spinner"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:minHeight="40dp" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"

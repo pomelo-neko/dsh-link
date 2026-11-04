@@ -26,7 +26,7 @@ $tpl = Get-Content 'android\tunnel\frpc.toml.example' -Raw
 $tpl = $tpl.Replace('{{SERVER_ADDR}}', '203.0.113.10')
 $tpl = $tpl.Replace('{{SERVER_PORT}}', '16443')
 $tpl = $tpl.Replace('{{FRPS_AUTH_TOKEN}}', '<frps auth token>')
-$tpl = $tpl.Replace('{{STCP_SERVER_NAME}}', 'dshlink-desktop-e4nrkp6')
+$tpl = $tpl.Replace('{{STCP_SERVER_NAME}}', 'dshlink-phone')
 $tpl = $tpl.Replace('{{STCP_SECRET_KEY}}', '<stcp secretKey>')
 $tpl = $tpl.Replace('{{VISITOR_PORT}}', '18788')
 Set-Content -NoNewline -Encoding utf8 (Join-Path $dst 'frpc.toml') $tpl
@@ -34,8 +34,11 @@ Set-Content -NoNewline -Encoding utf8 (Join-Path $dst 'frpc.toml') $tpl
 
 Values come from the node-side frpc config (`C:\Users\example\.dshlink\frp\frpc.toml` in this setup): the frps
 `serverAddr`/`serverPort`, `auth.token`, the STCP `[[proxies]]` `serverName`, and its
-`secretKey`. The visitor port is local to the phone; 18788 avoids the node's 19110 visitor and the
-billion-context proxy on 18787.
+`secretKey`. For the 0.3.0 app the target provider is the one that points at the **gateway**
+(`gateway.provider.name`, default `dshlink-phone` → `localPort 8788`), not the older provider that
+points at the plain API port 8787; `dshlink tunnel sync` publishes it from the node's
+`gateway.enabled` + `gateway.provider.secretKey` configuration. The visitor port is local to the
+phone; 18788 avoids the node's 19110 visitor and the billion-context proxy on 18787.
 
 ## Native frpc binaries
 
@@ -52,7 +55,7 @@ extract `frpc`, and copy it to the matching `libfrpc.so` path. See
 ## Security
 
 The built APK embeds these credentials. It is a private self-use build; do not publish it. If the
-APK leaks, rotate the frps auth token, re-issue the client certificate and change the STCP
-`secretKey`. With `auth.trustLocalhost: true` on the node, STCP traffic arrives on loopback and
-bypasses the dsh-link token, so a production phone deployment needs a token-checking gateway (or
-client certificates) in front of a dedicated STCP provider.
+APK leaks, rotate the frps auth token, re-issue the client certificate, change the STCP
+`secretKey` and revoke the device token. Since 0.3.0 the provider points at the node's token-checking
+8788 gateway, so the STCP secret alone does not reach the node API: every request still needs a
+`device` token and the gateway never falls back to `trustLocalhost`.

@@ -93,7 +93,8 @@ public class SessionListActivity extends Activity {
                     if (workspaceId != null && !workspaceId.isEmpty()) {
                         query += "&workspace=" + enc(workspaceId);
                     }
-                    final JSONObject result = NodeState.client.get("/api/v1/dsh/sessions" + query);
+                    final JSONObject result = NodeState.client.get(
+                            NodeState.dshPath("/api/v1/dsh/sessions" + query));
                     main.post(new Runnable() {
                         @Override
                         public void run() {
@@ -119,9 +120,19 @@ public class SessionListActivity extends Activity {
         JSONArray sessions = result.optJSONArray("sessions");
         adapter.setItems(sessions);
         int count = adapter.getCount();
-        statusView.setText(count == 0
-                ? "没有会话（归档会话可勾选上方查看）"
-                : "共 " + count + " 个会话 · 进入后才会拉取消息");
+        if (count == 0) {
+            statusView.setText("没有会话（归档会话可勾选上方查看）");
+            return;
+        }
+        int subagents = 0;
+        for (int i = 0; i < sessions.length(); i++) {
+            JSONObject session = sessions.optJSONObject(i);
+            if (session != null && SessionAdapter.isSubagent(session)) subagents++;
+        }
+        StringBuilder status = new StringBuilder("共 ").append(count).append(" 个会话");
+        if (subagents > 0) status.append("（").append(subagents).append(" 个子智能体）");
+        status.append(" · ").append(NodeState.nodeLabel()).append(" · 进入后才会拉取消息");
+        statusView.setText(status.toString());
     }
 
     private static String enc(String value) {

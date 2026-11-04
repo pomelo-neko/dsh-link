@@ -456,7 +456,16 @@ function headInfo(events) {
         cwd: typeof event.cwd === 'string' ? event.cwd : null,
         createdAt: typeof event.createdAt === 'number' && Number.isFinite(event.createdAt)
           ? new Date(event.createdAt).toISOString()
-          : null
+          : null,
+        // Subagent provenance is written by DSH on the session header. Keep it as durable
+        // identity data: remote clients use it to tell a delegated worker apart from a
+        // human-owned conversation instead of guessing from the title.
+        parentSession: typeof event.parentSession === 'string' && event.parentSession.trim() !== '' ? event.parentSession : null,
+        origin: typeof event.origin === 'string' && event.origin.trim() !== '' ? event.origin : null,
+        delegationDepth: typeof event.delegationDepth === 'number' && Number.isFinite(event.delegationDepth)
+          ? event.delegationDepth
+          : null,
+        agentPreset: typeof event.agentPreset === 'string' && event.agentPreset.trim() !== '' ? event.agentPreset : null
       };
     } else if (event.type === 'session/title' && title === null) {
       const text = event.data?.title;
@@ -740,6 +749,12 @@ export function createDshView({ cfg = {}, logger, maxLogBytes } = {}) {
       updatedAt: isoOrNull(scan.mtimeMs),
       sizeBytes: scan.size,
       archived: ctx.archived.has(key),
+      // Subagent provenance (null/0 for ordinary Sessions). origin is "subagent" for a
+      // Session created by delegation; parentSession names the delegating Session.
+      origin: scan.info.session?.origin ?? null,
+      parentSession: scan.info.session?.parentSession ?? null,
+      delegationDepth: scan.info.session?.delegationDepth ?? null,
+      agentPreset: scan.info.session?.agentPreset ?? null,
       messages: scan.messages,
       messagesExact: !scan.truncatedBytes && scan.corruptFrames === 0
     };

@@ -203,13 +203,15 @@ binding, and the sender's bridge routes the answer into that Session. Everything
 command is executed, the fields only pick *where* a prompt goes. Policy, fallbacks, wire format and
 troubleshooting: [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md).
 
-## Control DSH from a phone (0.6)
+## Control DSH from a phone (0.6+, network-aware in 0.7)
 
 The Android app in [`android/`](android/) is a **controller**, not a node: it connects to one
 existing dsh-link node, lists that node's DSH workspaces and sessions, streams a transcript while
 the screen is in the foreground, and sends a message into a conversation through the capability
 channel. There is no background service and no polling while the app is not open; it pulls a
-snapshot plus a `sinceSeq` increment.
+snapshot plus a `sinceSeq` increment. Since 0.7 the app also discovers the nodes of that node's
+network, can switch to any directly-connected node and browse/control it through the entry node,
+labels subagent Sessions, and folds tool-call rows into expandable groups.
 
 ```powershell
 # on the node: allow the phone to read the view and prompt conversations
@@ -217,19 +219,21 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # on a machine with JDK 17+ and Android SDK 36
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-# -> android/dist/dshlink-control-0.2.0-debug.apk
-adb install android\dist\dshlink-control-0.2.0-debug.apk
+# -> android/dist/dshlink-control-0.3.0-debug.apk
+adb install android\dist\dshlink-control-0.3.0-debug.apk
 ```
 
 The node needs `dsh.enabled`, `dsh.exposeWorkspaces`, `dsh.exposeTranscripts`,
 `capabilities.enabled` with `sessions.prompt` in `capabilities.methods`, and a bridge running to
 execute the queued prompt. The phone normally reaches the node over a LAN or a VPN
-(Tailscale/WireGuard); 0.2.0 also bundles an frpc STCP visitor so the app can reach the node through
-an existing frps relay when no LAN/VPN route exists (no new public port on the node). That build
-embeds relay credentials and, with `trustLocalhost: true`, the STCP loopback path bypasses the
-dsh-link token — treat it as a private self-use APK, not a public download. Use a `device` token and
-revoke it if the phone is lost; see [`android/README.md`](android/README.md) for setup and
-[`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) for the API mapping and verification.
+(Tailscale/WireGuard); the app also bundles an frpc STCP visitor so it can reach the node through an
+existing frps relay when no LAN/VPN route exists (no new public port on the node). Since 0.3.0 that
+visitor lands on the node's **token-checking gateway** (port 8788, published by `dshlink tunnel sync` from `gateway.provider`), so the relay path still requires the `device` token instead of
+riding `trustLocalhost`. The APK embeds relay credentials — treat it as a private self-use build,
+not a public download. Use a `device` token and revoke it if the phone is lost; see
+[`android/README.md`](android/README.md) for setup and
+[`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) for the API mapping and verification,
+and [`docs/GATEWAY.md`](docs/GATEWAY.md) for the gateway.
 
 ## NAT traversal with FRP STCP
 

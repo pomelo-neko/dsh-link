@@ -283,6 +283,42 @@ export function createDshOps({ ctx, log, limits = {}, status } = {}) {
     return owner ? String(owner.id ?? '') : '';
   }
 
+  /** Compare two path spellings for workspace identity: slash form, case-folded on Windows. */
+  function samePath(left, right) {
+    const clean = (value) => {
+      let text = optionalString(value).replace(/\\/g, '/').replace(/\/+$/g, '');
+      if (process.platform === 'win32') text = text.toLowerCase();
+      return text;
+    };
+    const a = clean(left);
+    const b = clean(right);
+    return a.length > 0 && a === b;
+  }
+
+  /**
+   * Resolve an existing workspace by directory, without creating one. The live registry can
+   * canonicalize the cwd itself; registries that are partial (tests, older hosts) fall back
+   * to comparing the registered paths.
+   * @param wantedCwd - directory the caller asked to create a session in.
+   * @returns the workspace entity, or null when no registered workspace owns that directory.
+   */
+  async function workspaceForPath(wantedCwd) {
+    const registry = service('workspaceRegistry');
+    if (!registry) return null;
+    if (typeof registry.resolveByPath === 'function') {
+      try {
+        const resolved = await registry.resolveByPath(wantedCwd);
+        if (resolved && resolved.id !== undefined) return resolved;
+      } catch (error) {
+        emit('debug', 'workspace resolveByPath failed: ' + String(error && error.message ? error.message : error));
+      }
+    }
+    for (const entity of currentWorkspaces()) {
+      if (samePath(entity && entity.path, wantedCwd)) return entity;
+    }
+    return null;
+  }
+
   /**
    * Match a workspace selector against id, title, or path (case-insensitive for title/path:
    * Windows paths and display titles are not case-sensitive identities).
@@ -456,7 +492,12 @@ export function createDshOps({ ctx, log, limits = {}, status } = {}) {
       const request = {};
       const wantedWorkspace = optionalString(workspaceId);
       const wantedCwd = optionalString(cwd);
-      if (wantedWorkspace) request.workspaceId = wantedWorkspace;
+      let attachTo = wantedWorkspace;
+      if (!attachTo && wantedCwd) {
+        const owner = await workspaceForPath(wantedCwd);
+        if (owner && owner.id !== undefined) attachTo = String(owner.id);
+      }
+      if (attachTo) request.workspaceId = attachTo;
       else if (wantedCwd) request.cwd = wantedCwd;
       const preset = optionalString(agentPreset);
       if (preset) request.agentPreset = preset;

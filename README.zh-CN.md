@@ -146,11 +146,12 @@ dshlink bind --thread msg_<根消息> --session session-yyyy
 那条会话。字段只决定 prompt 投到哪，不执行任何命令。策略、回退、线格式与排障见
 [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md)。
 
-### 手机控制端（0.6）
+### 手机控制端（0.6+，0.7 起支持网络感知）
 
 [`android/`](android/) 里的安卓 App 是**控制端而不是节点**：它连到一台已有的 dsh-link 节点，列出该节点
 看到的 DSH 工作区/会话，屏幕在前台时按 `sinceSeq` 增量拉取对话，并通过能力通道往指定会话发消息。
-没有后台服务，也不在 App 不运行时轮询。
+没有后台服务，也不在 App 不运行时轮询。0.7 起 App 还会发现入口节点所在网络的节点，可切换到任一
+**直连**节点远程浏览/发消息，标注子智能体会话，并把连续的 tool-call 行折叠成可展开的一行。
 
 ```powershell
 # 节点侧：给手机铸造一个 device token（只能读 DSH 视图 + 调用被允许的能力方法）
@@ -158,16 +159,18 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # 有 JDK 17+ 与 Android SDK 36 的机器上构建
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-adb install android\dist\dshlink-control-0.2.0-debug.apk
+adb install android\dist\dshlink-control-0.3.0-debug.apk
 ```
 
 节点需要 `dsh.enabled`、`dsh.exposeWorkspaces`、`dsh.exposeTranscripts`、`capabilities.enabled` 且
 `capabilities.methods` 含 `sessions.prompt`，并有一个常驻 bridge 执行排队的 prompt。手机通常经
-局域网或 VPN（Tailscale/WireGuard）访问节点；0.2.0 起 App 也可以内置 frpc STCP visitor，经已有的
-frps 中转在无局域网/VPN 时访问节点（节点不需要新开公网端口）。该构建内嵌中转凭据，且节点
-`trustLocalhost: true` 时 STCP 回环路径会绕过 dsh-link token，因此只作自用构建，不要公开分发。
+局域网或 VPN（Tailscale/WireGuard）访问节点；App 也可以内置 frpc STCP visitor，经已有的 frps 中转
+在无局域网/VPN 时访问节点（节点不需要新开公网端口）。0.3.0 起该 visitor 落到节点的 **8788 token
+网关**（由 `dshlink tunnel sync` 按 `gateway.provider` 自动发布），所以中转路径仍必须带 device
+token，不再依赖 `trustLocalhost` 旁路。APK 内嵌中转凭据，仍只作自用构建，不要公开分发。
 用法见
-[`android/README.md`](android/README.md)，接口与验证见 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md)。
+[`android/README.md`](android/README.md)，接口与验证见 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md)，
+网关见 [`docs/GATEWAY.md`](docs/GATEWAY.md)。
 
 ## 3. 内网穿透（FRP STCP）
 

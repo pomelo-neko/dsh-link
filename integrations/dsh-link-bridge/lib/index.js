@@ -42,7 +42,7 @@ import { authorizeTarget, messagePeer, normalizeTargetPolicy, resolveTarget, tar
 export const name = 'dsh-link-bridge';
 
 /** Reported to the node in the bridge heartbeat, so a peer can tell which bridge answered. */
-export const BRIDGE_VERSION = '0.6.1';
+export const BRIDGE_VERSION = '0.7.0';
 
 /**
  * Host services required: create/resume/prompt a Session and group it in a Workspace.

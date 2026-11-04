@@ -9,8 +9,52 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-04
+
+The "see the whole network and control it safely" release. A controller can now discover every
+node reachable from the one it connects to, switch between directly-connected nodes, and read/send
+in their Sessions; the phone tunnel lands on a token-checking gateway instead of the localhost-trust
+path; transcript tool calls fold into expandable groups.
+
 ### Added
 
+- **Network discovery (`GET /api/v1/network/nodes`).** A node walks its configured peer graph
+  (depth 1–3, 20 nodes / 2.5 s by default) and returns a merged, token-free view:
+  `{ self, nodes, count, total, depth, partial, truncated, errors, scannedAt }`. Each node carries
+  `name/nodeId/url/version/softwareVersion/reachable/latencyMs/directPeers/via`; a name or URL seen
+  through several paths is merged (direct beats relayed), `via` records the first hop, and peer
+  tokens are never included. The `device` role may read it and relay DSH view/capability calls to
+  a directly configured peer (`?peer=` on the DSH view routes, `peer` in `POST /api/v1/dsh/call`);
+  the peer re-checks its own allowlist. New `src/network.mjs`, client/ops/server wiring, and
+  `test/network.test.mjs`.
+- **Loopback token gateway on 8788.** An opt-in listener (`gateway.enabled`) that requires a valid
+  dsh-link token on **every** request and reverse-proxies to the node API. It never falls back to
+  `auth.trustLocalhost`, so a phone request that arrives through frp/STCP (source 127.0.0.1) cannot
+  ride the localhost rule. It forwards the caller's token so the node still derives the role, denies
+  `/mcp` and `/api/v1/bridge/*` for every role, limits `device` to the DSH/info/healthz/network
+  surface, and enforces body-size/timeout limits; a configured gateway that cannot listen makes
+  `serve` exit with `gateway_listen_failed`. See `docs/GATEWAY.md` and `test/gateway.test.mjs`.
+- **Gateway STCP provider generation.** `dshlink tunnel sync` now also publishes the gateway port
+  when `gateway.enabled` and `gateway.provider.secretKey` are set: a second STCP provider
+  (`gateway.provider.name`, default `dshlink-phone`) points at `gateway.port` (8788) rather than
+  the plain API port, so the phone path can only reach the token-checking listener. A provider with
+  no secret is never generated. `src/tunnel.mjs`, config normalizer, `test/tunnel.test.mjs`.
+- **Gateway verified against a real node.** With `gateway.enabled` on 8788, an unauthenticated
+  `GET /healthz` returned 401, a `device` token read `/api/v1/info` (0.7.0) and
+  `/api/v1/network/nodes` but got 403 `role_forbidden` on `/api/v1/peers` and 403 on `POST /mcp`,
+  and a `sessions.list` call through the gateway was claimed/completed by the bridge and returned
+  `done`. The Android app then connected through the generated `dshlink-phone` provider and the
+  gateway with a device token (audit: `role: device`).
+- **Android control app 0.3.0.** The app now connects, then lists the nodes of the dsh-link network
+  it can see (`depth 2`), lets the user pick a directly-connected node and browse/control that
+  node's DSH through the gateway relay, labels subagent Sessions (`子智能体 · 父会话 … · 深度 N`),
+  and folds consecutive tool-call/tool-result rows into one expandable line
+  (`#505 · 工具调用 · 2 条 · 10:39:53 · 点击展开`) so a transcript stays readable. The built-in
+  STCP visitor now targets the gateway provider and the handshake requires the device token.
+  APK `dshlink-control-0.3.0-debug.apk` (`versionCode 4`, 11,986,025 bytes). Verified end-to-end on
+  the Android 16 emulator against the real 0.7.0 node: network scan found 2 nodes, the picker switched
+  to the directly-connected node and read its transcript (223 rows) through the relay, a remote send
+  was answered `REMOTE_OK`, and the fold row expanded to show the tool-call and tool-result bodies.
 - **Android control app 0.2.0 — built-in STCP tunnel.** The app can now reach a node through an
   existing frps relay when the phone has no LAN/VPN route to it: checking "通过阿里云 STCP 中转"
   starts a bundled `frpc` STCP visitor (packaged as `lib/x86_64/libfrpc.so` and
@@ -32,6 +76,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ### Changed
 
+- **Node/CLI and bridge 0.7.0.** The DSH view exposes subagent provenance
+  (`origin/parentSession/delegationDepth/agentPreset`) on every Session meta; the bridge's
+  `sessions.create` resolves a `cwd` that names a registered workspace to that workspace id, so a
+  controller-created Session is attached instead of landing in DSH's "未分组" bucket. Version bumped
+  to 0.7.0 for both artefacts (the bridge change takes effect when the DSH Host restarts).
 - **Android control app 0.1.1.** The app is versioned separately from the node; the node/CLI and
   bridge code are unchanged (still 0.6.2).
   - Fixed API 36 edge-to-edge layout: the heading, session-list refresh button, session status row
@@ -43,8 +92,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
     dropped every row after the first one sharing a seq.
   - Re-verified end-to-end against a real node 0.6.2 with a `device` token: connect → workspaces →
     sessions → transcript snapshot + `sinceSeq` increments → `sessions.prompt {mode:"steer"}`
-    answered by the real DSH agent; screenshots in `docs/mobile/screenshots/` refreshed and
-    `docs/mobile/CONTROL-APP.md` / `android/README.md` updated.
+    answered by the real DSH agent; `docs/mobile/CONTROL-APP.md` / `android/README.md` updated.
+    (Screenshots are kept out of the repository: they contain real host names, a LAN address and
+    real Session titles.)
+
+### Fixed
+
+- **Controller-created Sessions are grouped.** `sessions.create { cwd }` on a cwd that is a
+  registered workspace now sends `workspaceId` (resolved via `workspaceRegistry.resolveByPath`,
+  falling back to path comparison with slash/case normalization) instead of `cwd`; otherwise the
+  Host created the Session without a workspace and it showed up as 未分组. Unknown directories still
+  fall back to `cwd`.
+- **App UI state.** The session status line returns to its message count after a send instead of
+  staying on "已发送"; transcript dedup is per rendered row, and remote (peer-relayed) sends report
+  "已提交" without waiting on a local command id.
+- **App no longer renders JSON `null` as the string `"null"`.** Android's
+  `JSONObject.optString(key, fallback)` returns the four characters `null` when the value is
+  `JSONObject.NULL`, so every Session without a parent was counted as a subagent ("共 8 个会话
+  （8 个子智能体）" instead of 3) and every tool row rendered a `tool: null` line. A small
+  `Ui.text(object, key)` helper now maps `null`/absent values to the empty string and all adapters
+  use it.
 
 ## [0.6.2] — 2026-11-04
 
@@ -114,7 +181,7 @@ inbox/outbox, and only uses the node's DSH view plus the capability channel (a `
   (info → workspaces → sessions → transcript snapshot/increment → capability call → result) and the
   `device` token boundary; runs when `DSH_HOME` points at a DSH installation.
 - `docs/mobile/CONTROL-APP.md`: implementation notes, API mapping, verification and the B-phase gap
-  list (SSE, device-token management, multi-node); screenshots under `docs/mobile/screenshots/`.
+  list (SSE, device-token management, multi-node); screenshots are not committed (real host names).
 
 ### Fixed
 
@@ -385,7 +452,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.7.0
 [0.6.2]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.2
 [0.6.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.1
 [0.6.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.0

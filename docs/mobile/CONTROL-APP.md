@@ -1,9 +1,12 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.2.0** (shipped with the dsh-link 0.6.2 tree; the app is versioned
-independently from the node). v0.2.0 adds an optional built-in **STCP tunnel** so a phone that is
-not on the node's LAN can reach it through an existing frps relay — without opening a new public
-port on the node.
+Status: **implemented, v0.3.0** (shipped with the dsh-link 0.7.0 tree; the app is versioned
+independently from the node). v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 makes the
+app a network-aware controller: it discovers the dsh-link network from the node it connects to,
+lets the user pick any **directly-connected** node and browse/control that node's DSH through the
+gateway relay, labels subagent Sessions, and folds consecutive tool-call/tool-result rows into one
+expandable transcript line. The tunnel now lands on the token-checking 8788 gateway instead of the
+node's localhost-trust path.
 This document records what the app in [`android/`](../../android/) actually does, which node APIs
 it depends on, how it was verified, and what is deliberately left out. The research that led here —
 options A/B/C, effort estimates, the 0.5 security prerequisites and the mobile-sync design review —
@@ -16,25 +19,24 @@ ordinary inbound token and uses that node's DSH view + capability channel.
 
 ## 0. Screenshots
 
-| Connected (LAN) | Sessions of one workspace | Transcript + composer |
-|---|---|---|
-| ![main](screenshots/main.png) | ![sessions](screenshots/sessions.png) | ![transcript](screenshots/transcript.png) |
+Screenshots are deliberately **not committed**: they show real host names, a LAN address and real
+Session titles. Local copies stay under `test/.tmp/` (git-ignored), taken on the x86_64 API 36.1
+emulator talking to the real node (`alice-pc`, dsh-link 0.7.0) with a `device` token (the token
+field is masked by Android). What they showed, and therefore what was verified:
 
-All shots come from the x86_64 API 36.1 emulator talking to the real node
-(`alice-pc`, dsh-link 0.6.2) through a `device` token over its LAN address
-(`192.0.2.100:8787`); the token field is masked by Android. The transcript shot shows the final answer (`#17 · DSH`) from the real DSH agent plus the
-composer; the same-seq de-duplication fix that keeps such a row after its reasoning sibling is
-covered in section 4.
-
-0.2.0 built-in STCP tunnel (phone on a 5G network, no LAN/VPN route to the node):
-
-| Connected through the tunnel | Transcript after a real send |
-|---|---|
-| ![tunnel main](screenshots/tunnel-main.png) | ![tunnel transcript](screenshots/tunnel-transcript.png) |
-
-The URL field is disabled and reads `http://127.0.0.1:18788`; the app started the bundled `frpc`
-visitor itself, and the message travelled phone → frps `203.0.113.10:16443` → the node's existing
-STCP provider → `127.0.0.1:8787`. See sections 1 and 4.
+- **Connected over LAN** (`http://192.0.2.100:8787`): status `已连接 · 11 个工作区 ·
+  alice-pc · 可发送`, summary `节点 alice-pc · dsh-link 0.7.0 · 网络 2 个节点 · 2 可达`, plus
+  the "控制节点" dropdown.
+- **Sessions of one workspace**: `共 8 个会话（3 个子智能体）` with the `子智能体 ·` prefix on the
+  three subagent Sessions.
+- **Transcript with an expanded tool group**: `#414 · 工具调用 · 2 条 · 10:38:46 · 点击收起`
+  showing its tool-call and tool-result bodies (collapsed default is `点击展开`).
+- **0.3.0 gateway tunnel** (phone on a 5G network, no LAN/VPN route to the node): the URL field is
+  disabled and reads `http://127.0.0.1:18788`; the app started the bundled `frpc` visitor itself,
+  and every request travelled phone → frps `203.0.113.10:16443` → the node's `dshlink-phone` STCP
+  provider → the **8788 gateway** (token required) → `127.0.0.1:8787`. A transcript shot after a
+  remote send contains the earlier `TUNNEL_OK` exchange and the v0.3.0 remote send `REMOTE_OK`.
+  See sections 1 and 4.
 
 ## 1. Architecture
 
@@ -57,7 +59,22 @@ STCP provider → `127.0.0.1:8787`. See sections 1 and 4.
         include sessions.prompt; bridge plugin running inside DSH)
 ```
 
-Optional built-in STCP tunnel (0.2.0), used when the phone has no LAN/VPN route to the node:
+Network discovery + remote control (0.3.0). The app has no mesh membership of its own; it asks the
+node it connects to for that node's peer graph and relays DSH calls through the node API:
+
+```text
+GET /api/v1/network/nodes?depth=2&maxNodes=50        (self + each directly connected node)
+   └─ node picker: direct node selected → the same DSH APIs with &peer=<node name>
+        GET /api/v1/dsh/workspaces?peer=…           (relayed by the entry node)
+        POST /api/v1/dsh/call {peer:…, method:"sessions.prompt", params:{…}}
+```
+
+Nodes reached only through another node (`via` non-empty) are shown but cannot be selected by the
+app; this keeps the relay to a single hop and avoids the entry node silently becoming a proxy for
+the whole mesh. The peer re-checks its own `capabilities` allowlist.
+
+Optional built-in STCP tunnel (0.2.0; retargeted to the 8788 gateway in 0.3.0), used when the phone
+has no LAN/VPN route to the node:
 
 ```text
 phone app ──HTTP──► 127.0.0.1:18788 (bundled frpc visitor, inside the app)
@@ -66,17 +83,19 @@ phone app ──HTTP──► 127.0.0.1:18788 (bundled frpc visitor, inside the 
                     frps 203.0.113.10:16443
                               │  STCP
                               ▼
-        node's existing frpc provider dshlink-desktop-e4nrkp6
-                              │  localPort
+        node's frpc provider dshlink-phone (published by "dshlink tunnel sync")
+                              │  localPort 8788
                               ▼
-                    node 127.0.0.1:8787
+        node 127.0.0.1:8788 token gateway ──► 127.0.0.1:8787 node API
 ```
 
 The app copies the bundled `frpc` (a `lib/<abi>/libfrpc.so` native library, so Android 10+ may
 execute it), its TLS client certs and a `frpc.toml` visitor config into app-private storage, starts
 it, then connects to `http://127.0.0.1:18788`. The frps config, client certs and STCP secret are
-compiled into the APK — see the security note in section 5. No inbound port is opened on the node;
-the STCP provider already existed.
+compiled into the APK — see the security note in section 5. The gateway requires the device token on
+every request and never trusts the loopback source address, so the STCP path no longer bypasses
+dsh-link auth. No inbound port is opened on the node; the STCP provider is generated by the node's
+own tunnel configuration.
 
 Deliberate choices:
 
@@ -94,26 +113,40 @@ Deliberate choices:
 - **No dependencies.** Java + platform APIs only (org.json, HttpURLConnection, ListView). The build
   uses SDK command-line tools directly; see `android/build-apk.ps1`. This keeps the app buildable
   offline and reviewable in a repo that promises zero runtime dependencies.
-- **One node per install.** URL + token are stored in one place; there is no node picker. The app is
-  a personal remote control, not a multi-tenant console.
-- **Optional built-in relay (0.2.0).** Android cannot run a desktop frpc, so the APK packages
-  `frpc` as a native library for x86_64 and arm64-v8a. Checking "通过阿里云 STCP 中转" starts that
-  visitor as a child process, waits for `http://127.0.0.1:18788/healthz`, then points the normal
-  `ApiClient` at it; unchecking (or leaving the screen) stops the child. This is deliberately
-  self-use only: the APK contains the relay credentials (section 5).
+- **One entry node, many controllable nodes (0.3.0).** URL + token still describe the entry node, but
+  the app lists the nodes that entry node can see and switches the `peer` parameter to control a
+  directly-connected one. Only one URL/token pair is stored: the peer is reached with the entry
+  node's credentials and the peer enforces its own policy.
+- **Tool groups fold (0.3.0).** Consecutive `tool-call`/`tool-result` rows render as one header
+  (`#seq · 工具调用 · N 条 · HH:mm:ss · 点击展开/收起`); tapping it reveals each row's tool name and
+  body. This keeps long agent transcripts readable without hiding data from the user.
+- **Subagent Sessions are labelled (0.3.0).** Session rows with `origin:"subagent"`, a parent or a
+  delegation depth show the prefix `子智能体 ·` plus parent/depth; the workspace line counts them.
+- **Optional built-in relay (0.2.0, gateway path since 0.3.0).** Android cannot run a desktop frpc,
+  so the APK packages `frpc` as a native library for x86_64 and arm64-v8a. Checking
+  "通过阿里云 STCP 中转至 8788 网关" starts that visitor as a child process, waits for
+  `http://127.0.0.1:18788/healthz`, then points the normal `ApiClient` at it; unchecking (or leaving
+  the screen) stops the child. This is deliberately self-use only: the APK contains the relay
+  credentials (section 5).
 
 ## 2. API surface used
 
 | Step | Request | Notes |
 |---|---|---|
 | Connect | `GET /api/v1/info` | checks `dsh.workspaces`, `capabilities.enabled/methods`; `version` shown in UI |
-| Workspaces | `GET /api/v1/dsh/workspaces` | sorted by `lastActivityAt` server-side |
+| Network | `GET /api/v1/network/nodes?depth=2&maxNodes=50` | optional (0.7+); a 404/error falls back to single-node mode |
+| Workspaces | `GET /api/v1/dsh/workspaces` | sorted by `lastActivityAt` server-side; `&peer=<node>` when controlling a direct peer |
 | Sessions | `GET /api/v1/dsh/sessions?workspace=<id>&includeArchived=0|1&limit=300` | archived hidden by default |
 | Snapshot | `GET /api/v1/dsh/sessions/{id}/transcript?tail=1&limit=200` | `latestSeq` becomes the cursor |
 | Incremental | `GET …/transcript?sinceSeq=<n>&limit=200` | filtered to `seq > n`; returns new `latestSeq` |
 | Older | `GET …/transcript?tail=1&offset=<loaded>&limit=200` | prepended, de-duplicated by row identity |
-| Send | `POST /api/v1/dsh/call` body `{method:"sessions.prompt", params:{sessionId,text,mode?}, waitSeconds:20}` | `mode:"steer"` when "插话" is checked; omitted = queue |
-| Command result | `GET /api/v1/dsh/call/{commandId}` | poll every 700 ms up to 120 s for pending commands |
+| Send | `POST /api/v1/dsh/call` body `{method:"sessions.prompt", params:{sessionId,text,mode?}, waitSeconds:20}` | `mode:"steer"` when "插话" is checked; omitted = queue; adds `peer:<node>` for a remote node |
+| Command result | `GET /api/v1/dsh/call/{commandId}` | poll every 700 ms up to 120 s for pending commands (local entry node only) |
+
+When a **remote** (relayed) node is selected, every DSH request gets `peer=<node name>` and the
+entry node forwards it to that peer over the dsh-link peer channel; the peer re-checks its own
+`capabilities` allowlist and returns the same shapes. For a remote send the app shows "已提交 · 由
+<node> 处理" instead of polling `/dsh/call/{id}`, because the command id lives on the peer.
 
 Auth is `Authorization: Bearer <token>` on every request except `/healthz` (which the app only
 uses indirectly). Error bodies are `{ error: { code, message } }`; the app maps the important codes
@@ -142,22 +175,32 @@ Node configuration:
     "enabled": true,
     "methods": ["workspaces.list", "sessions.list", "sessions.read", "sessions.prompt"]
   },
-  "auth": { "trustLocalhost": false }
+  "auth": { "trustLocalhost": false },
+  "gateway": {
+    "enabled": true,
+    "bind": "127.0.0.1",
+    "port": 8788,
+    "upstream": "http://127.0.0.1:8787",
+    "provider": { "name": "dshlink-phone", "secretKey": "<STCP secret>" }
+  },
+  "peers": [ { "name": "OTHER-NODE", "url": "http://...", "token": "..." } ]
 }
 ```
 
 `sessions.prompt` is an **action** method and is not in the 0.3 default allow-list; it must be added
 explicitly. Without it the app still browses and shows "只读模式". The command queue needs the bridge
 plugin running inside a live DSH host; otherwise commands expire after
-`capabilities.commandTtlSeconds` (default 120 s).
+`capabilities.commandTtlSeconds` (default 120 s). Remote control needs the entry node to have the
+target node in `peers`; network discovery walks the same `peers` graph.
 
-For the built-in STCP tunnel the node-side requirement is an existing STCP provider pointing at the
-node's `8787` (the provider does **not** need to be public). Because frpc connects to the node over
-loopback, the node sees the request as coming from `127.0.0.1`; with `trustLocalhost: true` that
-bypasses the token entirely. The test node keeps `trustLocalhost: true` for its local CLI/bridge, so
-the tunnel APK is a self-use build. A production phone deployment should either put a token-checking
-gateway in front of a second STCP provider, or add mobile client certificates, rather than rely on
-this bypass.
+For the built-in STCP tunnel (0.3.0) the node publishes a **second STCP provider** that points at
+the gateway port, not the plain API port: `dshlink tunnel sync` generates the provider from
+`gateway.provider` (name `dshlink-phone`, secret key, `localPort 8788`) whenever
+`gateway.enabled` and a secret are configured. The gateway requires a dsh-link token on every
+request and never falls back to `trustLocalhost`, so STCP traffic that arrives from `127.0.0.1`
+can no longer ride the localhost rule; the node still derives the device role from the forwarded
+token (visible in the audit log). This is the production-shaped path for a phone that lives on the
+public internet without a VPN.
 
 ## 4. Verification
 
@@ -231,7 +274,41 @@ node over the Aliyun relay; the phone side had **no** LAN/VPN route to the node)
    labels these STCP requests as localhost/admin rather than by the device token; closing that
    bypass is the production-hardening item in section 5.
 
-The node test suite is unchanged by the app release (`node test/run.mjs`: 166 tests, 165 pass,
+0.3.0 verification (2026-11-04, dsh-link 0.7.0 tree, Android 16 / API 36 x86_64 emulator, real
+node `alice-pc`; the node was restarted on 0.7.0 with the 8788 gateway enabled and a
+`dshlink-phone` STCP provider):
+
+1. **Build**: `dshlink-control-0.3.0-debug.apk` is 11,986,025 bytes, `versionCode 4`,
+   `versionName 0.3.0`; debug signature verifies. The tunnel asset now points at the
+   `dshlink-phone` provider (port 8788), and `TunnelManager.healthy()` treats any HTTP response
+   (including the gateway's 401 for a tokenless probe) as "visitor is up" instead of requiring 200.
+2. **Gateway path**: through the built-in tunnel the app connected with a `device` token and showed
+   "已连接 · 11 个工作区 · alice-pc · 可发送", summary
+   "节点 alice-pc · dsh-link 0.7.0 · 网络 2 个节点 · 2 可达". The 8788 gateway rejects
+   unauthenticated requests (401), allows `device` on `/api/v1/info`, `/api/v1/dsh/*` and
+   `/api/v1/network/*`, and denies `/api/v1/peers` and `/mcp` (403); see `docs/GATEWAY.md` and
+   `test/gateway.test.mjs`. A LAN connection to `http://192.0.2.100:8787` also works.
+3. **Network discovery + picker**: connecting to the test node `NODE-A-TEST` (8797) whose peer graph
+   includes `alice-pc` produced 2 nodes in the picker; selecting the direct peer showed
+   "控制 alice-pc（经 NODE-A-TEST 中转）" and loaded its 11 workspaces, 8 Sessions
+   (3 subagents) and a 223-row transcript through the relay. Two-hop nodes are shown but rejected
+   with an explanation.
+4. **Remote send**: opening `session-1aa41492…` through the relay and sending
+   `remote e2e from NODE-A: reply REMOTE_OK` produced `#46 · 用户`, `#47 · 用户`, `#49 · DSH` =
+   `REMOTE_OK`; the entry node forwarded `POST /api/v1/dsh/call {peer:…}` and the peer's bridge
+   claimed/completed it.
+5. **Subagent labels**: the workspace line reads "共 8 个会话（3 个子智能体）"; three rows show the
+   "子智能体 ·" prefix with parent/depth. This caught a real bug: `JSONObject.optString(key, fallback)`
+   returns the string `"null"` for `JSONObject.NULL`, so every parentless Session counted as a
+   subagent (8/8) and tool rows rendered `tool: null`. Fixed by `Ui.text(object, key)` (null-safe)
+   used by all adapters.
+6. **Tool folding**: consecutive tool-call/tool-result rows render as
+   `#414 · 工具调用 · 2 条 · 10:38:46 · 点击展开` with the tool name in the collapsed body; tapping
+   toggles to "点击收起" and shows the tool-call JSON and tool-result body (verified with a
+   uiautomator dump, not just a screenshot).
+7. **No crash** in `logcat` during any of the above.
+
+The node test suite is unchanged by the app release (`node test/run.mjs`: 190 tests, 189 pass,
 1 skipped for the missing frp binary).
 
 The app is a debug-signed APK; release signing, versionCode management and Play distribution are
@@ -240,18 +317,22 @@ out of scope for this repo.
 ## 5. Security notes
 
 - **Transport**: cleartext HTTP is allowed because the intended deployment is LAN or a VPN
-  (Tailscale/WireGuard), or the 0.2.0 built-in STCP tunnel (TLS + frps auth token on the phone↔frps
-  hop; plain HTTP only inside the phone's own loopback and the node's own loopback). For any other
-  internet path, terminate TLS in a reverse proxy (Caddy/Nginx) or keep the node off the public
-  internet.
-- **Bundled relay credentials (0.2.0)**: the APK embeds the frps auth token, the mTLS client
-  certificate/key and the STCP `secretKey`. Anyone with the APK can connect to the node's STCP
-  provider. Treat the APK as a private build: do not upload it to a store or public link, and if it
-  leaks rotate the frps token, re-issue the client certificate and change the STCP secret.
-- **trustLocalhost bypass**: STCP requests arrive at the node from `127.0.0.1`, and this node has
-  `auth.trustLocalhost: true`; the tunnel path therefore bypasses dsh-link token checks. A production
-  phone setup needs a token-checking gateway in front of a dedicated STCP provider (or client
-  certificates), not this self-use build.
+  (Tailscale/WireGuard), or the built-in STCP tunnel (TLS + frps auth token on the phone↔frps hop;
+  plain HTTP only inside the phone's own loopback and the node's own loopback). Since 0.3.0 the
+  tunnel lands on the token-checking gateway, so the STCP secret is not by itself enough to reach
+  the node API. For any other internet path, terminate TLS in a reverse proxy (Caddy/Nginx) or keep
+  the node off the public internet.
+- **Bundled relay credentials (0.2.0/0.3.0)**: the APK embeds the frps auth token, the mTLS client
+  certificate/key and the STCP `secretKey`. Anyone with the APK can reach the gateway port, but the
+  gateway still requires a device token on every request. Treat the APK as a private build: do not
+  upload it to a store or public link, and if it leaks rotate the frps token, re-issue the client
+  certificate, change the STCP secret and revoke the device token.
+- **The gateway closes the trustLocalhost bypass.** STCP requests arrive at the node from
+  `127.0.0.1`, which would satisfy `auth.trustLocalhost`; the 0.3.0 tunnel therefore points at
+  8788, where every request must present a token and loopback is never trusted. The gateway also
+  denies `/mcp` and `/api/v1/bridge/*` for every role and limits `device` to info/healthz/dsh/
+  network. The plain 8787 listener still honors `trustLocalhost` for the local CLI/bridge, so do
+  not expose 8787 itself to the internet or to the relay.
 - **Token storage**: `SharedPreferences` (app-private, not encrypted at rest). Use a short
   `--ttl-days`, revoke with `dshlink token rm --id <id>` if the phone is lost.
 - **Capability scope**: the node's `capabilities.methods` (and optional per-peer `peers` policy)
@@ -266,11 +347,13 @@ out of scope for this repo.
 - SSE or long-poll endpoint (`/api/v1/dsh/sessions/{id}/events`) for true push and fewer requests;
   this is the main missing node feature.
 - Device-scoped token management API (create/list/revoke from the phone, last-used metadata).
-- Multi-node profiles and a node picker.
+- Multi-node *profiles* (several entry nodes) — 0.3.0 can switch between the entry node's direct
+  peers but stores only one URL/token pair, and nodes reached through another node remain
+  view-only.
 - Attachments / file browse (needs `files` roots and an upload UI).
 - Session actions beyond prompt (create/rename/archive) and command cancellation.
 - Encrypted token storage (Android Keystore) and certificate pinning for reverse-proxy TLS.
-- Production-grade tunnel auth: device certificate or a token-checking gateway in front of a
-  dedicated STCP provider, so the mobile path does not depend on `trustLocalhost`.
+- Gateway hardening: per-device rate limits and an audit view for token use (the node currently
+  applies its normal limits, and audit records the derived role).
 - Keep the bundled frpc current (and provide 16 KB-page-size-aligned builds) or load it from a
   separately updatable location instead of rebuilding the APK.

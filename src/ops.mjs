@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { MessageStore } from './store.mjs';
 import { clientForPeer } from './client.mjs';
+import { scanNetwork } from './network.mjs';
 import { DSHLINK_VERSION, LinkError, badRequest, clampText, newId, notFound, nowIso, tooLarge } from './util.mjs';
 import { CAPABILITY_METHODS, authorizeCall } from './capabilities.mjs';
 
@@ -549,6 +550,13 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     return summarizeCommand(command);
   }
 
+  // ------------------------------------------- network discovery (v0.7) ---
+  // Walk the peer graph. The node itself only needs read access to /info and
+  // /network/nodes on each peer; no peer token is ever returned to a caller.
+  async function networkNodes(query = {}) {
+    return scanNetwork({ cfg, clientFor, logger: log, options: query });
+  }
+
   // ------------------------------------------- directed session bindings (v0.4, bridge) ---
   // A binding is "this peer thread is handled by local Session X". The bridge writes it before
   // prompting that Session, so replies leaving this node carry originSession even if the model
@@ -594,6 +602,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     listFiles, statFile, pullFile, pushFile, acceptMessage, deliver,
     dshWorkspaces, dshSessions, dshSession, dshTranscript,
     dshCapabilities, dshCall, dshCallLocal, dshCallResult,
+    networkNodes,
     claimCommands, completeCommand, bridgeBeat, bridgeStatus,
     bindSession, binding
   };

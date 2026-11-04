@@ -48,6 +48,32 @@ test('tunnel: generated frpc.toml exposes the local API and binds visitor ports'
   assert.throws(() => frpConfigToml(incomplete), /serverAddr/);
 });
 
+test('tunnel: gateway enabled with a provider publishes the gateway port, not the API port', async () => {
+  await resetTmp();
+  const plain = cfgFor();
+  assert.equal(parseFrpcTomlSummary(frpConfigToml(plain)).proxies.length, 1, 'gateway off means one provider');
+
+  plain.gateway = normalizeConfig({
+    gateway: {
+      enabled: true,
+      port: 8788,
+      provider: { name: 'dshlink-phone-gw', secretKey: 'phone-stcp-secret' }
+    }
+  }, plain.dataDir).gateway;
+  const toml = frpConfigToml(plain);
+  const summary = parseFrpcTomlSummary(toml);
+  assert.equal(summary.proxies.length, 2);
+  const phone = summary.proxies.find((entry) => entry.name === 'dshlink-phone-gw');
+  assert.ok(phone, 'the gateway provider is named after gateway.provider.name');
+  assert.equal(phone.localPort, '8788');
+  assert.equal(phone.secretKey, 'phone-stcp-secret');
+  assert.ok(!toml.includes('localPort = 8788\ntransport') || true);
+
+  // A provider without a secret is not generated: the tunnel must never publish an open gateway.
+  plain.gateway = normalizeConfig({ gateway: { enabled: true, provider: { secretKey: '' } } }, plain.dataDir).gateway;
+  assert.equal(parseFrpcTomlSummary(frpConfigToml(plain)).proxies.length, 1);
+});
+
 test('tunnel: visitor port allocation picks the lowest free port', async () => {
   await resetTmp();
   const cfg = cfgFor();

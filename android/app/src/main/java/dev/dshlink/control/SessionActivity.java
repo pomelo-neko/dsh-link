@@ -141,8 +141,8 @@ public class SessionActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    final JSONObject result = NodeState.client.get(
-                            "/api/v1/dsh/sessions/" + enc(sessionId) + "/transcript?tail=1&limit=" + PAGE);
+                    final JSONObject result = NodeState.client.get(NodeState.dshPath(
+                            "/api/v1/dsh/sessions/" + enc(sessionId) + "/transcript?tail=1&limit=" + PAGE));
                     main.post(new Runnable() {
                         @Override
                         public void run() {
@@ -155,7 +155,9 @@ public class SessionActivity extends Activity {
                             totalCount = result.optLong("total", loadedCount);
                             initialLoaded = true;
                             updateOlderButton();
-                            statusView.setText("共 " + totalCount + " 条 · 每 2.5 秒仅在前台刷新");
+                            statusView.setText("共 " + totalCount + " 条 · "
+                                    + (NodeState.isRemote() ? NodeState.nodeLabel() + " · " : "")
+                                    + "每 2.5 秒仅在前台刷新");
                             scrollToBottom();
                             schedulePolling();
                         }
@@ -183,8 +185,9 @@ public class SessionActivity extends Activity {
                     long cursor = lastSeq;
                     final JSONArray fresh = new JSONArray();
                     for (int page = 0; page < 10; page++) {
-                        JSONObject chunk = NodeState.client.get("/api/v1/dsh/sessions/" + enc(sessionId)
-                                + "/transcript?sinceSeq=" + cursor + "&limit=" + PAGE);
+                        JSONObject chunk = NodeState.client.get(NodeState.dshPath(
+                                "/api/v1/dsh/sessions/" + enc(sessionId)
+                                        + "/transcript?sinceSeq=" + cursor + "&limit=" + PAGE));
                         JSONArray messages = chunk.optJSONArray("messages");
                         if (messages == null || messages.length() == 0) break;
                         for (int i = 0; i < messages.length(); i++) {
@@ -237,8 +240,9 @@ public class SessionActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    final JSONObject result = NodeState.client.get("/api/v1/dsh/sessions/" + enc(sessionId)
-                            + "/transcript?tail=1&offset=" + loadedCount + "&limit=" + PAGE);
+                    final JSONObject result = NodeState.client.get(NodeState.dshPath(
+                            "/api/v1/dsh/sessions/" + enc(sessionId)
+                                    + "/transcript?tail=1&offset=" + loadedCount + "&limit=" + PAGE));
                     main.post(new Runnable() {
                         @Override
                         public void run() {
@@ -289,11 +293,19 @@ public class SessionActivity extends Activity {
                     body.put("method", "sessions.prompt");
                     body.put("params", params);
                     body.put("waitSeconds", 20);
+                    if (NodeState.isRemote()) body.put("peer", NodeState.selectedPeer);
                     JSONObject result = NodeState.client.post("/api/v1/dsh/call", body);
                     String commandId = result.optString("commandId", "");
                     String state = result.optString("status", "");
                     if (result.optBoolean("pending", false) || "pending".equals(state) || "claimed".equals(state)) {
-                        awaitCommand(commandId);
+                        // GET /dsh/call/:id only polls the local command queue, so a command that is
+                        // still pending on the gateway cannot be followed from here. The message is
+                        // queued; watch the transcript for the result.
+                        if (NodeState.isRemote()) {
+                            finishSubmitted(result);
+                        } else {
+                            awaitCommand(commandId);
+                        }
                     } else {
                         finishSend(result);
                     }
@@ -348,6 +360,24 @@ public class SessionActivity extends Activity {
         });
     }
 
+    private void finishSubmitted(JSONObject result) {
+        main.post(new Runnable() {
+            @Override
+            public void run() {
+                sending = false;
+                sendButton.setEnabled(true);
+                input.setText("");
+                statusView.setText("已提交 · 由 " + NodeState.nodeLabel() + " 处理，结果看上方消息");
+                main.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        pollOnce();
+                    }
+                }, 1500);
+            }
+        });
+    }
+
     private void finishSend(JSONObject result) {
         final boolean ok = result.optBoolean("ok", false) && "done".equals(result.optString("status", "done"));
         final String errorText = errorText(result);
@@ -393,9 +423,9 @@ public class SessionActivity extends Activity {
 
     /** Identity of a transcript row; seq alone is not unique within one durable event. */
     private static String messageKey(JSONObject message) {
-        return message.optLong("seq", -1) + "\u0000" + message.optString("role", "") + "\u0000"
-                + message.optString("kind", "") + "\u0000"
-                + Integer.toHexString(message.optString("text", "").hashCode());
+        return message.optLong("seq", -1) + "\u0000" + Ui.text(message, "role") + "\u0000"
+                + Ui.text(message, "kind") + "\u0000"
+                + Integer.toHexString(Ui.text(message, "text").hashCode());
     }
 
     private void updateOlderButton() {

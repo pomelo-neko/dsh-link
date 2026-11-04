@@ -23,6 +23,17 @@ final class Ui {
     private Ui() {
     }
 
+    /**
+     * Reads a JSON string without turning JSON null into the literal text "null" (Android's
+     * optString returns "null" for JSONObject.NULL when a fallback is supplied).
+     */
+    static String text(JSONObject object, String key) {
+        if (object == null) return "";
+        Object value = object.opt(key);
+        if (value == null || JSONObject.NULL.equals(value)) return "";
+        return String.valueOf(value);
+    }
+
     static int dp(Context context, int value) {
         return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
                 context.getResources().getDisplayMetrics()));
