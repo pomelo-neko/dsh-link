@@ -19,8 +19,8 @@ ordinary inbound token and uses that node's DSH view + capability channel.
 | ![main](screenshots/main.png) | ![sessions](screenshots/sessions.png) | ![transcript](screenshots/transcript.png) |
 
 All shots come from the x86_64 API 36.1 emulator talking to the real node
-(`alice-pc`, dsh-link 0.6.2) through a `device` token; the token field is masked by
-Android. The transcript shot shows the final answer (`#17 · DSH`) from the real DSH agent plus the
+(`alice-pc`, dsh-link 0.6.2) through a `device` token over its LAN address
+(`192.0.2.100:8787`); the token field is masked by Android. The transcript shot shows the final answer (`#17 · DSH`) from the real DSH agent plus the
 composer; the same-seq de-duplication fix that keeps such a row after its reasoning sibling is
 covered in section 4.
 
