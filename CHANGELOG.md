@@ -9,6 +9,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-11-04
+
+The "hot reload actually reloads" patch. Changing `capabilities.methods` in a running node showed
+up in `/api/v1/info` but the capability channel kept refusing the new method — the reason enabling
+`sessions.prompt` for the phone controller appeared to require a node restart.
+
+### Fixed
+
+- **A capability allowlist change now reaches the command queue.** `cmdServe` called
+  `commands.setConfig(cfg.capabilities)` from its config-watcher callback but never destructured
+  `commands` from `loadCtx`, so every reload threw `commands is not defined` inside the callback's
+  try/catch. The DSH view was reconfigured, the node's own `cfg` was refreshed, and only the queue
+  stayed on its startup allowlist; `/api/v1/dsh/call` therefore answered `method_not_allowed` until
+  the node was restarted.
+- Added `test/cli-reload.test.mjs`: it spawns the real CLI, flips `capabilities.methods` in the
+  config file, and asserts that the queue accepts the new method after the watcher reloads (the
+  test fails on 0.6.1 and passes now).
+
+### Changed
+
+- Node/CLI version `0.6.2`; the bridge plugin code is unchanged and stays at `0.6.1`.
+
 ## [0.6.1] — 2026-11-04
 
 The "keep the conversation after a reboot" patch. Ask-and-answer routes were lost on every
@@ -326,7 +348,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.2
 [0.6.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.1
 [0.6.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.0
 [0.5.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.5.0

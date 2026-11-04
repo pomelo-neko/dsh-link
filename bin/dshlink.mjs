@@ -168,7 +168,9 @@ async function cmdInit(args) {
 
 async function cmdServe(args) {
   const overridePort = flagString(args.port);
-  const { cfg, store, roots, ops, dsh, sections } = await loadCtx(args, {
+  // `commands` must be in scope for the reload callback below: without it a config change
+  // updated cfg.dsh / cfg.capabilities but left the queue's startup allowlist in place.
+  const { cfg, store, roots, ops, dsh, commands, sections } = await loadCtx(args, {
     nodeOverrides: { bind: flagString(args.bind), port: overridePort !== undefined ? Number(overridePort) : undefined }
   });
   const persisted = sealTokens(cfg);

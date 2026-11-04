@@ -158,6 +158,9 @@ bridge 侧的相关配置（写在 profile patch 的插件 config 里，见插�
 4. 两侧都要升级：**只读视图**需要节点 ≥ 0.3.0；**动作**还要 bridge ≥ 0.3.0 并重启过 DSH host；
 5. 打开开关（配置热重载，不必重启）：`dshlink dsh enable --write`（只读），
    要动作再加 `--actions workspaces.list,sessions.list,sessions.read,sessions.prompt --write`；
+   > 0.6.1 及更早的热重载只刷新了 `/api/v1/info` 与 DSH 视图，命令队列仍按启动时的 allowlist，
+   > 所以修改 `capabilities.methods` 后调动作会一直 `method_not_allowed`，必须重启节点。0.6.2 修好后
+   > 队列也会随配置热重载（见 CHANGELOG 0.6.2）。
 6. 验证：
    - 本机：`dshlink dsh workspaces`、`dshlink dsh sessions`、`dshlink dsh transcript <id>`、`dshlink dsh bridge`
    - 跨机：`dshlink peers ping <peer>` 看 `softwareVersion`；`dshlink dsh workspaces --peer <peer>`；

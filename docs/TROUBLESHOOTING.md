@@ -192,6 +192,8 @@ Get-AuthenticodeSignature "D:\Program Files\nodejs\node.exe" | Select-Object Sta
 2. bridge 必须 ≥ 0.3.0：`commands.js` 是 0.3 才有的；旧插件只会唤醒对话、不会认领命令。对端要**重启一次 DSH host**；
 3. 插件配置里 `commandSeconds: 0` 会关掉整条通道（默认 5 秒）；
 4. 节点侧 `capabilities.enabled` 必须为 true，且方法在 `capabilities.methods`（或该 peer 的 `allow`）里；
+   若刚改过配置仍报 `method_not_allowed`：节点 < 0.6.2 的热重载只更新 `/api/v1/info`，命令队列要重启
+   节点才生效；0.6.2 起队列随配置热重载；
 5. 心跳文件：节点数据目录 `commands/bridge.json`（`dshlink dsh bridge` 同源），mtime 一直在动说明 bridge 活着；
 6. `audit.jsonl` 里 `dsh_call` 有记录、但没有 `bridge_commands_claimed` → 命令根本没被认领（回到第 1 条）。
 
