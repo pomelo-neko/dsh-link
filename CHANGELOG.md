@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+### Added
+
+- **Android control app 0.2.0 — built-in STCP tunnel.** The app can now reach a node through an
+  existing frps relay when the phone has no LAN/VPN route to it: checking "通过阿里云 STCP 中转"
+  starts a bundled `frpc` STCP visitor (packaged as `lib/x86_64/libfrpc.so` and
+  `lib/arm64-v8a/libfrpc.so`, so Android 10+ may execute it), waits for
+  `http://127.0.0.1:18788/healthz`, then points the normal API client at it. No new public port is
+  opened on the node; the node's existing STCP provider is reused.
+  - APK `dshlink-control-0.2.0-debug.apk` (11,981,929 bytes, `versionCode 3`) embeds the visitor
+    config plus frps auth token and mTLS client certificate/key. It is a private self-use build:
+    the node sees STCP traffic from `127.0.0.1`, so with `trustLocalhost: true` this path bypasses
+    the dsh-link token. Rotate the relay credentials if the APK leaks; a production deployment
+    needs a token-checking gateway or client certificates.
+  - Verified on Android 16 / API 36 x86_64: app-started frpc became healthy in ~50 ms, connected to
+    the real node 0.6.2 over the Aliyun relay, opened `session-1aa41492…`, and sent a prompt that
+    the real DSH agent answered `TUNNEL_OK`. arm64 is packaged but not yet exercised on a real
+    phone.
+  - `android/README.md`, `docs/mobile/CONTROL-APP.md`, READMEs and screenshots updated; the node,
+    CLI and bridge are unchanged (still 0.6.2).
+
 ### Changed
 
 - **Android control app 0.1.1.** The app is versioned separately from the node; the node/CLI and

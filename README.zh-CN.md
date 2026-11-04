@@ -158,12 +158,15 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # 有 JDK 17+ 与 Android SDK 36 的机器上构建
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-adb install android\dist\dshlink-control-0.1.1-debug.apk
+adb install android\dist\dshlink-control-0.2.0-debug.apk
 ```
 
 节点需要 `dsh.enabled`、`dsh.exposeWorkspaces`、`dsh.exposeTranscripts`、`capabilities.enabled` 且
-`capabilities.methods` 含 `sessions.prompt`，并有一个常驻 bridge 执行排队的 prompt。手机经局域网或
-VPN（Tailscale/WireGuard）访问节点；**不要把节点裸奔在公网**，公网路径必须加 TLS。用法见
+`capabilities.methods` 含 `sessions.prompt`，并有一个常驻 bridge 执行排队的 prompt。手机通常经
+局域网或 VPN（Tailscale/WireGuard）访问节点；0.2.0 起 App 也可以内置 frpc STCP visitor，经已有的
+frps 中转在无局域网/VPN 时访问节点（节点不需要新开公网端口）。该构建内嵌中转凭据，且节点
+`trustLocalhost: true` 时 STCP 回环路径会绕过 dsh-link token，因此只作自用构建，不要公开分发。
+用法见
 [`android/README.md`](android/README.md)，接口与验证见 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md)。
 
 ## 3. 内网穿透（FRP STCP）

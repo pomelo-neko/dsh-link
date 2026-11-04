@@ -1,7 +1,9 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.1.1** (shipped with the dsh-link 0.6.2 tree; the app is versioned
-independently from the node).
+Status: **implemented, v0.2.0** (shipped with the dsh-link 0.6.2 tree; the app is versioned
+independently from the node). v0.2.0 adds an optional built-in **STCP tunnel** so a phone that is
+not on the node's LAN can reach it through an existing frps relay — without opening a new public
+port on the node.
 This document records what the app in [`android/`](../../android/) actually does, which node APIs
 it depends on, how it was verified, and what is deliberately left out. The research that led here —
 options A/B/C, effort estimates, the 0.5 security prerequisites and the mobile-sync design review —
@@ -14,7 +16,7 @@ ordinary inbound token and uses that node's DSH view + capability channel.
 
 ## 0. Screenshots
 
-| Connected | Sessions of one workspace | Transcript + composer |
+| Connected (LAN) | Sessions of one workspace | Transcript + composer |
 |---|---|---|
 | ![main](screenshots/main.png) | ![sessions](screenshots/sessions.png) | ![transcript](screenshots/transcript.png) |
 
@@ -23,6 +25,16 @@ All shots come from the x86_64 API 36.1 emulator talking to the real node
 (`192.0.2.100:8787`); the token field is masked by Android. The transcript shot shows the final answer (`#17 · DSH`) from the real DSH agent plus the
 composer; the same-seq de-duplication fix that keeps such a row after its reasoning sibling is
 covered in section 4.
+
+0.2.0 built-in STCP tunnel (phone on a 5G network, no LAN/VPN route to the node):
+
+| Connected through the tunnel | Transcript after a real send |
+|---|---|
+| ![tunnel main](screenshots/tunnel-main.png) | ![tunnel transcript](screenshots/tunnel-transcript.png) |
+
+The URL field is disabled and reads `http://127.0.0.1:18788`; the app started the bundled `frpc`
+visitor itself, and the message travelled phone → frps `203.0.113.10:16443` → the node's existing
+STCP provider → `127.0.0.1:8787`. See sections 1 and 4.
 
 ## 1. Architecture
 
@@ -45,6 +57,27 @@ covered in section 4.
         include sessions.prompt; bridge plugin running inside DSH)
 ```
 
+Optional built-in STCP tunnel (0.2.0), used when the phone has no LAN/VPN route to the node:
+
+```text
+phone app ──HTTP──► 127.0.0.1:18788 (bundled frpc visitor, inside the app)
+                              │  STCP over TLS + frps auth token
+                              ▼
+                    frps 203.0.113.10:16443
+                              │  STCP
+                              ▼
+        node's existing frpc provider dshlink-desktop-e4nrkp6
+                              │  localPort
+                              ▼
+                    node 127.0.0.1:8787
+```
+
+The app copies the bundled `frpc` (a `lib/<abi>/libfrpc.so` native library, so Android 10+ may
+execute it), its TLS client certs and a `frpc.toml` visitor config into app-private storage, starts
+it, then connects to `http://127.0.0.1:18788`. The frps config, client certs and STCP secret are
+compiled into the APK — see the security note in section 5. No inbound port is opened on the node;
+the STCP provider already existed.
+
 Deliberate choices:
 
 - **Foreground-only polling.** No Service, no WorkManager, no startup receiver. Work happens in
@@ -63,6 +96,11 @@ Deliberate choices:
   offline and reviewable in a repo that promises zero runtime dependencies.
 - **One node per install.** URL + token are stored in one place; there is no node picker. The app is
   a personal remote control, not a multi-tenant console.
+- **Optional built-in relay (0.2.0).** Android cannot run a desktop frpc, so the APK packages
+  `frpc` as a native library for x86_64 and arm64-v8a. Checking "通过阿里云 STCP 中转" starts that
+  visitor as a child process, waits for `http://127.0.0.1:18788/healthz`, then points the normal
+  `ApiClient` at it; unchecking (or leaving the screen) stops the child. This is deliberately
+  self-use only: the APK contains the relay credentials (section 5).
 
 ## 2. API surface used
 
@@ -113,6 +151,14 @@ explicitly. Without it the app still browses and shows "只读模式". The comma
 plugin running inside a live DSH host; otherwise commands expire after
 `capabilities.commandTtlSeconds` (default 120 s).
 
+For the built-in STCP tunnel the node-side requirement is an existing STCP provider pointing at the
+node's `8787` (the provider does **not** need to be public). Because frpc connects to the node over
+loopback, the node sees the request as coming from `127.0.0.1`; with `trustLocalhost: true` that
+bypasses the token entirely. The test node keeps `trustLocalhost: true` for its local CLI/bridge, so
+the tunnel APK is a self-use build. A production phone deployment should either put a token-checking
+gateway in front of a second STCP provider, or add mobile client certificates, rather than rely on
+this bypass.
+
 ## 4. Verification
 
 What was checked (2026-11-03, dsh-link 0.6.0 tree, Android SDK 36):
@@ -159,6 +205,27 @@ What was checked (2026-11-03, dsh-link 0.6.0 tree, Android SDK 36):
 5. **IME**: with the keyboard open the steer checkbox, composer and send button stay above the
    keyboard (session screen uses the IME inset); no crash in `logcat`.
 
+0.2.0 verification (2026-11-04, dsh-link 0.6.2 tree, Android 16 / API 36 x86_64 emulator, real
+node over the Aliyun relay; the phone side had **no** LAN/VPN route to the node):
+
+1. **Build**: `dshlink-control-0.2.0-debug.apk` is 11,981,929 bytes; `versionCode 3`,
+   `versionName 0.2.0`, `extractNativeLibs=true`; entries `assets/tunnel/{frpc.toml,ca.crt,
+   client.crt,client.key}` and `lib/{x86_64,arm64-v8a}/libfrpc.so` all use forward slashes; debug
+   signature verifies.
+2. **Tunnel start**: checking the tunnel box and connecting logged
+   `starting …/lib/x86_64/libfrpc.so -c …/files/tunnel/frpc.toml` followed by
+   `tunnel is healthy on port 18788` about 50 ms later; `ps -A` showed the `libfrpc.so` child. The
+   UI showed "已连接 · 11 个工作区 · 可发送", node `alice-pc · dsh-link 0.6.2`, with the
+   URL field disabled at `http://127.0.0.1:18788`.
+3. **Cross-internet send**: opening `[phone-e2e] 短回复` (`session-1aa41492…`) and sending
+   `phone tunnel e2e: reply with the single word TUNNEL_OK` produced `#37 · 用户`, `#39 · 思考`,
+   `#39 · DSH` = `TUNNEL_OK` in the real transcript. This is the full phone → frps → node provider →
+   8787 path; the node did not open any new public port.
+4. **Failure path**: when the visitor cannot start (bad binary/relay unreachable) the app reports
+   "中转启动失败" with the tail of the frpc log instead of hanging or pretending to connect.
+5. **Architecture coverage**: arm64-v8a frpc is packaged and signed, but this round only exercised
+   the x86_64 emulator path; the first real-phone run is the remaining check.
+
 The node test suite is unchanged by the app release (`node test/run.mjs`: 166 tests, 165 pass,
 1 skipped for the missing frp binary).
 
@@ -168,9 +235,18 @@ out of scope for this repo.
 ## 5. Security notes
 
 - **Transport**: cleartext HTTP is allowed because the intended deployment is LAN or a VPN
-  (Tailscale/WireGuard). For any internet path, terminate TLS in a reverse proxy (Caddy/Nginx) or
-  keep the node off the public internet. The node's own STCP visitor listens on the node's
-  `127.0.0.1` only and is **not** reachable from a phone.
+  (Tailscale/WireGuard), or the 0.2.0 built-in STCP tunnel (TLS + frps auth token on the phone↔frps
+  hop; plain HTTP only inside the phone's own loopback and the node's own loopback). For any other
+  internet path, terminate TLS in a reverse proxy (Caddy/Nginx) or keep the node off the public
+  internet.
+- **Bundled relay credentials (0.2.0)**: the APK embeds the frps auth token, the mTLS client
+  certificate/key and the STCP `secretKey`. Anyone with the APK can connect to the node's STCP
+  provider. Treat the APK as a private build: do not upload it to a store or public link, and if it
+  leaks rotate the frps token, re-issue the client certificate and change the STCP secret.
+- **trustLocalhost bypass**: STCP requests arrive at the node from `127.0.0.1`, and this node has
+  `auth.trustLocalhost: true`; the tunnel path therefore bypasses dsh-link token checks. A production
+  phone setup needs a token-checking gateway in front of a dedicated STCP provider (or client
+  certificates), not this self-use build.
 - **Token storage**: `SharedPreferences` (app-private, not encrypted at rest). Use a short
   `--ttl-days`, revoke with `dshlink token rm --id <id>` if the phone is lost.
 - **Capability scope**: the node's `capabilities.methods` (and optional per-peer `peers` policy)
@@ -189,3 +265,7 @@ out of scope for this repo.
 - Attachments / file browse (needs `files` roots and an upload UI).
 - Session actions beyond prompt (create/rename/archive) and command cancellation.
 - Encrypted token storage (Android Keystore) and certificate pinning for reverse-proxy TLS.
+- Production-grade tunnel auth: device certificate or a token-checking gateway in front of a
+  dedicated STCP provider, so the mobile path does not depend on `trustLocalhost`.
+- Keep the bundled frpc current (and provide 16 KB-page-size-aligned builds) or load it from a
+  separately updatable location instead of rebuilding the APK.

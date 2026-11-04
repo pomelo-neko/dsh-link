@@ -1,14 +1,14 @@
 # Build the dsh-link Android control app without Gradle.
 #
 #   powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
-#   powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSdk -VersionName 0.1.1
+#   powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSdk -VersionName 0.2.0
 #
 # Requires: Android SDK with build-tools;36.0.0 and platforms;android-36, plus a JDK (17+).
 # Uses only aapt2 / javac / d8 / zipalign / apksigner from the SDK, so no network and no Gradle.
 param(
     [string]$Sdk = "D:\AndroidSdk",
-    [string]$VersionName = "0.1.1",
-    [int]$VersionCode = 2
+    [string]$VersionName = "0.2.0",
+    [int]$VersionCode = 3
 )
 
 $ErrorActionPreference = "Continue"
@@ -48,6 +48,21 @@ Write-Host "JDK: $env:JAVA_HOME"
 Remove-Item -Recurse -Force $Obj -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Obj, $Gen, $Classes, $Dist | Out-Null
 
+$Assets = Join-Path $App "src\main\assets"
+$Native = Join-Path $Root "native"
+if (-not (Test-Path $Assets)) { throw "assets not found: $Assets (see android\tunnel\README.md)" }
+foreach ($name in @("tunnel\frpc.toml", "tunnel\ca.crt", "tunnel\client.crt", "tunnel\client.key")) {
+    if (-not (Test-Path (Join-Path $Assets $name))) {
+        throw "missing tunnel asset $name; render android\app\src\main\assets\tunnel from android\tunnel\frpc.toml.example and the frps certs (see android\tunnel\README.md)"
+    }
+}
+$nativeAbis = @()
+if (Test-Path $Native) {
+    $nativeAbis = @(Get-ChildItem (Join-Path $Native "lib") -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+}
+if ($nativeAbis.Count -eq 0) { throw "no native frpc binaries found under $Native\lib (see android\tunnel\README.md)" }
+Write-Host ("frpc ABIs: {0}" -f ($nativeAbis -join ", "))
+
 Write-Host "[1/6] aapt2 compile"
 & "$BuildTools\aapt2.exe" compile --dir "$App\src\main\res" -o "$Obj\res.zip"
 if ($LASTEXITCODE -ne 0) { throw "aapt2 compile failed" }
@@ -68,16 +83,39 @@ New-Item -ItemType Directory -Force -Path "$Obj\dex" | Out-Null
 & "$BuildTools\d8.bat" --min-api 26 --lib $AndroidJar --output "$Obj\dex" (Get-ChildItem -Path $Classes -Recurse -Filter *.class | ForEach-Object { $_.FullName })
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 
-Write-Host "[5/6] package classes.dex into the APK"
+Write-Host "[5/6] package assets, classes.dex and frpc native libs into the APK"
+# aapt2 on Windows writes asset names with backslashes (assets/tunnel\ca.crt), which Android
+# cannot open. Package assets with jar instead so every entry uses forward slashes.
+$AssetStage = Join-Path $Obj "apk-assets"
+Remove-Item -Recurse -Force $AssetStage -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path (Join-Path $AssetStage "assets") | Out-Null
+Copy-Item -Path (Join-Path $Assets "*") -Destination (Join-Path $AssetStage "assets") -Recurse -Force
 Copy-Item "$Obj\base.apk" "$Obj\unsigned.apk" -Force
 $jar = Get-Command "jar" -ErrorAction SilentlyContinue
 if (-not $jar) { throw "jar.exe not found; install a JDK" }
 Push-Location "$Obj"
 try {
     & $jar.Source uf "$Obj\unsigned.apk" -C "$Obj\dex" classes.dex
-    if ($LASTEXITCODE -ne 0) { throw "jar uf failed" }
+    if ($LASTEXITCODE -ne 0) { throw "jar uf classes.dex failed" }
+    & $jar.Source uf "$Obj\unsigned.apk" -C $AssetStage assets
+    if ($LASTEXITCODE -ne 0) { throw "jar uf assets failed" }
+    & $jar.Source uf "$Obj\unsigned.apk" -C $Native lib
+    if ($LASTEXITCODE -ne 0) { throw "jar uf native libs failed" }
 } finally {
     Pop-Location
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead("$Obj\unsigned.apk")
+try {
+    $names = @($zip.Entries | ForEach-Object { $_.FullName })
+    foreach ($name in @("assets/tunnel/frpc.toml", "assets/tunnel/ca.crt", "assets/tunnel/client.crt", "assets/tunnel/client.key")) {
+        if (-not ($names -contains $name)) { throw "APK is missing $name" }
+    }
+    foreach ($abi in $nativeAbis) {
+        if (-not ($names -contains ("lib/$abi/libfrpc.so"))) { throw "APK is missing lib/$abi/libfrpc.so" }
+    }
+} finally {
+    $zip.Dispose()
 }
 
 Write-Host "[6/6] zipalign + sign"

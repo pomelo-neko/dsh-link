@@ -1,0 +1,22 @@
+# Template for the frpc STCP visitor bundled into the Android control app.
+# Copy to android/app/src/main/assets/tunnel/frpc.toml and replace the {{...}} placeholders.
+# The resulting assets/tunnel/ directory is git-ignored because it contains shared credentials.
+serverAddr = "{{SERVER_ADDR}}"
+serverPort = {{SERVER_PORT}}
+loginFailExit = false
+
+transport.tls.enable = true
+transport.tls.certFile = "{{DIR}}/client.crt"
+transport.tls.keyFile = "{{DIR}}/client.key"
+transport.tls.trustedCaFile = "{{DIR}}/ca.crt"
+
+auth.method = "token"
+auth.token = "{{FRPS_AUTH_TOKEN}}"
+
+[[visitors]]
+name = "phone-app"
+type = "stcp"
+serverName = "{{STCP_SERVER_NAME}}"
+secretKey = "{{STCP_SECRET_KEY}}"
+bindAddr = "127.0.0.1"
+bindPort = {{VISITOR_PORT}}

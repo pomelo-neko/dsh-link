@@ -11,6 +11,7 @@ import android.text.TextUtils;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -18,6 +19,7 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -31,9 +33,11 @@ public class MainActivity extends Activity {
     private static final String PREFS = "dshlink";
     private static final String KEY_URL = "url";
     private static final String KEY_TOKEN = "token";
+    private static final String KEY_TUNNEL = "tunnel";
 
     private EditText urlInput;
     private EditText tokenInput;
+    private CheckBox tunnelCheck;
     private Button connectButton;
     private Button refreshButton;
     private TextView statusView;
@@ -53,6 +57,7 @@ public class MainActivity extends Activity {
         Ui.applyEdgeToEdgePadding(this, false);
         urlInput = findViewById(R.id.url_input);
         tokenInput = findViewById(R.id.token_input);
+        tunnelCheck = findViewById(R.id.tunnel_check);
         connectButton = findViewById(R.id.connect_button);
         refreshButton = findViewById(R.id.refresh_button);
         statusView = findViewById(R.id.status);
@@ -67,6 +72,19 @@ public class MainActivity extends Activity {
         urlInput.setText(prefs.getString(KEY_URL, "http://127.0.0.1:8787"));
         tokenInput.setText(prefs.getString(KEY_TOKEN, ""));
         tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        tunnelCheck.setChecked(prefs.getBoolean(KEY_TUNNEL, false));
+        urlInput.setEnabled(!tunnelCheck.isChecked());
+        tunnelCheck.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean checked) {
+                urlInput.setEnabled(!checked);
+                if (checked) {
+                    status("将经内置 frpc 连接 " + TunnelManager.LOCAL_URL);
+                } else if (statusView.getText().toString().startsWith("将经内置")) {
+                    status("");
+                }
+            }
+        });
 
         connectButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -92,27 +110,28 @@ public class MainActivity extends Activity {
         });
 
         String savedUrl = prefs.getString(KEY_URL, "");
-        if (!savedUrl.isEmpty()) connect();
+        if (!savedUrl.isEmpty() || prefs.getBoolean(KEY_TUNNEL, false)) connect();
     }
 
     private void connect() {
-        final String url = ApiClient.normalize(urlInput.getText().toString());
+        final boolean useTunnel = tunnelCheck.isChecked();
+        final String typedUrl = ApiClient.normalize(urlInput.getText().toString());
+        final String url = useTunnel ? TunnelManager.LOCAL_URL : typedUrl;
         final String token = tokenInput.getText().toString().trim();
-        if (url.isEmpty()) {
+        if (!useTunnel && url.isEmpty()) {
             Ui.toast(this, "请填写节点地址");
             return;
         }
         SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
-        editor.putString(KEY_URL, url);
+        editor.putString(KEY_URL, typedUrl);
         editor.putString(KEY_TOKEN, token);
+        editor.putBoolean(KEY_TUNNEL, useTunnel);
         editor.apply();
 
         NodeState.reset();
-        NodeState.baseUrl = url;
         NodeState.token = token;
-        NodeState.client = new ApiClient(url, token);
         setBusy(true);
-        status("正在连接 " + url + " …");
+        status(useTunnel ? "正在启动阿里云中转并连接…" : "正在连接 " + url + " …");
         summaryView.setText("");
         warningView.setVisibility(View.GONE);
 
@@ -120,21 +139,42 @@ public class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    final JSONObject info = NodeState.client.get("/api/v1/info");
+                    if (useTunnel) {
+                        TunnelManager.start(getApplicationContext());
+                    } else {
+                        TunnelManager.stop();
+                    }
+                    final ApiClient client = new ApiClient(url, token);
+                    final JSONObject info = client.get("/api/v1/info");
                     JSONObject dsh = info.optJSONObject("dsh");
                     if (dsh == null || !dsh.optBoolean("workspaces")) {
                         throw new ApiException(0,
                                 "节点没有开启 DSH 工作区视图：在节点 config.json 把 dsh.enabled 和 dsh.exposeWorkspaces 设为 true，然后重启节点",
                                 "dsh_disabled");
                     }
-                    final JSONObject workspaces = NodeState.client.get("/api/v1/dsh/workspaces");
+                    final JSONObject workspaces = client.get("/api/v1/dsh/workspaces");
                     main.post(new Runnable() {
                         @Override
                         public void run() {
+                            NodeState.baseUrl = url;
+                            NodeState.token = token;
+                            NodeState.client = client;
                             NodeState.info = info;
                             applyInfo(info);
                             applyWorkspaces(workspaces);
                             setBusy(false);
+                        }
+                    });
+                } catch (final IOException tunnelErr) {
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            TunnelManager.stop();
+                            setBusy(false);
+                            status("中转启动失败");
+                            String message = tunnelErr.getMessage() == null
+                                    ? "阿里云中转启动失败" : tunnelErr.getMessage();
+                            Ui.showError(MainActivity.this, new ApiException(0, message, "tunnel_error"));
                         }
                     });
                 } catch (final ApiException err) {
@@ -222,6 +262,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (isFinishing()) TunnelManager.stop();
         io.shutdownNow();
         main.removeCallbacksAndMessages(null);
         super.onDestroy();

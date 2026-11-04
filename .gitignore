@@ -13,6 +13,14 @@ android/*.idsig
 vendor/frp/windows-amd64/
 vendor/frp/linux-amd64/
 
+# ---- Android built-in STCP tunnel: local credentials + downloaded frpc binaries ----
+# Template and instructions are tracked in android/tunnel/; the rendered config, certs and
+# native libs are not, because they are shared per-deployment credentials / large binaries.
+android/app/src/main/assets/tunnel/
+android/native/
+android/frp-arm64/
+android/frp_*.tar.gz
+
 # ---- local configs / data dirs ----
 dshlink.config.json
 .dshlink/

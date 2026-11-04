@@ -38,6 +38,13 @@
         android:inputType="textPassword"
         android:singleLine="true" />
 
+    <CheckBox
+        android:id="@+id/tunnel_check"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="通过阿里云 STCP 中转（自动启动内置 frpc，忽略上方地址）"
+        android:textSize="12sp" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

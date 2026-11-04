@@ -217,15 +217,18 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # on a machine with JDK 17+ and Android SDK 36
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-# -> android/dist/dshlink-control-0.1.1-debug.apk
-adb install android\dist\dshlink-control-0.1.1-debug.apk
+# -> android/dist/dshlink-control-0.2.0-debug.apk
+adb install android\dist\dshlink-control-0.2.0-debug.apk
 ```
 
 The node needs `dsh.enabled`, `dsh.exposeWorkspaces`, `dsh.exposeTranscripts`,
 `capabilities.enabled` with `sessions.prompt` in `capabilities.methods`, and a bridge running to
-execute the queued prompt. The phone reaches the node over a LAN or a VPN (Tailscale/WireGuard) and
-the node **must not** be exposed on the public internet without TLS. Use a `device` token and revoke
-it if the phone is lost; see [`android/README.md`](android/README.md) for setup and
+execute the queued prompt. The phone normally reaches the node over a LAN or a VPN
+(Tailscale/WireGuard); 0.2.0 also bundles an frpc STCP visitor so the app can reach the node through
+an existing frps relay when no LAN/VPN route exists (no new public port on the node). That build
+embeds relay credentials and, with `trustLocalhost: true`, the STCP loopback path bypasses the
+dsh-link token — treat it as a private self-use APK, not a public download. Use a `device` token and
+revoke it if the phone is lost; see [`android/README.md`](android/README.md) for setup and
 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) for the API mapping and verification.
 
 ## NAT traversal with FRP STCP
