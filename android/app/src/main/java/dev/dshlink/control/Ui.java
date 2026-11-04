@@ -121,14 +121,16 @@ final class Ui {
         }
         if (err.status == 401) {
             return "鉴权失败：token 无效或已过期。\n"
-                    + "0.5+ 节点每个请求都要 token：在节点执行 dshlink token new --role device --label phone，"
-                    + "把打印的明文填到本页。";
+                    + "0.5+ 节点：在节点执行 dshlink token new --role device --label phone；"
+                    + "hub：在 hub 执行 dshlink hub token new --role device --label phone。"
+                    + "把打印的明文填到本页（hub 从不信任 localhost，必须带 token）。";
         }
         if (err.status == 403) {
             if ("role_forbidden".equals(err.code)) {
                 return "权限不足：这个 token 的角色不允许访问该接口。\n"
                         + "读取 DSH 需要 device/peer/admin；发送命令需要 device/admin；"
-                        + "bridge 控制面只有 bridge token 或本机可用。";
+                        + "bridge 控制面只有 bridge token 或本机可用。"
+                        + "hub 模式下 token 由中心服务器校验，节点侧的 dsh / capabilities 权限仍然生效。";
             }
             if ("capability_denied".equals(err.code)) {
                 return "节点拒绝了这条命令（" + err.getMessage() + "）。\n\n"
@@ -139,7 +141,15 @@ final class Ui {
             return "权限不足（" + err.code + "）：" + err.getMessage();
         }
         if (err.status == 404) {
-            return "接口不存在（404）：节点可能低于 0.5.0，或该 DSH 会话已被删除。\n" + err.getMessage();
+            return "接口或对象不存在（404）：节点可能低于 0.5.0、该 DSH 会话已被删除，"
+                    + "或中心服务器上没有登记这个节点（unknown_target）。\n" + err.getMessage();
+        }
+        if (err.status == 502) {
+            return "中心服务器连不上目标节点（502 upstream_unreachable）：节点离线、"
+                    + "节点 url 或 heartbeat 失效，或节点到 hub 的网络中断。\n" + err.getMessage();
+        }
+        if (err.status == 504) {
+            return "等待节点响应超时（504）：节点可能卡住或网络抖动，稍后重试。\n" + err.getMessage();
         }
         if (err.status == 429) {
             return "请求被节点限速（429）。稍等一会儿再试；节点限制见 limits.maxRequestsPerMinute。";

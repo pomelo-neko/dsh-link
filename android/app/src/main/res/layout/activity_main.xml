@@ -17,7 +17,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="连接一个 dsh-link 节点，浏览它连接的 DSH 网络、工作区与会话。只在连接或刷新时传输数据。"
+        android:text="连接一个 dsh-link 中心服务器（hub，默认 8790）或单个节点（8787），浏览并控制它登记或直连的 DSH 工作区与会话。只在连接或刷新时传输数据。"
         android:textSize="12sp"
         android:textColor="#6B7280"
         android:paddingBottom="12dp" />
@@ -26,7 +26,7 @@
         android:id="@+id/url_input"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="节点地址，例如 http://192.0.2.10:8787"
+        android:hint="中心服务器地址，例如 http://192.0.2.10:8790（也支持节点 8787）"
         android:inputType="textUri"
         android:singleLine="true" />
 
@@ -34,7 +34,7 @@
         android:id="@+id/token_input"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="device token（dshlink token new --role device）"
+        android:hint="device token（hub: dshlink hub token new --role device）"
         android:inputType="textPassword"
         android:singleLine="true" />
 
@@ -42,7 +42,7 @@
         android:id="@+id/tunnel_check"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="通过阿里云 STCP 中转至 8788 网关（内置 frpc；需要 device token）"
+        android:text="通过阿里云 STCP 中转（内置 frpc；端口来自内置隧道模板：节点网关 18788 / hub 18790）"
         android:textSize="12sp" />
 
     <LinearLayout

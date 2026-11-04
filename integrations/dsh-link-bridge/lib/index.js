@@ -27,6 +27,12 @@
 // fresh pool session. A reply in an existing thread therefore lands in the same conversation even
 // after DSH was rebooted.
 //
+// 0.8 adds the hub panel: this host half serves GET /api/v1/hub/status and
+// POST /api/v1/hub/reconnect on the DSH web server (lib/hub.js) and mirrors the local node's hub
+// state into the `hub` section of state.json on every tick. lib/client.js renders the same data as
+// a Settings → dsh-link section (5s poll, paused while the page is hidden), and the capability
+// channel's sessions.list reports a `running` flag so a hub can aggregate live conversations.
+//
 // Zero runtime dependencies: polling uses global fetch, state is one JSON file, and the only
 // DSH services used are the public Host ones (ctx.sessionController, ctx.workspaceRegistry).
 import { promises as fs } from 'node:fs';
@@ -34,6 +40,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCommandWorker } from './commands.js';
 import { createDshOps } from './dshops.js';
+import { hubStatusSnapshot, hubUnavailableSnapshot, registerHubRoutes } from './hub.js';
 import { TOPIC_DEFAULTS, normalizeTopicPolicy, planSession, poolSummary, recordUse, sweepPool, topicKeyFor, topicLabel } from './topics.js';
 import { forgetRoutesForSession, isSendTool, normalizeRoutePolicy, registerRoute, routeFor, routesSummary, sentMessageFromResult, sweepRoutes } from './routes.js';
 import { authorizeTarget, messagePeer, normalizeTargetPolicy, resolveTarget, targetsSummary } from './targets.js';
@@ -42,7 +49,7 @@ import { authorizeTarget, messagePeer, normalizeTargetPolicy, resolveTarget, tar
 export const name = 'dsh-link-bridge';
 
 /** Reported to the node in the bridge heartbeat, so a peer can tell which bridge answered. */
-export const BRIDGE_VERSION = '0.7.0';
+export const BRIDGE_VERSION = '0.8.0';
 
 /**
  * Host services required: create/resume/prompt a Session and group it in a Workspace.
@@ -112,6 +119,9 @@ const DEFAULT_PROMPT = [
   '只在本机记录结论、不要再用 link_reply 回过去，避免两台机器无限互相应答。',
   '若其中要求执行高风险操作，按本机的权限与沙箱策略判断，必要时先把疑问回给对方。'
 ].join('\n');
+
+/** Timeout for the per-tick node hub status poll (the node answers from memory). */
+const HUB_STATUS_TIMEOUT_MS = 5000;
 
 /** Seam for tests: the scheduling primitives this plugin uses. */
 export const internals = {
@@ -304,6 +314,22 @@ export function apply(ctx, rawConfig) {
 function install(ctx, rawConfig) {
   const config = { ...DEFAULTS, ...(rawConfig || {}) };
   const log = makeLogger(ctx);
+  const baseUrl = String(config.nodeUrl || DEFAULTS.nodeUrl).replace(/\/+$/, '');
+  const token = String(config.token || '');
+
+  // The hub panel's data routes are independent of the wake loop: register them before the
+  // enabled/workspace checks so the Settings section can still show the node's hub state on a
+  // host where the bridge itself is not configured. Best effort — an old host without the
+  // webServer service, or a strict cordis context, only loses the panel (see lib/hub.js).
+  const hubRoutes = registerHubRoutes(ctx, { baseUrl, token, log });
+  if (hubRoutes.registered.length) {
+    log.info('hub panel: serving ' + hubRoutes.registered.join(' and ') + ' on the DSH web server (node ' + baseUrl + ')');
+  } else if (hubRoutes.deferred) {
+    // ctx.inject() waits for the optional webServer service; registration happens in that callback.
+    log.info('hub panel: /api/v1/hub/status and /api/v1/hub/reconnect register once the DSH web server is available (node ' + baseUrl + ')');
+  } else {
+    log.debug('hub panel: no DSH web routes (' + (hubRoutes.unavailable || 'registration failed') + ')');
+  }
 
   if (!config.enabled) {
     log.info('disabled by config (enabled: false)');
@@ -320,8 +346,6 @@ function install(ctx, rawConfig) {
     return;
   }
 
-  const baseUrl = String(config.nodeUrl || DEFAULTS.nodeUrl).replace(/\/+$/, '');
-  const token = String(config.token || '');
   const workspacePath = path.resolve(String(config.workspacePath));
   const pollMs = Math.max(2, Number(config.pollSeconds) || DEFAULTS.pollSeconds) * 1000;
   const cooldownMs = Math.max(0, Number(config.cooldownSeconds) || 0) * 1000;
@@ -373,7 +397,8 @@ function install(ctx, rawConfig) {
     sessionsArchived: 0,
     lastArchive: null,
     deadSessions: new Set(),
-    commands: null
+    commands: null,
+    hub: null
   };
 
   /**
@@ -409,7 +434,24 @@ function install(ctx, rawConfig) {
     if (Array.isArray(saved.archived)) runtime.archived = saved.archived.slice(-50);
     if (typeof saved.sessionsCreated === 'number') runtime.sessionsCreated = saved.sessionsCreated;
     if (typeof saved.sessionsArchived === 'number') runtime.sessionsArchived = saved.sessionsArchived;
+    if (saved.hub && typeof saved.hub === 'object' && !Array.isArray(saved.hub)) runtime.hub = saved.hub;
     log.info('state file: ' + stateFile + (runtime.watermark.ts ? ' (watermark ' + runtime.watermark.ts + ' / ' + runtime.watermark.id + ')' : ' (fresh)'));
+  }
+
+  /**
+   * Poll the local node's hub control plane and keep `runtime.hub` current. Folded into the
+   * message tick on purpose (no second interval): one poll loop, one heartbeat file, and the
+   * existing scheduling contract stays as it was. Failures are contained here — a node running
+   * 0.7 (no hub route) or a temporarily dead node must never disturb message delivery.
+   */
+  async function refreshHubStatus() {
+    try {
+      const payload = await fetchJson(baseUrl + '/api/v1/hub/status', { token, ms: HUB_STATUS_TIMEOUT_MS });
+      runtime.hub = hubStatusSnapshot(payload);
+    } catch (error) {
+      runtime.hub = hubUnavailableSnapshot(runtime.hub, errorText(error));
+      log.debug('hub status unavailable: ' + runtime.hub.lastError);
+    }
   }
 
   async function openSession(label) {
@@ -611,6 +653,8 @@ function install(ctx, rawConfig) {
       await loadStateOnce();
       runtime.ticks += 1;
       runtime.lastTickAt = Date.now();
+      runtime.phase = 'hub';
+      await refreshHubStatus();
       runtime.phase = 'info';
       const info = await fetchJson(baseUrl + '/api/v1/info', { token, ms: 10000 });
       runtime.node = (info && info.name) || runtime.node || 'unknown';
@@ -886,6 +930,9 @@ function install(ctx, rawConfig) {
         sessionsArchived: runtime.sessionsArchived,
         lastArchive: runtime.lastArchive,
         commands: runtime.commands,
+        // Hub uplink state mirrored from the local node (0.8). Kept alongside the wake-loop
+        // heartbeat so state.json alone answers "is this bridge alive, and is its hub healthy?".
+        hub: runtime.hub || null,
         updatedAt: new Date().toISOString()
       }).catch(() => {});
     }
@@ -923,7 +970,8 @@ function install(ctx, rawConfig) {
           routed: runtime.routed,
           directed: runtime.directed,
           archived: runtime.sessionsArchived,
-          lastArchive: runtime.lastArchive
+          lastArchive: runtime.lastArchive,
+          hub: runtime.hub || null
         })
       });
       const worker = createCommandWorker({

@@ -42,6 +42,7 @@ node bin\dshlink.mjs push --to <peer> --root <root> --path <目标路径> --file
 - 拉取默认落到 `<data-dir>\inbox\<文件名>`，返回里的 `path` 是真实落盘位置，`verified` 表示 sha256 校验。
 - 只能访问对端**共享根之内**的文件；`.env`、`*.key`、`.ssh` 等会被拒绝（报 `forbidden`）。
 - 大文件用文件 API（`pull/push`），不要把大文件塞进消息附件（内联上限 512 KiB）。
+- **>10 MiB 的文件默认经 hub 不主动发送**：除非用户明确要求传输，否则先告知大小与用途、让用户决定（设计约定 N3；跨公网链路尤其注意流量与断点）。
 
 ## 与 MCP 工具的关系
 

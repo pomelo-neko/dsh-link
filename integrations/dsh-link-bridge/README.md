@@ -4,8 +4,11 @@ dsh-link 会把消息投进本机节点的收件箱，但 DSH 这一侧不会自
 复制消息、问一句"这说了什么"。这个 DSH 插件把这一环补上——它轮询本机 dsh-link 节点，
 发现有未读消息就**自动（复用或创建）一个对话并给它发一条 prompt**，让远端那台机器拿到回复。
 
-- 类型：DSH **Host 插件**（无需客户端/前端资源），零运行时依赖。
-- 依赖服务：`ctx.sessionController`、`ctx.workspaceRegistry`（web profile 默认都装好）。
+- 类型：DSH 插件——Host 半边是纯后端；0.8 起附带**可选的 Settings 面板**（client half，
+  手写 `lib/client.js`，只 require `react`，无构建链、无第三方依赖）。
+- 依赖服务：`ctx.sessionController`、`ctx.workspaceRegistry`（web profile 默认都装好）；
+  0.8 的面板路由用 `ctx.inject(['webServer'])` **可选**接入——没有 webServer 的 host 只是没有面板，
+  桥照常工作。
 - 配套：消息的读/回用已经装好的 `mcp-dshlink` MCP 工具，本插件不重复造轮子。
 
 ## 它怎么工作
@@ -18,7 +21,10 @@ dsh-link 会把消息投进本机节点的收件箱，但 DSH 这一侧不会自
    - 没配 → 用状态文件里记住的上一次对话；再没有就按 `workspacePath` 新建一个；
 4. 把消息渲染进 prompt 模板，用 `sessionController.prompt` 投进该对话
    （`requestId = link-bridge:<session>:<最新消息 id>`，重复投递不会产生第二条）；
-5. 推进 watermark 并落盘；同一条消息不会被唤醒两次。
+5. 推进 watermark 并落盘；同一条消息不会被唤醒两次；
+6. 0.8 起每轮 tick 还会（用同一个 `nodeUrl` + token）GET 节点的 `/api/v1/hub/status`，
+   把 hub 链路快照写进 `state.json` 的 `hub` 段。读不到只把 `hub.state` 记成 `unknown`
+   （`lastError` 写原因），不影响消息唤醒主循环。
 
 对话里的 agent 会按模板指示用 `mcp__dshlink__link_inbox` 读全文、`link_pull_file` 取文件、
 `link_reply` 回复，最后 `markRead`。
@@ -262,7 +268,14 @@ step 边界）。这个参数由 `link_call` 原样透传，未提供时保持 0
   "directed": 2,                // 0.4：累计定向投递次数
   "lastDirected": { "thread": "msg_…", "sessionId": "session-…", "originSession": "session-…",
                     "matched": "target", "direction": "in", "at": "…" },
-  "targets": { "enabled": true, "peers": [], "allow": [], "deny": [], "open": true }  // 0.4 策略快照
+  "targets": { "enabled": true, "peers": [], "allow": [], "deny": [], "open": true },  // 0.4 策略快照
+  "hub": {                      // 0.8：hub 链路快照（节点未启用 hub 时 enabled:false / state:"disabled"）
+    "enabled": true, "state": "online", "url": "http://10.0.0.5:8787",
+    "lastHeartbeatAt": "2026-11-04T12:00:00.000Z", "lastError": null,
+    "pendingOutbox": 0, "pendingTargets": [],
+    "enrolled": { "hubName": "HUB-A", "nodeName": "LAPTOP", "enrolledAt": "…", "visitorPort": 18790, "downlinkUrl": "…" },
+    "updatedAt": "2026-11-04T12:00:02.000Z"
+  }
 }
 ```
 
@@ -281,6 +294,58 @@ step 边界）。这个参数由 `link_call` 原样透传，未提供时保持 0
 - 0.4 起还有 `promptMode` / `directed` / `lastDirected` / `targets`；0.6.1 起 `routeTable` 是运行时 route 表的
   真实快照（`routes` 只是给人看的摘要），重启恢复只看 `routeTable`。binding 兜底命中时
   `lastRoute.matched = "binding"`。
+- 0.8 起还有 `hub` 段（节点 hub 链路快照，见「Hub 面板与状态（0.8）」）；`sessions.list` 的会话行
+  在 Host 报 `running` 时带上该布尔。
+
+## Hub 面板与状态（0.8）
+
+桥多了一个可选前端：DSH Web GUI 的 **Settings → dsh-link** 一节，用来在一个地方看本机节点与 hub 的链路，
+并在链路掉线时手动踢一脚重连。它不改变桥的消息处理方式，只是把状态可见化。
+
+**面板显示什么**
+
+| 区块 | 内容 |
+|---|---|
+| hub URL | 节点当前连的 hub 地址；未启用时显示 `-` |
+| 链路状态 | `connecting` / `online` / `degraded` / `offline`（未启用显示“未启用”，读不到节点显示“未知”） |
+| 最后心跳 | 节点最近一次成功 POST 心跳的时间 |
+| 最后错误 | 节点记录的最后一次链路错误（如 `connect ECONNREFUSED`） |
+| 本地待发队列 | `pendingOutbox` 条待上传消息 + 目标节点列表 `pendingTargets` |
+| 已注册节点 | hub 分配的本节点名 `enrolled.nodeName` 与 hub 名 `enrolled.hubName` |
+| 操作 | “重新连接”按钮 |
+
+- 面板每 **5 秒**轮询一次；页面不可见（`document.hidden`）时暂停，切回来立即刷新一次；
+- 未启用 hub（或节点还是 0.7 点对点模式）时显示“hub 未启用（当前为 0.7 点对点模式）”，按钮禁用；
+  节点不可达时显示“面板读取失败：…”；
+- 点击“重新连接” = 节点立即重试连接并上传一次心跳（POST `/api/v1/hub/reconnect`），成功后面板立刻刷新。
+
+**host 侧代理路由（浏览器永远拿不到节点 token）**
+
+面板不直接访问节点，而是走 DSH Web GUI 同源的 host 路由：
+
+| 方法/路径 | 行为 |
+|---|---|
+| `GET /api/v1/hub/status` | host 用 `nodeUrl` + token 代理节点的 `/api/v1/hub/status`，JSON 原样返回 |
+| `POST /api/v1/hub/reconnect` | 代理节点的 `POST /api/v1/hub/reconnect`；节点的 409 `hub_disabled` 等状态码/JSON 原样透传 |
+
+- 节点连不上（进程没起、端口不通）→ `502 {"error":{"code":"node_unreachable",…}}`；
+- host 没有 `webServer` 服务（例如非 web profile）→ 面板路由不注册，桥其余功能不受影响；
+- 这组路由在 **DSH Web GUI 的 3080** 上，不在 dsh-link 节点端口上，也不改节点的鉴权模型。
+
+**state.json 的 `hub` 段**
+
+面板是实时读节点；`state.json.hub` 是后台快照（离线排查时看它，或经能力通道的 `bridge.status` 取），
+字段与节点 `/api/v1/hub/status` 对齐（见上面的示例）。节点未启用 hub 时是
+`{"enabled":false,"state":"disabled","url":null,…}`；节点读不到时 `state:"unknown"` 且 `lastError` 说明原因。
+
+DSH Web GUI 版本不含 client 插件能力时插件仍能启动：`package.json` 里的 `dsh.client` 只是可选声明，
+没有 client 加载器的 host 只加载 host 半边（面板不出现，其余功能不变）。
+
+**会话列表的 running（0.8）**
+
+能力通道的 `sessions.list` 每行在 Host 报 `running` 时带上该布尔（`true` = 该对话正在执行一轮）；
+Host 不报这个字段时**省略**（而不是硬写成 `false`——省略表示未知，避免把活跃对话误报成空闲）。
+hub 的 `/api/v1/hub/sessions/running` 聚合时按 `running === true` 统计。
 
 ## 定位：协作与同步，不是"无人值守代理"
 
@@ -371,4 +436,11 @@ step 边界）。这个参数由 `link_call` 原样透传，未提供时保持 0
 13. **插话/排队模式**：`promptMode: auto` 下 direct/route 用 `steer`、topic 用 `queue`；`queue`/`steer` 强制覆盖；
 14. **能力通道 mode**：`sessions.prompt` 的 `mode` 透传、默认 queue、非法值拒绝（`test/bridge-commands.test.mjs`）；
 15. **0.6.1 重启恢复**：预写 `routes` 摘要 + `routeTable` 原始表，重启后回信仍投原会话（不新开桥会话）；
-16. **0.6.1 binding 兜底**：thread 没有 route 时按节点绑定投回本机会话，`routed` 记账、`lastRoute.matched = binding`。
+16. **0.6.1 binding 兜底**：thread 没有 route 时按节点绑定投回本机会话，`routed` 记账、`lastRoute.matched = binding`；
+17. **0.8 hub**（`test/bridge-hub.test.mjs`）：`sessions.list` 的 `running` 字段（Host 报布尔才出现）；
+    0.7 节点的 `state.hub` 为 `disabled` 快照、节点 enrolled 后为 `online` 归一化快照且带 `Bearer` token；
+    hub 查询失败只把 `state.hub.state` 记成 `unknown`、消息仍正常唤醒（上一轮持久化的 hub 快照会恢复，失败时保留上次的 hub 身份）；
+    0.7 写的 state.json 没有 hub 段也能加载并补写 disabled 快照；host 代理路由 200/405/409/502
+    与 `Content-Type`/`cache-control`；`ctx.inject(['webServer'])` 注册、无 webServer 时降级不失效；
+    Settings 面板 bundle 在最小 react/window/document 下注册 `settings.section`（id `dsh-link`）、
+    0.7 模式提示与禁用按钮、online 渲染与“重新连接”POST、不可达错误提示。

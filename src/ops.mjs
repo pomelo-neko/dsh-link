@@ -10,8 +10,12 @@ import { CAPABILITY_METHODS, authorizeCall } from './capabilities.mjs';
 
 const MAX_SUBJECT = 300;
 
-export function createOps({ cfg, store, roots, logger, dsh = null, commands = null, presence = null }) {
+export function createOps({ cfg, store, roots, logger, dsh = null, commands = null, presence = null, hubLink = null }) {
   const log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
+
+  // In hub mode the hub is the only channel: no direct peer delivery, no relay, no peer sync.
+  const hub = () => (cfg.hub?.enabled === true && hubLink ? hubLink : null);
+  const hubMode = () => hub() !== null;
 
   function peerOrNull(name) {
     if (!name) return null;
@@ -116,6 +120,19 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       await store.setDelivery(record.id, { state: 'delivered', via: 'local' });
       return { state: 'delivered', via: 'local' };
     }
+    const link = hub();
+    if (link) {
+      try {
+        const result = await link.deliverMessage(record);
+        const info = { state: 'delivered', via: 'hub', remote: result ?? null };
+        await store.setDelivery(record.id, info);
+        return info;
+      } catch (err) {
+        const info = { state: 'pending', via: 'hub', error: err.message };
+        await store.setDelivery(record.id, info);
+        return info;
+      }
+    }
     const candidates = [];
     const direct = peerOrNull(record.to);
     if (direct) candidates.push(direct);
@@ -157,6 +174,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     await store.append('outbox', record);
     await store.setDelivery(record.id, { state: 'pending', attempts: 1, bytes: payload, attachmentBytes: total });
     const delivery = await deliver(record);
+    if (hub()) hub().setPendingCount((await store.pendingOutbox()).length);
     return { message: record, delivery, bytes: payload };
   }
 
@@ -168,6 +186,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       const delivery = await deliver(record);
       results.push({ id: record.id, to: record.to, ...delivery });
     }
+    if (hub()) hub().setPendingCount((await store.pendingOutbox()).length);
     return { attempted: targets.length, delivered: results.filter((r) => r.state === 'delivered').length, pending: results.filter((r) => r.state !== 'delivered').length, results };
   }
 
@@ -209,6 +228,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
   }
 
   async function sync({ peer, limit = 200, since } = {}) {
+    if (hubMode()) return { mode: 'hub', peers: [], imported: 0, skipped: 0, reason: 'peer sync is not used when the node is enrolled in a hub' };
     const targets = peer ? [requirePeer(peer)] : cfg.peers.filter((p) => p.token);
     if (!targets.length) return { peers: [], imported: 0, skipped: 0 };
     const results = [];
@@ -268,19 +288,24 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       roots: roots.describe(),
       allowUpload: roots.allowUpload,
       inboundTokens: cfg.auth.tokens.length,
+      hub: await hubStatus(),
       peers: (await peers({ probe })).peers
     };
   }
 
   async function listFiles({ peer, root, path: relPath = '', limit } = {}) {
     if (isSelf(peer)) return { peer: cfg.name, ...(await roots.listDir(root, relPath, { limit })) };
-    const result = await clientFor(peer).listFiles({ root, path: relPath, limit });
+    const link = hub();
+    const result = link
+      ? await link.listFiles({ peer, root, path: relPath, limit })
+      : await clientFor(peer).listFiles({ root, path: relPath, limit });
     return { peer: peer, ...result };
   }
 
   async function statFile({ peer, root, path: relPath } = {}) {
     if (isSelf(peer)) return { peer: cfg.name, ...(await roots.statPath(root, relPath)) };
-    return { peer, ...(await clientFor(peer).statFile({ root, path: relPath })) };
+    const link = hub();
+    return { peer, ...(link ? await link.statFile({ peer, root, path: relPath }) : await clientFor(peer).statFile({ root, path: relPath })) };
   }
 
   async function pullFile({ peer, root, path: remotePath, out, localRoot } = {}) {
@@ -297,7 +322,8 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       await fs.writeFile(target, buffer);
       return { peer: cfg.name, from: source.displayPath, path: target, size: buffer.length, sha256: hash.digest('hex'), verified: true, localCopy: true };
     }
-    const client = clientFor(peer);
+    const link = hub();
+    const client = link ?? clientFor(peer);
     const filename = path.basename(String(remotePath)) || 'download.bin';
     let target;
     if (out) target = path.resolve(out);
@@ -307,7 +333,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     } else {
       target = path.join(store.paths.inboxFiles, filename);
     }
-    const info = await client.download({ root, path: remotePath }, target);
+    const info = await client.download(link ? { peer, root, path: remotePath } : { root, path: remotePath }, target);
     return { peer, remote: { root: root ?? null, path: remotePath }, ...info };
   }
 
@@ -326,7 +352,8 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       name = path.basename(abs);
     }
     const targetPath = remotePath ?? name;
-    const result = await clientFor(peer).upload({ root, path: targetPath }, buffer);
+    const link = hub();
+    const result = link ? await link.upload({ peer, root, path: targetPath }, buffer) : await clientFor(peer).upload({ root, path: targetPath }, buffer);
     return { peer, target: { root: root ?? null, path: targetPath }, size: buffer.length, sha256: createHash('sha256').update(buffer).digest('hex'), remote: result };
   }
 
@@ -341,6 +368,9 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     if (isSelf(to) || to === '*' || to === '') {
       await store.append('inbox', { ...record, id, to: to || cfg.name, via: 'push', receivedAt: nowIso() });
       return { accepted: true, stored: 'inbox', id };
+    }
+    if (hubMode()) {
+      throw new LinkError(403, 'relay_through_hub', `this node is enrolled in a hub; send the message for "${to}" to the hub instead of relaying it`);
     }
     if (!cfg.relay.enabled) throw new LinkError(409, 'relay_disabled', `message for "${to}" was not accepted and this node does not relay`);
     const target = peerOrNull(to);
@@ -391,7 +421,10 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
   }
 
   async function dshWorkspaces({ peer } = {}) {
-    if (!isSelf(peer)) return { peer, ...(await clientFor(peer).dshWorkspaces()) };
+    if (!isSelf(peer)) {
+      const link = hub();
+      return { peer, ...(link ? await link.dshWorkspaces({ peer }) : await clientFor(peer).dshWorkspaces()) };
+    }
     const view = dshGuard('workspaces');
     const available = await requireViewOk(view);
     const workspaces = visibleWorkspaces(await view.workspaces());
@@ -400,15 +433,9 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
 
   async function dshSessions({ peer, workspace, includeArchived = false, query, limit = 100 } = {}) {
     if (!isSelf(peer)) {
-      return {
-        peer,
-        ...(await clientFor(peer).dshSessions({
-          workspace,
-          includeArchived: includeArchived ? 1 : undefined,
-          query,
-          limit
-        }))
-      };
+      const params = { workspace, includeArchived: includeArchived ? 1 : undefined, query, limit };
+      const link = hub();
+      return { peer, ...(link ? await link.dshSessions({ ...params, peer }) : await clientFor(peer).dshSessions(params)) };
     }
     const view = dshGuard('workspaces');
     await requireViewOk(view);
@@ -420,7 +447,10 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
 
   async function dshSession({ peer, sessionId } = {}) {
     if (!sessionId) throw badRequest('a sessionId is required');
-    if (!isSelf(peer)) return { peer, ...(await clientFor(peer).dshSession(sessionId)) };
+    if (!isSelf(peer)) {
+      const link = hub();
+      return { peer, ...(link ? await link.dshSession(sessionId, { peer }) : await clientFor(peer).dshSession(sessionId)) };
+    }
     const view = dshGuard('workspaces');
     await requireViewOk(view);
     const session = await view.session(sessionId);
@@ -437,7 +467,9 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
       ? undefined
       : Math.max(0, Math.trunc(numericSeq));
     if (!isSelf(peer)) {
-      return { peer, ...(await clientFor(peer).dshTranscript(sessionId, { limit, offset, tail: tail ? 1 : undefined, sinceSeq: since })) };
+      const params = { limit, offset, tail: tail ? 1 : undefined, sinceSeq: since };
+      const link = hub();
+      return { peer, ...(link ? await link.dshTranscript(sessionId, { ...params, peer }) : await clientFor(peer).dshTranscript(sessionId, params)) };
     }
     const view = dshGuard('transcripts');
     await requireViewOk(view);
@@ -485,7 +517,10 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
   }
 
   async function dshCapabilities({ peer } = {}) {
-    if (!isSelf(peer)) return { peer, ...(await clientFor(peer).dshCapabilities()) };
+    if (!isSelf(peer)) {
+      const link = hub();
+      return { peer, ...(link ? await link.dshCapabilities({ peer }) : await clientFor(peer).dshCapabilities()) };
+    }
     const config = capabilityConfig();
     const info = presence ? await presence.read() : null;
     let queue = null;
@@ -507,8 +542,11 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     if (!isSelf(peer)) {
       const config = capabilityConfig();
       const wait = Math.max(0, Math.min(Number(waitSeconds ?? config.maxWaitSeconds ?? 30) || 0, 120));
+      const link = hub();
+      const body = { method, params: params ?? {}, waitSeconds: wait };
+      if (link) return { peer, ...(await link.dshCall({ ...body, peer })) };
       const client = clientFor(peer, { timeoutMs: (wait + 15) * 1000 });
-      return { peer, ...(await client.dshCall({ method, params: params ?? {}, waitSeconds: wait })) };
+      return { peer, ...(await client.dshCall(body)) };
     }
     return dshCallLocal({ method, params, waitSeconds, origin: { peer: cfg.name, ip: 'loopback', label: 'localhost', role: 'admin', tokenId: null } });
   }
@@ -529,7 +567,10 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
 
   async function dshCallResult({ peer, id } = {}) {
     if (!id) throw badRequest('a commandId is required');
-    if (!isSelf(peer)) return { peer, ...(await clientFor(peer).dshCallResult(id)) };
+    if (!isSelf(peer)) {
+      const link = hub();
+      return { peer, ...(link ? await link.dshCallResult(id, peer) : await clientFor(peer).dshCallResult(id)) };
+    }
     const command = await requireCommands().get(id);
     if (!command) throw notFound('no command ' + id);
     return summarizeCommand(command);
@@ -554,7 +595,23 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
   // Walk the peer graph. The node itself only needs read access to /info and
   // /network/nodes on each peer; no peer token is ever returned to a caller.
   async function networkNodes(query = {}) {
+    const link = hub();
+    if (link) return link.networkNodes(query);
     return scanNetwork({ cfg, clientFor, logger: log, options: query });
+  }
+
+  // ------------------------------------------- hub uplink status (v0.8) ---
+  async function hubStatus() {
+    const base = hubLink ? hubLink.status() : { enabled: false, state: 'disabled', url: null };
+    if (!hubLink) return base;
+    const pending = await store.pendingOutbox();
+    return { ...base, pendingOutbox: pending.length, pendingTargets: [...new Set(pending.map((m) => m.to))] };
+  }
+
+  async function hubReconnect() {
+    const link = hub();
+    if (!link) throw new LinkError(409, 'hub_disabled', 'this node is not enrolled in a hub');
+    return link.reconnect();
   }
 
   // ------------------------------------------- directed session bindings (v0.4, bridge) ---
@@ -602,7 +659,7 @@ export function createOps({ cfg, store, roots, logger, dsh = null, commands = nu
     listFiles, statFile, pullFile, pushFile, acceptMessage, deliver,
     dshWorkspaces, dshSessions, dshSession, dshTranscript,
     dshCapabilities, dshCall, dshCallLocal, dshCallResult,
-    networkNodes,
+    networkNodes, hubStatus, hubReconnect, hubLink,
     claimCommands, completeCommand, bridgeBeat, bridgeStatus,
     bindSession, binding
   };

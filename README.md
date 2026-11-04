@@ -39,7 +39,8 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - [Wake a conversation automatically (bridge)](#wake-a-conversation-automatically-bridge)
 - [See and drive the other machine's DSH (0.3)](#see-and-drive-the-other-machines-dsh-03)
 - [Talk to a specific conversation (0.4)](#talk-to-a-specific-conversation-04)
-- [Control DSH from a phone (0.6)](#control-dsh-from-a-phone-06)
+- [Control DSH from a phone (0.6, hub entry 0.8)](#control-dsh-from-a-phone-06-hub-entry-08)
+- [Hub topology: one centre, many nodes (0.8)](#hub-topology-one-centre-many-nodes-08)
 - [NAT traversal with FRP STCP](#nat-traversal-with-frp-stcp)
 - [Command reference](#command-reference)
 - [Security model](#security-model)
@@ -203,7 +204,7 @@ binding, and the sender's bridge routes the answer into that Session. Everything
 command is executed, the fields only pick *where* a prompt goes. Policy, fallbacks, wire format and
 troubleshooting: [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md).
 
-## Control DSH from a phone (0.6+, network-aware in 0.7)
+## Control DSH from a phone (0.6, hub entry 0.8)
 
 The Android app in [`android/`](android/) is a **controller**, not a node: it connects to one
 existing dsh-link node, lists that node's DSH workspaces and sessions, streams a transcript while
@@ -211,7 +212,9 @@ the screen is in the foreground, and sends a message into a conversation through
 channel. There is no background service and no polling while the app is not open; it pulls a
 snapshot plus a `sinceSeq` increment. Since 0.7 the app also discovers the nodes of that node's
 network, can switch to any directly-connected node and browse/control it through the entry node,
-labels subagent Sessions, and folds tool-call rows into expandable groups.
+labels subagent Sessions, and folds tool-call rows into expandable groups. Since app 0.4.0 the URL
+may also point at a **hub**: the app detects `role:"hub"`, lists the enrolled nodes in the same
+picker and relays every read/prompt to the selected node with `peer=<node>` (see the hub section).
 
 ```powershell
 # on the node: allow the phone to read the view and prompt conversations
@@ -219,8 +222,8 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # on a machine with JDK 17+ and Android SDK 36
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-# -> android/dist/dshlink-control-0.3.0-debug.apk
-adb install android\dist\dshlink-control-0.3.0-debug.apk
+# -> android/dist/dshlink-control-0.4.0-debug.apk
+adb install android\dist\dshlink-control-0.4.0-debug.apk
 ```
 
 The node needs `dsh.enabled`, `dsh.exposeWorkspaces`, `dsh.exposeTranscripts`,
@@ -234,6 +237,39 @@ not a public download. Use a `device` token and revoke it if the phone is lost; 
 [`android/README.md`](android/README.md) for setup and
 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) for the API mapping and verification,
 and [`docs/GATEWAY.md`](docs/GATEWAY.md) for the gateway.
+
+## Hub topology: one centre, many nodes (0.8)
+
+A **hub** is a standalone process (`dshlink hub serve`, default port 8790) that nodes enroll into.
+It is the only channel between them: messages go to the hub, which keeps a durable per-target
+outbox, retries while a node is offline, deduplicates by message id, and relays DSH view/capability
+calls and file transfers to the addressed node. This replaces N×N direct peer wiring and gives a
+phone one stable address to connect to.
+
+```powershell
+# on the hub machine (it does not run DSH):
+node bin\dshlink.mjs hub init --name lab-hub --port 8790
+node bin\dshlink.mjs hub token new --role enroll --ttl-hours 2 --json   # one-time node token
+node bin\dshlink.mjs hub serve
+
+# on each node:
+node bin\dshlink.mjs hub enroll --url http://<hub>:8790 --token <enroll token>
+node bin\dshlink.mjs hub status
+node bin\dshlink.mjs tunnel sync      # publishes the node→hub visitor when FRP is configured
+```
+
+Open `http://<hub>:8790/ui` for the **hub console** (log in with an admin token): approve/remove
+nodes, mint and revoke enroll tokens, watch heartbeats and the cache, retry or drop queued messages,
+see running Sessions and edit hub settings (retry/TTL/offline thresholds/enrollment/files). The hub
+never trusts localhost: every API call needs a token, and the console page itself contains no
+secrets.
+
+Nodes heartbeat every 30 s and are marked offline after 90 s; delivery is at least once, so a
+reconnected node receives what was queued for it. Old point-to-point peers keep working while
+`hub.enabled` is `false`; once enrolled, a node sends everything through the hub, refuses
+peer-relayed inbound messages and ignores its `peers` list. The phone app 0.4.0 can point at the hub
+instead of a node. Design, decisions and API: [`docs/HUB-TOPOLOGY-DESIGN.md`](docs/HUB-TOPOLOGY-DESIGN.md);
+console guide: [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md).
 
 ## NAT traversal with FRP STCP
 
@@ -289,6 +325,7 @@ and the dsh-link API itself is never exposed. See [`docs/FRP.md`](docs/FRP.md).
 | `ls` / `pull` / `push` | List a directory, pull a file, push a file (needs `files.allowUpload: true` on the peer) |
 | `audit` | Local audit log (who pulled which file, when) |
 | `tunnel setup\|sync\|status\|share\|import\|stop\|config` | FRP tunnel configuration and process management |
+| `hub init\|serve\|enroll\|status\|nodes\|token\|outbox\|flush\|reconnect\|revoke` | Run/enroll in a hub topology, mint enroll tokens, inspect nodes/heartbeats/the hub outbox, reconnect a node (0.8; hub commands take `--data-dir`) |
 | `invite` / `peers accept --invite <code> [--reply]` | Register both directions from one portable pairing code |
 | `doctor` | Self-check: config, roots, port, MCP, peers, tunnel, DSH view — non-zero exit on failure |
 | `install-dsh [--write]` | Write the MCP entry into the profile patch and install the skill (preview by default) |
@@ -328,6 +365,7 @@ scheduled task (at logon, plus a periodic top-up) to survive reboots.
 | DSH view (0.3) | off | `dsh.enabled`; `dsh.exposeTranscripts` gates conversation bodies |
 | Capability channel (0.3) | off | `capabilities.enabled` + method allow-list; action methods are never allowed by default, per-peer overrides exist, every call is audited |
 | Directed targets (0.4) | bridge: on, any peer | The bridge's `targets.{enabled,peers,allow,deny}` policy decides which peer may address which local Session; set `enabled: false` or narrow `peers`/`allow` to lock it down |
+| Hub topology (0.8) | off | `hub.enabled`; nodes join with a one-time enroll token (2 h / 1 use by default), everything goes through the hub, and the hub never trusts localhost — all hub APIs need a token (admin/enroll/device/peer roles) |
 
 **0.5 closed the loopback bypass.** A tunnel that terminates on loopback no longer turns into an
 unauthenticated admin path: `trustLocalhost` defaults to `false`, and the bridge control plane
@@ -352,6 +390,9 @@ dsh-link/
 │   ├── reload.mjs          # config hot reload
 │   ├── dshview.mjs         # DSH workspaces/sessions/transcripts read straight from disk (0.3)
 │   ├── capabilities.mjs    # capability channel: command queue, policy, audit (0.3)
+│   ├── network.mjs         # network discovery: peers and enrolled nodes (0.7/0.8)
+│   ├── gateway.mjs         # loopback token gateway for phones/relay (0.7)
+│   ├── hub*.mjs            # hub process, config, durable store, FRP, node link, web console (0.8)
 │   └── pairing.mjs         # pairing codes + DSH install (MCP entry / skill / bridge)
 ├── integrations/
 │   ├── dsh-link-bridge/    # DSH Host plugin: wake a conversation on unread messages (0.3: topics + archive; 0.4: directed sessions)
@@ -361,15 +402,15 @@ dsh-link/
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
 ├── android/                # Android controller app (Java, no Gradle dependencies) + build-apk.ps1
-├── test/                   # 22 test files / 166 checks + CLI smoke script
-├── docs/                   # architecture, design, protocol, DSH access, directed conversations, FRP, operations, troubleshooting, mobile
+├── test/                   # 26 test files / 214 checks + CLI smoke script
+├── docs/                   # architecture, design, protocol, DSH access, directed conversations, hub, FRP, operations, troubleshooting, mobile
 └── examples/               # sanitised config samples
 ```
 
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 166 checks (frp/MCP suites skip if absent), ~10 s
+node test/run.mjs                                                        # 214 checks (frp/MCP suites skip if absent), ~13 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
@@ -383,7 +424,10 @@ a built portable bundle and runs an end-to-end pairing against a node on the sam
 
 The suite also covers the 0.4 directed path end to end: envelope fields over HTTP, the loopback
 bind endpoint, `link_reply`'s automatic `targetSession`, and the bridge's targeting, policy
-rejection, fallback and one-batch-many-targets behaviour. `test/mobile-contract.test.mjs` pins the
+rejection, fallback and one-batch-many-targets behaviour. The 0.8 hub suites (`test/hub.test.mjs`,
+`test/bridge-hub.test.mjs`) run a hub with two enrolled nodes in-process: enrollment, two-way
+messages, dedupe/identity, offline queueing, DSH and file proxying, the web console and its admin
+APIs, the CLI surface, and the bridge's `state.json.hub` snapshot + host routes. `test/mobile-contract.test.mjs` pins the
 Android app's node API contract (snapshot + `sinceSeq`, capability call, `device` token boundary);
 it needs `DSH_HOME` pointing at a DSH installation and skips otherwise.
 
@@ -405,6 +449,14 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 - Message counts in the session list are a lower bound (the index reads the head of each log).
 - Directed delivery needs node >= 0.4 to send the fields and node + bridge >= 0.4 on the receiving
   side to honour `targetSession`; older peers store the fields and ignore them.
+- **Hub delivery is at least once.** Dedupe is by message id in the receiver's inbox/outbox; after
+  losing a data directory a receiver can see a message again. The hub does not terminate TLS — put
+  it behind the frp TLS tunnel or your own HTTPS reverse proxy.
+- **Hub console and bridge panel need a restart.** The hub routes served by the DSH Host
+  (`/api/v1/hub/status`, `/api/v1/hub/reconnect`) and the Settings → dsh-link panel are registered
+  by the bridge plugin, so they appear after the DSH Host restarts (the bridge cannot hot-reload).
+- **The pre-0.8 direct-peer path is still the default.** `hub.enabled` is false unless a config
+  sets it; a node cannot run both modes at once.
 - **No end-to-end encryption.** Traffic relies on the transport: loopback, a LAN you control, frp
   STCP with TLS, or your own HTTPS reverse proxy.
 
@@ -418,12 +470,15 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/DSH-INTEGRATION.md`](docs/DSH-INTEGRATION.md) | MCP entry, skill install, bridge install, profile patch mechanics |
 | [`docs/DSH-ACCESS.md`](docs/DSH-ACCESS.md) | The 0.3 switches: read-only view, transcripts, capability actions, threat model |
 | [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md) | 0.4: addressing a peer Session, bindings, the bridge's targets policy, fallbacks, wire format |
+| [`docs/HUB-TOPOLOGY-DESIGN.md`](docs/HUB-TOPOLOGY-DESIGN.md) | 0.8 hub topology: architecture, data flows, hub API, enrollment, FRP, security, decisions |
+| [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md) | The hub web console at `/ui`: enroll tokens, node approval, queue, settings, admin APIs |
+| [`docs/GATEWAY.md`](docs/GATEWAY.md) | The 8788 loopback token gateway used by the phone relay path |
 | [`docs/FRP.md`](docs/FRP.md) | Public `frps` deployment, STCP provider/visitor, TLS, verification |
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom → cause → fix, plus a one-minute health check |
 | [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) | Security audit (0.4, with 0.5 fix status): trust boundaries, token roles, loopback/FRP bypass, hardening checklist |
 | [`docs/MOBILE-CONTROL-FEASIBILITY.md`](docs/MOBILE-CONTROL-FEASIBILITY.md) | Android control-app feasibility study (phase A implemented in 0.6) |
-| [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) | 0.6: the Android controller — architecture, API contract, verification, security, B-phase gaps |
+| [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md) | The Android controller (node 0.7 / hub 0.8): architecture, API contract, verification, security, gaps |
 | [`android/README.md`](android/README.md) | Build/install/use the Android controller app |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Why the pieces look the way they do |
 | [`SECURITY.md`](SECURITY.md) | Trust model and hardening checklist |

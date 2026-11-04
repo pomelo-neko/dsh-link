@@ -1,14 +1,18 @@
 # dsh-link 控制端（Android）
 
-一个**手机控制端**，不是移动版 DSH 节点：它不加入 dsh-link 网络，只连接到一个已经在跑的
-dsh-link 节点，把该节点看到的 DSH 工作区/会话/transcript 显示在手机上，并通过节点的能力通道
+一个**手机控制端**，不是移动版 DSH 节点：它不加入 dsh-link 网络，只连接到一台已经在跑的
+dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务器 hub（0.4.0 新增的 hub 直连
+模式），把入口背后的 DSH 工作区/会话/transcript 显示在手机上，并通过能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.3.0`，minSdk 26，targetSdk 36
+- 包名：`dev.dshlink.control`，版本 `0.4.0`，minSdk 26，targetSdk 36
 - 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX、无第三方依赖**
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
 - 0.3.0：连接后可选择该节点网络里**直连**的其他节点并远程读写/发消息；标注子智能体会话；
   连续的工具调用/结果折叠成一行，点击展开；内置 STCP 中转改指 **8788 token 网关**
+- 0.4.0：连接后先探测 `/api/v1/info`，`role:"hub"` / `software:"dsh-link-hub"` / 带
+  `nodes` 数组的入口自动进入 **hub 模式**：节点下拉来自 hub 登记表，工作区/会话/transcript/
+  发送全部带 `peer=<节点>` 由 hub 转发；默认端口 8790，STCP 模板用 hub 版（本地 18790）
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -38,6 +42,31 @@ dsh-link 节点，把该节点看到的 DSH 工作区/会话/transcript 显示�
 
 0.3.0 内置阿里云 STCP 中转（勾选后不填节点地址，App 自己启动 frpc visitor，落到 8788 网关）；
 经中转连接与收到的真实 DSH 回复见 `docs/mobile/CONTROL-APP.md` §4。
+
+### 1.1 hub 直连模式（0.4.0）
+
+0.4.0 起 App 支持“手机只连中心服务器”：连接任意入口后先 `GET /api/v1/info`，若返回
+`role:"hub"` 或 `software:"dsh-link-hub"`（或带 `nodes` 数组）即进入 hub 模式；否则就是
+0.3.0 的单节点模式，行为不变。
+
+```text
+连接中心服务器 (URL + hub token，默认 http://<hub>:8790)
+  ├─ 节点登记表   GET /api/v1/network/nodes              （去掉 hub 自身）
+  ├─ 能力探测     GET /api/v1/dsh/capabilities?peer=<节点>
+  └─ 工作区列表   GET /api/v1/dsh/workspaces?peer=<节点>
+       └─ 会话/transcript/发送全部带 peer=<节点>
+            ├─ 发送   POST /api/v1/dsh/call {peer, method:"sessions.prompt", params:{…}, waitSeconds:20}
+            └─ 结果   GET /api/v1/dsh/call/{commandId}?peer=<节点>   （App 轮询到终态）
+```
+
+- **默认节点**：`/api/v1/info` 的 `defaultNode`（若已登记且在线）→ 否则第一个在线节点 →
+  否则第一个节点。节点行显示“（在线）/（离线 · 最后心跳 …）”；选中离线节点会提示并回退，
+  不会向 hub 发无谓的转发请求。
+- **失败提示**：节点离线或 hub 回 `502 upstream_unreachable` 时，只在页内显示“读取 <节点>
+  的工作区失败：…”并保留切换节点的能力，不弹模态框；只有 hub 本身不可达/鉴权失败才弹窗。
+- **发送**：hub 模式按设计走 `POST /dsh/call`，`waitSeconds:20`；若 20 秒内没到终态（bridge
+  正在处理），先显示“已提交/由 <节点> 处理”并按 `GET /dsh/call/{id}?peer=` 继续轮询到终态。
+- **登记表为空**：显示“中心服务器还没有登记节点”及 `dshlink hub enroll` 提示，不当作错误。
 
 - **节点选择（0.3.0）**：连接成功后 App 额外拉一次 `/api/v1/network/nodes?depth=2`，把入口节点
   网络里的节点放进“控制节点”下拉框。默认选当前节点（本机直连）；选中另一个**直连**节点后，
@@ -102,6 +131,20 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 | 提交 `/api/v1/dsh/call`（受 `capabilities.methods` 约束） | ✅ |
 | 读消息 inbox / 发消息 / 改 peers / 看 audit / 调 `/bridge/*` | ❌ 403 |
 
+### 2.2b 中心服务器（hub）的 device token
+
+hub 有**独立**的 token 库（与节点 token 不互通）。在跑 hub 的机器上执行：
+
+```powershell
+node bin\dshlink.mjs hub token new --data-dir <hub数据目录> --role device --label phone
+# 也可以 dshlink hub token new --role device --label phone（用默认数据目录）
+```
+
+hub **从不信任 localhost**：即使 App 经 `adb reverse`/STCP 落到 `127.0.0.1:8790`，也必须带
+token；只有 `/healthz` 匿名可读（App 的中转体检探针用它），其余 API 一律要 Bearer token。
+device token 可访问 `/api/v1/info`、`/api/v1/network/nodes`、`/api/v1/dsh/*`、`/dsh/call`
+（能做什么还受目标节点自己的能力白名单约束），不能管理 hub、读 inbox 或碰 bridge 控制面。
+
 > 需要更严格的最小权限时，把 `capabilities.peers["phone"]` 配成只允许 `sessions.prompt`
 > （`peer` 取 token 的 `--label` 或 `--peer`），或把 token 的 `--ttl-days` 缩短；吊销：
 > `node bin\dshlink.mjs token rm --id <id>`。
@@ -117,6 +160,9 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 3. **内置阿里云 STCP 中转（0.2.0 起，0.3.0 改进：跨公网）**：App 自己带 frpc，勾选复选框后
    无需填节点地址，由手机经 frps 连接到节点发布给手机的 STCP provider（`dshlink-phone`），
    落到 **8788 token 网关**。详见 2.4。**不要把明文 8787 直接暴露到公网。**
+4. **中心服务器入口（0.4.0）**：hub 默认 `bind: 127.0.0.1:8790`；手机到达 hub 的方式与节点
+   相同（LAN/VPN/HTTPS 反代/内置 STCP），地址填 `http://<hub>:8790`，token 用 2.2b 的
+   hub device token。hub 对每个请求都校验 token，不信任回环来源。
 
 App 允许 cleartext HTTP（`usesCleartextTraffic="true"`），这是为局域网/VPN/STCP 场景准备的；
 公网路径必须由 STCP 的 TLS 或反代承担加密。
@@ -146,8 +192,18 @@ audit 里能看到真实 device 角色。frps 仍是阿里云 `203.0.113.10:1644
   [`android/tunnel/README.md`](tunnel/README.md)。换环境时必须替换，且**不要把这个 APK
   公开分发**。
 
-App 里的操作：打开 App → 勾选“通过阿里云 STCP 中转至 8788 网关” → 填 device token → 点“连接”。
-URL 输入框会被禁用并显示本地 visitor 地址 `http://127.0.0.1:18788`。首次连接会等待最多 20 秒
+0.4.0 起同一套内置 frpc 也用于 hub：App 从 `assets/tunnel/frpc.toml` 的 `bindPort` 读取本地
+端口（节点模板 18788、hub 模板建议 18790），所以把模板换成 hub 侧发布的 visitor 模板后，
+勾选中转即可连 hub（`serverName` 换成 hub 的 provider 名，如 `dshlink-hub`；证书与 provider
+由负责 hub 的人生成，App 只做 visitor）；勾选后 URL 框被禁用并显示该本地地址。**一个 APK
+只装一套模板**：节点模板（`dshlink-phone`/18788）与 hub 模板（`dshlink-hub`/18790）二选一，
+按目标环境重新生成（本仓库当前还没有“生成 hub 手机 visitor 模板”的命令，需按
+`frp.provider.secretKey` 手工渲染）。hub 的公网落点应只经 STCP/反代，不要把 8790 明文暴露
+到公网。
+
+App 里的操作：打开 App → 勾选“通过阿里云 STCP 中转（内置 frpc…）” → 填 device token →
+点“连接”。URL 输入框会被禁用并显示本地 visitor 地址（节点模板 `http://127.0.0.1:18788`、
+hub 模板 `http://127.0.0.1:18790`）。首次连接会等待最多 20 秒
 让 frpc 登录 frps、注册 visitor；失败时弹窗会带 `frpc` 日志尾部。成功后所有请求都走
 手机 → frps → 节点 provider → 8788 网关，与局域网连接完全相同，只是必须带 device token。
 
@@ -203,8 +259,11 @@ aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 产物：
 
 ```text
-android/dist/dshlink-control-0.3.0-debug.apk
+android/dist/dshlink-control-0.4.0-debug.apk
 ```
+
+`build-apk.ps1` 默认 `-VersionName "0.4.0" -VersionCode 5`（与 `ApiClient.APP_VERSION` 一致，
+发版时两处一起改）。
 
 这是 **debug 签名**的 APK，适合自用/内测；上架或长期分发请换成自己的 release keystore
 （`build-apk.ps1` 里的 `keytool`/`apksigner` 两步）。
@@ -230,12 +289,19 @@ D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.3
 
 ## 4. 使用
 
-1. 打开 App，填节点地址（如 `http://192.0.2.20:8787` 或 `http://100.64.0.5:8787`）
-   和 2.2 生成的 device token，点“连接”。不在同一局域网时勾选“通过阿里云 STCP 中转至 8788
-   网关”，地址框会自动禁用并由 App 启动内置 frpc（见 2.4）。
+1. 打开 App，填入口地址 + token，点“连接”。入口可以是：
+   - **中心服务器（0.4.0，推荐）**：`http://<hub>:8790` + hub device token（2.2b）；不在同一
+     网络时勾选内置 STCP 中转（hub 模板本地端口 18790）。
+   - **单个节点（0.3.0 及更早）**：`http://<节点>:8787` + 节点 device token（2.2），或勾选
+     STCP 中转（节点模板本地端口 18788）。
+   勾选中转后地址框自动禁用，App 启动内置 frpc（见 2.4）。
 2. 连接成功后看到工作区列表；点进工作区看会话；archived 会话默认隐藏，可勾选“显示已归档”。
-   顶部“控制节点”下拉框列出入口节点可见的节点：选另一个**直连**节点即可远程浏览/发消息
-   （0.3.0；经中转的二跳节点只展示不可选）。
+   - **hub 模式**：顶部“控制节点”下拉框列出中心服务器的登记表（不含 hub 自身），默认
+     `defaultNode` 或第一个在线节点；选中后所有读取/发送都带 `peer=<节点>` 由 hub 转发。
+     节点离线时行内标注“（离线 · 最后心跳 …）”，选中会提示并回退；本页“连接/刷新工作区”
+     会重新读取登记表。
+   - **单节点模式**：下拉框列出入口节点网络里可见的节点，选另一个**直连**节点即可远程浏览/
+     发消息（经中转的二跳节点只展示不可选）。
 3. 点会话进入 transcript：
    - 前台时每 2.5 s 自动拉 `sinceSeq` 增量；按返回键/切后台即停止；
    - 顶部“加载更早”向前翻页；
@@ -244,8 +310,10 @@ D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.3
 4. 顶部状态栏会显示当前节点、只读提示或错误原因；token/URL 错误、能力未开、命令超时
    都有对应提示。
 
-App 不保存多个节点配置（只有一组入口 URL + token），也不在后台同步；换入口节点重新填即可。
-远程节点的发送结果不轮询命令 id，只提示“已提交 · 由 <节点> 处理”，回复看 transcript 增量。
+App 不保存多个节点配置（只有一组入口 URL + token），也不在后台同步；换入口重新填即可。
+单节点模式下远程节点的发送结果不轮询命令 id，只提示“已提交 · 由 <节点> 处理”，回复看
+transcript 增量；**hub 模式**会按 `GET /dsh/call/{id}?peer=` 轮询到终态（20 秒内没完成则先
+显示 pending/“已提交”），回复同样看 transcript 增量。
 
 ### 4.1 真机连接（USB / 局域网 / VPN）
 
@@ -292,6 +360,10 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   公开链接。泄露后要换 frps token、重签 mTLS 证书、改 STCP secretKey，并吊销 device token。
 - **token**：device token 存在 App 的 `SharedPreferences`（应用私有，但未加密）；手机丢失
   请在节点上 `token rm --id` 吊销。token 可以只给 30 天有效期。
+- **hub token 与节点 token 是两套**：连 hub 时 App 只携带 hub 的 device token，由 hub 代转；
+  目标节点的权限仍由节点自己的 `capabilities.methods` 决定，hub 不能绕过。hub 的 device token
+  同样应设有效期，手机丢失后在 hub 上吊销（`dshlink hub token` 管理）。hub 默认只 bind
+  `127.0.0.1:8790`，对外请走 VPN/STCP/HTTPS 反代，不要把 8790 明文暴露到公网。
 - **最小权限**：device token 不能读写消息、不能管理 peers、不能碰 bridge 控制面；它仍能读
   **全部未排除的 DSH 工作区与 transcript**——这是 App 的功能本身，只应给自己信任的人装。
 - **节点暴露面**：给手机开 `bind 0.0.0.0` 时，请同时确认：
@@ -310,10 +382,14 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 
 - **没有推送/SSE**：会话更新靠前台每 2.5 s 轮询；退到后台就停止，没有通知栏提醒。
 - **没有离线缓存**：断网后重新进入页面会从头拉。
-- **单入口节点**：一个 App 实例只保存一组入口 URL + token；0.3.0 可以切换到该入口节点的
-  直连 peer，但经其他节点中转（`via` 非空）的二跳节点只展示、不可控制。
-- **远程发送不跟踪命令 id**：远程节点的 `POST /dsh/call` 只返回“已提交”，命令状态在 peer 的
-  队列里；结果通过 transcript 增量看。
+- **单入口**：一个 App 实例只保存一组入口 URL + token；0.3.0 可以切换到该入口节点的直连
+  peer（经其他节点中转的二跳节点只展示、不可控制）；0.4.0 的 hub 模式可切换 hub 登记表里的
+  任意节点，但一次只控制一个。
+- **hub 模式**：只能看到 hub 登记表里的节点；节点离线时只显示状态、不能读取/发送；hub 未提供
+  `/api/v1/network/nodes` 时退化到 `info.nodes`。
+- **远程发送**：单节点模式不跟踪命令 id，只提示“已提交 · 由 <节点> 处理”；hub 模式会轮询
+  `GET /dsh/call/{id}?peer=` 到终态（bridge 慢时先显示 pending）。两种模式最终回复都看
+  transcript 增量。
 - **只做浏览与发消息**：不能新建/重命名/归档会话，不能发附件，不能看文件根。
 - **命令依赖 bridge**：DSH host 或 bridge 不在线时，发送命令会 pending→expired（默认 120 s）。
 - **Android 版本**：minSdk 26（Android 8.0）及以上；targetSdk 36。
@@ -325,7 +401,8 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 ## 7. 验证
 
 - 构建：`android/build-apk.ps1` 退出码 0；`aapt2 dump badging` 显示
-  `package dev.dshlink.control`、`versionName 0.3.0`、`minSdk 26`、`targetSdk 36`。
+  `package dev.dshlink.control`、`versionName 0.4.0`/`versionCode 5`、`minSdk 26`、
+  `targetSdk 36`、`native-code arm64-v8a x86_64`。
 - `apksigner verify --print-certs` 通过。
 - API 契约（本机 node:test，`DSH_HOME` 指向真实 DSH 时运行）：
   `node --test test/mobile-contract.test.mjs` —— 覆盖 App 用到的 info / workspaces / sessions /
@@ -396,4 +473,34 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   - 全程 `logcat` 无崩溃；主界面/会话列表/transcript 截图仅本地留存（`test/.tmp/`，
     含真实主机名/局域网地址，不提交仓库）。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.3.0，与节点/CLI 独立演进（当前节点 0.7.0）。
+- 0.4.0 hub 直连冒烟（2026-11-04，Android 16 / API 36 x86_64 模拟器；hub 为仓库 0.7.0 的
+  `src/hub.mjs`（0.8 拓扑的中心服务器），登记 1 个节点 `NODE-ANDROID`（`dsh.home` 指向
+  真实 DSH），bridge 由 harness 模拟 claim/complete）：
+  - **APK**：`dshlink-control-0.4.0-debug.apk` 11,990,118 bytes；`aapt2 dump badging` 显示
+    `versionCode 5`、`versionName 0.4.0`、`minSdk 26`、`targetSdk 36`；
+    `apksigner verify` 通过（debug 证书）。
+  - **hub 模式**：连 `http://127.0.0.1:18790` + hub device token 后自动进入 hub 模式，状态
+    “已连接 · 12 个工作区 · NODE-ANDROID · 可发送”，summary “中心服务器 HUB-ANDROID ·
+    dsh-link-hub 0.7.0 · 1 个节点 · 1 在线 · 当前 NODE-ANDROID”，下拉“NODE-ANDROID（在线）”；
+    工作区、会话列表、transcript 请求都带 `peer=NODE-ANDROID`（transcript 状态行
+    “NODE-ANDROID（经 HUB-ANDROID）”），与 `/api/v1/dsh/...?peer=` 契约一致。
+  - **hub 发送与终态**：会话内发送消息，App 发 `POST /api/v1/dsh/call {peer, method:
+    "sessions.prompt", params:{sessionId,text}, waitSeconds:20}`；harness bridge 认领并完成
+    后，App 经 `GET /api/v1/dsh/call/{id}?peer=` 拿到 `status:"done"` 并显示“已发送”；
+    hub 日志 `[bridge] completed sessions.prompt cmd_01m6k86fxz5b3b93e337d4`。
+  - **空登记表**：无节点的 hub 上状态“已连接中心服务器 · 还没有登记节点”，summary “0 个节点 ·
+    0 在线”，warning 给出 `dshlink hub enroll`，列表空态“中心服务器还没有登记节点”。
+  - **节点离线**：只登记一个节点且其 link 已关闭的 hub（节点 url 指向已关端口）→ 首次读取在
+    页内显示 502 `upstream_unreachable` + `ECONNREFUSED`（不弹模态、可重试/切换）；等 hub
+    离线阈值（90 s + 120 s）过后点“刷新工作区” → 下拉“NODE-OFFLINE（离线）”、状态“已连接
+    中心服务器 · NODE-OFFLINE 当前离线”、summary “0 在线”、warning 提示检查节点进程/heartbeat、
+    空态“该节点离线，请选择在线节点”，且不再向离线节点发读取请求。
+  - **鉴权**：错误 hub token → 弹窗“鉴权失败：token 无效或已过期”，正文给出 hub 侧
+    `dshlink hub token new --role device --label phone` 与“hub 从不信任 localhost”说明。
+  - **兼容**：同一 APK 连旧单节点入口（真实节点 0.7.0，`http://192.0.2.38:8787`）仍走
+    单节点模式：11 个工作区、可发送。
+  - 全程 `logcat -b crash` 为空、无 `FATAL EXCEPTION`；截图仅本地留存
+    （`android/.tmp/hub-e2e/`，含真实主机地址与临时 token，不入库）。
+
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.4.0，与节点/CLI 独立演进（当前仓库/节点
+> 0.7.0；hub 为 0.8 拓扑的中心服务器实现，hub 直连是 0.4.0 App 的主推入口）。

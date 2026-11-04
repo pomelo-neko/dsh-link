@@ -18,6 +18,13 @@ import { runDoctor } from '../src/doctor.mjs';
 import { createNodeWatcher } from '../src/reload.mjs';
 import { createDshView } from '../src/dshview.mjs';
 import { CAPABILITY_METHODS, createBridgePresence, createCommandQueue } from '../src/capabilities.mjs';
+import {
+  createHubToken, defaultHubConfig, defaultHubDataDir, hubConfigPathFor, loadHubConfig, saveHubConfig
+} from '../src/hubconfig.mjs';
+import { createHub } from '../src/hub.mjs';
+import { HubStore } from '../src/hubstore.mjs';
+import { HubTunnelManager } from '../src/hubfrp.mjs';
+import { createHubLink } from '../src/hublink.mjs';
 
 const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek Harness 互相通信 / talk between DSH machines
 
@@ -53,6 +60,14 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
               dsh result <commandId>         补取异步命令结果
               dsh bridge                     本机 bridge 心跳与命令队列
               dsh enable [--actions m1,m2]   打开 DSH 视图（可选打开动作能力）
+  hub         中心服务器（hub 拓扑）: init | serve | enroll | status | nodes | token | outbox | flush | reconnect | revoke
+              hub init --name --bind --port [--frp-server H --frp-port P --frp-token T]
+              hub serve                                     前台运行中心（Web 控制台在 <url>/ui）
+              hub token new --role enroll --ttl-hours 2     一次性接入 token（默认 TTL 2h）
+              hub enroll --url <hub> --token <t>            本机节点加入中心（之后 dshlink tunnel sync）
+              hub status [--node]                           中心状态 / 本机节点链路状态
+              hub reconnect                                 手动重连中心（本机节点）
+              hub nodes | token list | outbox --pending | flush | revoke <node>
   install-dsh 把 MCP 配置和技能装进 DSH_HOME                   --profile web --url --write（默认只预览）
               token 认证: --token <admin token> [--bridge-token <bridge token>]
               自动唤醒桥（收到消息自动开对话）:              --bridge --bridge-workspace <目录> [--bridge-session <id>]
@@ -115,8 +130,12 @@ async function loadCtx(args, { allowMissing = false, nodeOverrides = {} } = {}) 
   const roots = new FileRoots({ ...cfg.files, maxListEntries: cfg.limits.maxListEntries }, { dshView: dsh });
   const commands = createCommandQueue({ dir: commandsDir, cfg: capabilitySection });
   const presence = createBridgePresence({ dir: commandsDir, cfg: capabilitySection });
-  const ops = createOps({ cfg, store, roots, dsh, commands, presence });
-  return { cfg, store, roots, ops, dsh, commands, presence, sections: { dsh: dshSection, capabilities: capabilitySection } };
+  // A HubLink exists even when hub mode is off so that "dshlink hub enroll" can use it; it only
+  // starts heartbeating when cmdServe calls start() and cfg.hub.enabled is true.
+  const hubLogger = { info: (...a) => console.error(...a), warn: (...a) => console.error(...a), error: (...a) => console.error(...a), debug: () => {} };
+  const hubLink = createHubLink({ cfg, logger: hubLogger, save: async (next) => { await saveConfig(next); } });
+  const ops = createOps({ cfg, store, roots, dsh, commands, presence, hubLink });
+  return { cfg, store, roots, ops, dsh, commands, presence, hubLink, sections: { dsh: dshSection, capabilities: capabilitySection } };
 }
 
 async function cmdInit(args) {
@@ -171,7 +190,7 @@ async function cmdServe(args) {
   const overridePort = flagString(args.port);
   // `commands` must be in scope for the reload callback below: without it a config change
   // updated cfg.dsh / cfg.capabilities but left the queue's startup allowlist in place.
-  const { cfg, store, roots, ops, dsh, commands, sections } = await loadCtx(args, {
+  const { cfg, store, roots, ops, dsh, commands, hubLink, sections } = await loadCtx(args, {
     nodeOverrides: { bind: flagString(args.bind), port: overridePort !== undefined ? Number(overridePort) : undefined }
   });
   const persisted = sealTokens(cfg);
@@ -247,6 +266,21 @@ async function cmdServe(args) {
     const result = await tunnel.relaunch();
     console.log(`  tunnel       : ${result.running ? `frpc pid ${result.pid}` : `not running (${result.reason ?? 'unknown'})`}`);
   }
+  if (hubLink.enabled) {
+    hubLink.onOnline = async () => {
+      try {
+        const flushed = await ops.flush({});
+        if (flushed.attempted) logger.info(`[hub] flushed ${flushed.attempted} queued message(s) after the link came up`);
+      } catch (error) {
+        logger.warn('[hub] flushing the outbox after reconnect failed: ' + (error?.message ?? error));
+      }
+    };
+    hubLink.start();
+    const hubState = hubLink.status();
+    console.log(`  hub          : ${hubState.url} (${hubState.state})`);
+  } else if (cfg.hub?.url) {
+    console.log(`  hub          : ${cfg.hub.url} (not enrolled; run "dshlink hub enroll")`);
+  }
   let timer = null;
   if (autoSyncSec > 0) {
     const tick = async () => {
@@ -265,12 +299,246 @@ async function cmdServe(args) {
   const shutdown = async (signal) => {
     console.log(`\nreceived ${signal}, shutting down`);
     if (timer) clearInterval(timer);
+    if (hubLink.enabled) hubLink.stop();
     if (gateway) await gateway.close();
     await link.close();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+// ------------------------------------------------------------------ hub ---
+// The hub is a separate process (dshlink hub serve) with its own config. Node-side commands
+// (enroll/status --node/reconnect) reuse the normal node config through loadCtx.
+function hubOptions(args) {
+  return {
+    configPath: flagString(args.config) ?? process.env.DSHLINK_HUB_CONFIG,
+    dataDir: flagString(args['data-dir']) ?? process.env.DSHLINK_HUB_HOME
+  };
+}
+
+async function loadHubCtx(args) {
+  const opts = hubOptions(args);
+  const cfg = await loadHubConfig(opts);
+  cfg.configPath = hubConfigPathFor({ configPath: opts.configPath, dataDir: cfg.dataDir });
+  const store = await new HubStore(cfg.dataDir).init();
+  return { cfg, store };
+}
+
+async function cmdHub(args) {
+  const sub = args._[0] ?? 'status';
+  const asJson = flagBool(args.json);
+  const logger = cliLogger(asJson);
+  const opts = hubOptions(args);
+
+  if (sub === 'init') {
+    const dataDir = path.resolve(opts.dataDir ?? defaultHubDataDir());
+    const cfg = defaultHubConfig({
+      dataDir,
+      name: flagString(args.name) ?? 'hub',
+      bind: flagString(args.bind) ?? '127.0.0.1',
+      port: Number(flagString(args.port) ?? 8790),
+      publicUrl: flagString(args['public-url']) ?? null
+    });
+    const file = hubConfigPathFor({ configPath: opts.configPath, dataDir });
+    cfg.configPath = file;
+    if (!cfg.frp.provider.secretKey || flagBool(args['reset-provider'])) cfg.frp.provider.secretKey = randomToken(24);
+    const frpServer = flagString(args['frp-server']);
+    if (frpServer) {
+      cfg.frp.enabled = true;
+      cfg.frp.serverAddr = frpServer;
+      const frpPort = flagString(args['frp-port']);
+      if (frpPort) cfg.frp.serverPort = Number(frpPort);
+      const frpToken = flagString(args['frp-token']);
+      if (frpToken) cfg.frp.token = frpToken;
+      const frpProvider = flagString(args['frp-provider']);
+      if (frpProvider) cfg.frp.provider.name = frpProvider;
+    }
+    const admin = createHubToken(cfg, 'admin', { role: 'admin' });
+    await saveHubConfig(cfg);
+    out({ config: file, dataDir: cfg.dataDir, url: 'http://' + cfg.bind + ':' + cfg.port, name: cfg.name, adminToken: admin.token, adminTokenId: admin.id, frp: cfg.frp }, asJson, [
+      'dsh-link hub initialised: ' + cfg.name,
+      '  config      ' + file,
+      '  data dir    ' + cfg.dataDir,
+      '  listen      http://' + cfg.bind + ':' + cfg.port,
+      '  frp         ' + (cfg.frp.enabled ? cfg.frp.serverAddr + ' (provider ' + cfg.frp.provider.name + ', secretKey ' + cfg.frp.provider.secretKey + ')' : 'off (set --frp-server to publish through frps)'),
+      '  admin token ' + admin.token + '   (id ' + admin.id + '; shown once)',
+      '',
+      'next:',
+      '  dshlink hub serve',
+      '  dshlink hub token new --role enroll --ttl-hours 2   # one-time token for a node',
+      '  on each node: dshlink hub enroll --url <hub url> --token <enroll token>'
+    ].join('\n'));
+    return;
+  }
+
+  if (sub === 'serve') {
+    const { cfg, store } = await loadHubCtx(args);
+    const hub = createHub({ cfg, store, logger, saveConfig: async (next) => { await saveHubConfig(next); } });
+    const info = await hub.listen({ port: cfg.port, bind: cfg.bind });
+    const nodes = await store.listNodes();
+    console.log('dsh-link hub "' + cfg.name + '" listening on ' + info.url);
+    console.log('  console      : ' + (cfg.publicUrl ?? info.url).replace(/\/+$/, '') + '/ui');
+    console.log('  nodes        : ' + nodes.length + ' enrolled');
+    console.log('  enrollment   : ' + (cfg.enrollment.enabled ? 'on (mode ' + cfg.enrollment.mode + ', autoApprove ' + cfg.enrollment.autoApprove + ', max ' + cfg.enrollment.maxNodes + ')' : 'off'));
+    console.log('  files        : ' + (cfg.files.enabled ? 'on via hub proxy (max ' + formatBytes(cfg.files.maxBytes) + ')' : 'off'));
+    console.log('  frp          : ' + (cfg.frp.enabled ? cfg.frp.serverAddr + ':' + (cfg.frp.serverPort ?? 7000) + ' (provider ' + cfg.frp.provider.name + ')' : 'off (static node URLs only)'));
+    console.log('  config       : ' + cfg.configPath);
+    const shutdown = async (signal) => {
+      console.log('\nreceived ' + signal + ', shutting down');
+      await hub.close();
+      process.exit(0);
+    };
+    process.on('SIGINT', () => void shutdown('SIGINT'));
+    process.on('SIGTERM', () => void shutdown('SIGTERM'));
+    return;
+  }
+
+  if (sub === 'enroll') {
+    const { cfg, hubLink } = await loadCtx(args);
+    const url = flagString(args.url) ?? flagString(args._[1]);
+    const token = flagString(args.token) ?? flagString(args['enroll-token']);
+    if (!url) throw new LinkError(2, 'missing_argument', 'hub enroll needs --url <hub url>');
+    if (!token) throw new LinkError(2, 'missing_argument', 'hub enroll needs --token <enrollment token>');
+    const result = await hubLink.enroll({ url, token, downlinkUrl: flagString(args['downlink-url']) ?? null });
+    const enrolled = cfg.hub.enrolled ?? null;
+    const lines = [
+      'enrolled with hub ' + (result.hub?.name ?? '?') + ' as ' + (enrolled?.nodeName ?? cfg.name),
+      '  hub url     ' + cfg.hub.url,
+      '  status      ' + (enrolled?.status ?? 'active'),
+      '  visitor     ' + (enrolled?.visitorPort ?? '-')
+    ];
+    if (cfg.hub.frp?.serverName) lines.push('', 'next: dshlink tunnel sync   # publish the to-hub visitor (bind 127.0.0.1:' + (cfg.hub.visitorPort ?? 18790) + ')');
+    lines.push('then restart the node: dshlink serve');
+    out({ hub: result.hub, node: result.result?.node ?? null, enrolled, hubConfig: cfg.hub }, asJson, lines.join('\n'));
+    return;
+  }
+
+  if (sub === 'status' && flagBool(args.node)) {
+    const { ops } = await loadCtx(args);
+    const status = await ops.hubStatus();
+    out(status, asJson, [
+      'hub ' + (status.enabled ? status.state : 'disabled') + (status.url ? ' ' + status.url : ''),
+      '  last heartbeat ' + (status.lastHeartbeatAt ?? '-'),
+      '  last error     ' + (status.lastError ?? '-'),
+      '  queued         ' + (status.pendingOutbox ?? 0) + ' message(s)',
+      '  enrolled as    ' + (status.enrolled?.hubName ?? '-') + ' / ' + (status.enrolled?.nodeName ?? '-')
+    ].join('\n'));
+    return;
+  }
+
+  if (sub === 'reconnect') {
+    const { hubLink } = await loadCtx(args);
+    const status = await hubLink.reconnect();
+    out(status, asJson, 'hub reconnect: ' + status.state + (status.url ? ' ' + status.url : ''));
+    return;
+  }
+
+  if (sub === 'flush') {
+    const { cfg, store } = await loadHubCtx(args);
+    const hub = createHub({ cfg, store, logger, saveConfig: async (next) => { await saveHubConfig(next); } });
+    const result = await hub.flushPending({ force: true });
+    out(result, asJson, 'flush attempted ' + result.attempted + ', delivered ' + result.delivered + ', failed ' + result.failed + ', pending ' + result.pending);
+    return;
+  }
+
+  const { cfg, store } = await loadHubCtx(args);
+
+  if (sub === 'status') {
+    const hub = createHub({ cfg, store, logger, saveConfig: async (next) => { await saveHubConfig(next); } });
+    const status = await hub.status();
+    out(status, asJson, [
+      'hub ' + status.hub.name + ' (' + status.hub.nodeId + ')',
+      '  version    ' + status.hub.softwareVersion,
+      '  nodes      ' + status.nodes.length + ' registered',
+      '  outbox     ' + (status.counts?.outboxPending ?? 0) + ' pending',
+      '  enrollment ' + (status.enrollment?.enabled ? 'on (autoApprove ' + status.enrollment.autoApprove + ')' : 'off'),
+      '  frp        ' + (status.frp?.enabled ? (status.frp.running ? 'running pid ' + status.frp.pid : 'not running (' + (status.frp.reason ?? 'unknown') + ')') : 'off'),
+      '  console    ' + (cfg.publicUrl ?? ('http://' + cfg.bind + ':' + cfg.port)).replace(/\/+$/, '') + '/ui',
+      '  config     ' + cfg.configPath
+    ].join('\n'));
+    return;
+  }
+
+  if (sub === 'nodes') {
+    const nodes = await store.listNodes();
+    const rows = nodes.map((n) => ({
+      name: n.name,
+      status: n.status ?? 'active',
+      url: n.url ?? '',
+      visitor: n.visitorPort ?? '',
+      heartbeat: n.lastHeartbeatAt ?? '',
+      version: n.softwareVersion ?? ''
+    }));
+    out({ count: nodes.length, nodes }, asJson, table(rows, [
+      { header: 'NAME', key: 'name' }, { header: 'STATUS', key: 'status' }, { header: 'URL', key: 'url' },
+      { header: 'VISITOR', key: 'visitor' }, { header: 'LAST HEARTBEAT', key: 'heartbeat' }, { header: 'VERSION', key: 'version' }
+    ]));
+    return;
+  }
+
+  if (sub === 'token') {
+    const action = args._[1] ?? 'list';
+    if (action === 'new') {
+      const role = flagString(args.role) ?? 'admin';
+      const peer = flagString(args.peer) ?? undefined;
+      const hours = Number(flagString(args['ttl-hours']) ?? (role === 'enroll' ? 2 : 0));
+      const maxUses = flagString(args['max-uses']) ? Number(flagString(args['max-uses'])) : (role === 'enroll' ? 1 : undefined);
+      const label = flagString(args.label) ?? role;
+      const expiresAt = hours > 0 ? new Date(Date.now() + hours * 3_600_000).toISOString() : undefined;
+      const token = createHubToken(cfg, label, { role, peer, expiresAt, maxUses });
+      await saveHubConfig(cfg);
+      out({ id: token.id, token: token.token, label: token.label, role: token.role, peer: token.peer, expiresAt: token.expiresAt, maxUses: token.maxUses }, asJson, [
+        'hub token created',
+        '  id       ' + token.id,
+        '  role     ' + token.role + (token.peer ? ' peer=' + token.peer : ''),
+        '  expires  ' + (token.expiresAt ?? 'never'),
+        '  token    ' + token.token + '   (shown once)'
+      ].join('\n'));
+      return;
+    }
+    if (action === 'rm') {
+      const id = flagString(args.id);
+      const before = cfg.auth.tokens.length;
+      cfg.auth.tokens = cfg.auth.tokens.filter((t) => t.id !== id);
+      if (cfg.auth.tokens.length === before) throw new LinkError(404, 'not_found', 'no hub token ' + id);
+      await saveHubConfig(cfg);
+      out({ removed: id }, asJson, 'removed hub token ' + id);
+      return;
+    }
+    const rows = cfg.auth.tokens.map((t) => ({ id: t.id, label: t.label, role: t.role, peer: t.peer ?? '', expiresAt: t.expiresAt ?? '' }));
+    out({ count: rows.length, tokens: cfg.auth.tokens.map((t) => ({ id: t.id, label: t.label, role: t.role, peer: t.peer, expiresAt: t.expiresAt, maxUses: t.maxUses })) }, asJson, table(rows, [
+      { header: 'ID', key: 'id' }, { header: 'LABEL', key: 'label' }, { header: 'ROLE', key: 'role' },
+      { header: 'PEER', key: 'peer' }, { header: 'EXPIRES', key: 'expiresAt' }
+    ]));
+    return;
+  }
+
+  if (sub === 'outbox') {
+    const pendingOnly = flagBool(args.pending);
+    const limit = Math.min(500, Math.max(1, Number(flagString(args.limit) ?? 50) || 50));
+    const result = await store.listOutbox({ limit, pendingOnly });
+    const messages = result.messages ?? [];
+    const rows = messages.map((r) => ({ ts: r.ts, id: r.id, to: r.to, thread: r.thread ?? '', state: r.delivery?.state ?? '' }));
+    out({ count: messages.length, total: result.total ?? messages.length, pendingOnly, messages }, asJson, table(rows, [
+      { header: 'TIME', key: 'ts' }, { header: 'ID', key: 'id' }, { header: 'TO', key: 'to' },
+      { header: 'THREAD', key: 'thread' }, { header: 'STATE', key: 'state' }
+    ]));
+    return;
+  }
+
+  if (sub === 'revoke') {
+    const name = args._[1] ?? flagString(args.name);
+    if (!name) throw new LinkError(2, 'missing_argument', 'hub revoke needs the node name');
+    const removed = await store.removeNode(name);
+    if (!removed) throw new LinkError(404, 'not_found', 'no such node: ' + name);
+    await store.audit({ event: 'hub_node_revoked', node: name });
+    out({ removed: name }, asJson, 'revoked node ' + name + ' (its uplink token still exists: dshlink hub token rm --id <id>)');
+    return;
+  }
+
+  throw new LinkError(2, 'unknown_subcommand', 'unknown: hub ' + sub + ' (try: init | serve | enroll | status | reconnect | nodes | token | outbox | flush | revoke)');
 }
 
 async function cmdStatus(args) {
@@ -971,7 +1239,7 @@ const COMMANDS = {
   init: cmdInit, serve: cmdServe, status: cmdStatus, peers: cmdPeers, token: cmdToken,
   send: cmdSend, bind: cmdBind, inbox: cmdInbox, show: cmdShow, sync: cmdSync, flush: cmdFlush, outbox: cmdOutbox,
   ls: cmdLs, pull: cmdPull, push: cmdPush, audit: cmdAudit, tunnel: cmdTunnel,
-  invite: cmdInvite, doctor: cmdDoctor, harden: cmdHarden, 'install-dsh': cmdInstallDsh, dsh: cmdDsh,
+  invite: cmdInvite, doctor: cmdDoctor, harden: cmdHarden, 'install-dsh': cmdInstallDsh, dsh: cmdDsh, hub: cmdHub,
   help: async (args) => { out({}, flagBool(args.json), HELP); }
 };
 

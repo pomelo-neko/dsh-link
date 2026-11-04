@@ -13,12 +13,14 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Minimal blocking dsh-link HTTP client. Every method must be called from a worker thread.
- * The node speaks JSON over HTTP; a 0.5+ node expects "Authorization: Bearer <device|admin token>".
+ * Both a 0.7+ node and a 0.8+ hub speak JSON over HTTP and expect
+ * "Authorization: Bearer <device|admin token>"; a hub never trusts localhost, so the token is
+ * always required.
  */
 final class ApiClient {
     private static final int CONNECT_TIMEOUT_MS = 8000;
     private static final int READ_TIMEOUT_MS = 60000;
-    static final String APP_VERSION = "0.3.0";
+    static final String APP_VERSION = "0.4.0";
 
     private final String baseUrl;
     private final String token;
@@ -70,7 +72,7 @@ final class ApiClient {
             try {
                 json = text.isEmpty() ? new JSONObject() : new JSONObject(text);
             } catch (JSONException err) {
-                throw new ApiException(status, "节点返回的不是 JSON（HTTP " + status + "）", "bad_response");
+                throw new ApiException(status, "服务器返回的不是 JSON（HTTP " + status + "）", "bad_response");
             }
             if (status >= 400) throw new ApiException(status, errorMessage(json, status), errorCode(json));
             return json;
@@ -78,7 +80,7 @@ final class ApiClient {
             throw err;
         } catch (IOException err) {
             String reason = err.getMessage() == null ? err.getClass().getSimpleName() : err.getMessage();
-            throw new ApiException(0, "无法连接节点：" + reason, "network_error");
+            throw new ApiException(0, "无法连接服务器：" + reason, "network_error");
         } catch (RuntimeException err) {
             String reason = err.getMessage() == null ? err.getClass().getSimpleName() : err.getMessage();
             throw new ApiException(0, "请求失败：" + reason, "network_error");

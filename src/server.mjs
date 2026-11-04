@@ -12,10 +12,11 @@ const OPEN_PATHS = new Set(['/healthz']);
 // Role-based authorisation (v0.5.0). A route without an explicit role list is admin-only, so a
 // newly added route cannot accidentally become world-readable. Legacy tokens have no role and
 // are treated as admin by verifyToken(); loopback/open (trustLocalhost) callers are admin too.
-const ALL_ROLES = ['admin', 'bridge', 'peer', 'device'];
-const READ_ROLES = ['admin', 'bridge', 'peer'];
-const DSH_ROLES = ['admin', 'peer', 'device'];
+const ALL_ROLES = ['admin', 'bridge', 'peer', 'device', 'hub'];
+const READ_ROLES = ['admin', 'bridge', 'peer', 'hub'];
+const DSH_ROLES = ['admin', 'peer', 'device', 'hub'];
 const BRIDGE_ROLES = ['admin', 'bridge'];
+const FILE_ROLES = ['admin', 'peer', 'hub'];
 
 function roleOf(auth) {
   if (auth?.token?.role) return auth.token.role;
@@ -29,17 +30,17 @@ function routeRoleTable() {
     ['GET ' + API_PREFIX + '/peers', ['admin']],
     ['GET ' + API_PREFIX + '/network/nodes', DSH_ROLES],
     ['GET ' + API_PREFIX + '/status', ['admin']],
-    ['POST ' + API_PREFIX + '/messages', ['admin', 'peer']],
+    ['POST ' + API_PREFIX + '/messages', ['admin', 'peer', 'hub']],
     ['GET ' + API_PREFIX + '/messages', READ_ROLES],
     ['GET ' + API_PREFIX + '/messages/:id', READ_ROLES],
     ['POST ' + API_PREFIX + '/messages/read', READ_ROLES],
     ['POST ' + API_PREFIX + '/messages/:id/read', READ_ROLES],
-    ['GET ' + API_PREFIX + '/outbox', ['admin', 'peer']],
-    ['GET ' + API_PREFIX + '/files', ['admin', 'peer']],
-    ['GET ' + API_PREFIX + '/files/stat', ['admin', 'peer']],
-    ['GET ' + API_PREFIX + '/files/hash', ['admin', 'peer']],
-    ['GET ' + API_PREFIX + '/files/download', ['admin', 'peer']],
-    ['POST ' + API_PREFIX + '/files/upload', ['admin', 'peer']],
+    ['GET ' + API_PREFIX + '/outbox', ['admin', 'peer', 'hub']],
+    ['GET ' + API_PREFIX + '/files', FILE_ROLES],
+    ['GET ' + API_PREFIX + '/files/stat', FILE_ROLES],
+    ['GET ' + API_PREFIX + '/files/hash', FILE_ROLES],
+    ['GET ' + API_PREFIX + '/files/download', FILE_ROLES],
+    ['POST ' + API_PREFIX + '/files/upload', FILE_ROLES],
     ['GET ' + API_PREFIX + '/audit', ['admin']],
     ['GET ' + API_PREFIX + '/dsh/workspaces', DSH_ROLES],
     ['GET ' + API_PREFIX + '/dsh/sessions', DSH_ROLES],
@@ -54,6 +55,8 @@ function routeRoleTable() {
     ['POST ' + API_PREFIX + '/bridge/heartbeat', BRIDGE_ROLES],
     ['POST ' + API_PREFIX + '/bridge/bind', BRIDGE_ROLES],
     ['GET ' + API_PREFIX + '/bridge/bind', BRIDGE_ROLES],
+    ['GET ' + API_PREFIX + '/hub/status', BRIDGE_ROLES],
+    ['POST ' + API_PREFIX + '/hub/reconnect', BRIDGE_ROLES],
     ['POST /mcp', ['admin']],
     ['GET /mcp', ['admin']],
     ['DELETE /mcp', ['admin']]
@@ -217,7 +220,14 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   add('POST', `${API_PREFIX}/messages`, async (ctx) => {
     const record = await readJson(ctx.req, cfg.limits.maxMessageBytes);
     const peer = boundPeer(ctx.auth);
-    if (peer) {
+    if (roleOf(ctx.auth) === 'hub') {
+      // The hub delivers third-party messages to this node: the sender name must stay intact, so
+      // the peer-bound identity check does not apply. A hub token may only hand messages to us.
+      if (!record || typeof record !== 'object') throw badRequest('a message record is required');
+      const to = String(record.to ?? '');
+      const local = ops.isSelf(to) || to === '*' || to === '';
+      if (!local) throw new LinkError(403, 'relay_not_allowed', 'the hub token may only deliver messages addressed to this node');
+    } else if (peer) {
       if (!record || typeof record !== 'object') throw badRequest('a message record is required');
       const claimed = String(record.from?.name ?? '').trim();
       if (claimed && claimed !== peer) throw new LinkError(403, 'identity_mismatch', `this token belongs to peer "${peer}", not "${claimed}"`);
@@ -506,6 +516,20 @@ export function createLinkServer({ cfg, store, roots, ops, logger, refresh, runt
   add('GET', `${API_PREFIX}/bridge/bind`, async (ctx) => {
     requireBridge(ctx);
     sendJson(ctx.res, 200, await ops.binding({ thread: ctx.url.searchParams.get('thread') ?? '' }));
+  });
+
+  // Hub uplink control plane (v0.8). Same-machine only: the DSH GUI host half and the bridge
+  // poll these to render the hub panel and to offer a manual reconnect.
+  add('GET', `${API_PREFIX}/hub/status`, async (ctx) => {
+    requireBridge(ctx);
+    sendJson(ctx.res, 200, { ...(await ops.hubStatus()), bridge: await ops.bridgeStatus(), now: nowIso() });
+  });
+
+  add('POST', `${API_PREFIX}/hub/reconnect`, async (ctx) => {
+    requireBridge(ctx);
+    const result = await ops.hubReconnect();
+    audit({ event: 'hub_reconnect', state: result.state ?? null, url: result.url ?? null, by: ctx.auth.token?.label ?? 'localhost' });
+    sendJson(ctx.res, 200, result);
   });
 
   add('POST', '/mcp', async (ctx) => {

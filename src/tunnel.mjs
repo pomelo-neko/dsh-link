@@ -125,6 +125,24 @@ export function frpConfigToml(cfg) {
     lines.push('transport.useEncryption = true');
     lines.push('transport.useCompression = false');
   }
+  const hub = cfg.hub;
+  const hubFrp = hub?.frp;
+  if (hub?.enabled === true && hubFrp?.serverName && hubFrp?.secretKey) {
+    // Hub topology: the node's only outbound peer channel is the hub. Its STCP visitor binds
+    // 127.0.0.1:<hub.visitorPort>, and hub.url normally points at that local port.
+    lines.push('');
+    lines.push('# --- visitor: reach the hub through frps ---');
+    lines.push('[[visitors]]');
+    lines.push(`name = ${tomlString('to-hub')}`);
+    lines.push('type = "stcp"');
+    lines.push(`serverName = ${tomlString(hubFrp.serverName)}`);
+    lines.push(`secretKey = ${tomlString(hubFrp.secretKey)}`);
+    lines.push('bindAddr = "127.0.0.1"');
+    lines.push(`bindPort = ${Number(hub.visitorPort ?? 18790)}`);
+    lines.push('transport.useEncryption = true');
+    lines.push('transport.useCompression = false');
+    lines.push('');
+  }
   const visitors = visitorsFor(cfg);
   if (visitors.length) {
     lines.push('');

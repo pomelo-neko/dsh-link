@@ -32,6 +32,9 @@ export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.dshlink', '.
 /** Repository paths that are vendored binaries or generated, so they are not part of a sync. */
 export const SKIP_PATTERNS = [
   /^test[\\/]\.tmp[\\/]/,
+  // Android emulator smoke artifacts (hub/node harness data, screenshots, uiautomator dumps) are
+  // local scratch under android/.tmp and are ignored by android/.gitignore as well.
+  /^android[\\/]\.tmp[\\/]/,
   /^vendor[\\/]frp[\\/][^\\/]+-amd64[\\/]/,
   // The Android controller app is built with SDK command-line tools into android/dist; that build
   // output (classes, dex, zip) must never be copied into the deployed node tree.
@@ -49,7 +52,8 @@ export const LOCAL_PATTERNS = [
   /^README\.local\./,
   /^local[\\/]/,
   /\.local\.[^\\/]*$/,
-  /^test[\\/]\.tmp[\\/]/
+  /^test[\\/]\.tmp[\\/]/,
+  /^android[\\/]\.tmp[\\/]/
 ];
 
 function matches(patterns, relative) {

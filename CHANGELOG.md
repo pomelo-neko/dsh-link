@@ -9,6 +9,91 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-04
+
+The "one centre, many nodes" release. dsh-link gains a **hub topology**: a standalone hub process
+that nodes enroll into, keeps a durable per-target outbox with heartbeats and retries, and relays
+messages, DSH view/capability calls and file transfers between nodes. The hub ships its own web
+console, the bridge plugin exposes the hub link in the DSH Web GUI, and the Android app can point at
+a hub instead of a node (0.4.0). The old point-to-point setup keeps working while `hub.enabled` is
+false.
+
+### Added
+
+- **Hub process (`dshlink hub`).** New `src/hub.mjs`, `src/hubconfig.mjs`, `src/hubstore.mjs`,
+  `src/hubfrp.mjs` and `src/hublink.mjs`. `hub init --name --port` writes
+  `dshlink-hub.config.json` (admin token, optional FRP provider secret); `hub serve` listens on
+  one port (default 8790; the FRP visitor for phones is 18790) with `/healthz`, `/api/v1/*` and the web console at `/ui`. The hub
+  never runs DSH and never reads a node's disk: it only relays/queues (D9).
+- **Enrollment.** One-time `role:"enroll"` tokens (TTL 2 h, 1 use by default) from
+  `dshlink hub token new --role enroll` or the console; `POST /api/v1/hub/enroll` returns the
+  node's uplink peer token while the node stores a hub downlink token. Auto-approve is on by
+  default (`enrollment.autoApprove=false` gives pending/approve flow), with `maxNodes`, per-minute
+  rate limit and token revocation. Node side: `dshlink hub enroll --url --token`,
+  `hub status`, `hub reconnect`; nodes appear as pending/active/offline in
+  `GET /api/v1/hub/nodes`.
+- **Durable hub outbox and heartbeats.** Messages are stored per target and retried every 5 s
+  (`retrySeconds`), expire after 7 days (`messageTtlSeconds`), are capped per target
+  (`maxPendingPerTarget`), and are delivered at least once with `relay_through_hub`, message-id
+  dedupe and an identity check (`identity_mismatch`). Nodes heartbeat every 30 s, are marked
+  offline after 90 s (`offlineAfterSeconds`), reconnect with exponential backoff
+  (5–60 s) and flush their own queue on reconnect. `hub outbox --pending`, `hub flush`,
+  `GET /api/v1/hub/outbox` and the console expose the queue.
+- **Relayed DSH and files.** The hub proxies `GET /api/v1/dsh/{info,workspaces,sessions,…}`,
+  `GET /api/v1/dsh/call/:id` and `POST /api/v1/dsh/call` with `peer=<node>`, and streams
+  file list/stat/hash/download/upload through the target node. The role matrix is
+  admin/enroll/device/peer; a node in hub mode delivers only through the hub (no direct peer
+  delivery, relay or peer sync) and `GET /api/v1/network/nodes` reports the enrolled table so a
+  controller can pick a node. A node's `hub` config block
+  (`enabled/url/token/timeoutMs/heartbeatSeconds/reconnect/visitorPort/peersIgnored`) is off by
+  default; `dshlink tunnel sync` publishes the node→hub visitor once enrolled and the hub manages
+  its own frpc provider/visitors.
+- **Hub web console (`/ui`).** A dependency-free single page served by the hub (also `GET /` →
+  302): admin-token login, node approval/removal, **enroll-token minting and revocation**, hub
+  status, per-target cache retry/drop/flush, running-Session aggregate, whitelisted settings editor
+  and recent audit. Admin APIs: `GET /api/v1/hub/config`, `PATCH /api/v1/hub/settings`,
+  `GET|POST /api/v1/hub/tokens`, `DELETE /api/v1/hub/tokens/:id`, `POST /api/v1/hub/flush`,
+  `POST /api/v1/hub/outbox/:id/retry`, `DELETE /api/v1/hub/outbox/:id`,
+  `GET /api/v1/hub/sessions/running`. The page contains no secrets, sends a strict CSP and
+  requires the admin token on every API call; verified with 18 headless-Edge/CDP checks (login,
+  mint, enroll, pending retry/drop, settings save, revoke, logout, zero JS errors). New
+  `docs/HUB-CONSOLE.md` and `docs/images/hub-console.png`; design write-up §5.9 of
+  `docs/HUB-TOPOLOGY-DESIGN.md`.
+- **Bridge plugin 0.8.0.** The plugin polls the local node for `state.hub`
+  (url/state/last heartbeat/error/pending/enrolled) and exposes it through its capability status;
+  it registers `GET /api/v1/hub/status` and `POST /api/v1/hub/reconnect` on the DSH web server
+  (`ctx.inject(['webServer'])`) and adds a **Settings → dsh-link** panel in the DSH Web GUI with
+  hub URL, link state, last heartbeat/error, pending queue and a reconnect button. `sessions.list`
+  passes the Host's `running` flag through when reported. `test/bridge-hub.test.mjs` (16 tests).
+  The Host routes and panel appear after the DSH Host restarts.
+- **Android control app 0.4.0.** When the URL points at a hub (`role:"hub"` in
+  `GET /api/v1/info`) the app works as a hub controller: the enrolled nodes come from
+  `GET /api/v1/network/nodes`, every DSH read carries `peer=<node>`, prompts go to
+  `POST /api/v1/dsh/call {peer, method:"sessions.prompt", params:{sessionId,text,mode}}` and the
+  command result is polled with `GET /api/v1/dsh/call/:id?peer=`; offline nodes are marked and
+  skipped until refresh. The same APK still connects to a 0.7 node in single-node mode.
+  APK `dshlink-control-0.4.0-debug.apk` (`versionCode 5`, 11,990,118 bytes), verified against a
+  real `src/hub.mjs` hub on the Android 16 emulator (send reached the node's bridge and returned
+  `done`, empty/offline/401 edges and no crash in logcat).
+- **CLI, docs and skill.** `dshlink hub` command family (`init/serve/enroll/status/nodes/token/
+  outbox/flush/reconnect/revoke`); `docs/HUB-TOPOLOGY-DESIGN.md` (design v2, decisions D1–D13,
+  N1–N6); `docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`, `docs/DSH-INTEGRATION.md`,
+  `docs/index.md`, both READMEs, the bridge README, the Android README and
+  `integrations/dsh-skill/SKILL.md` (files >10 MiB are not sent through the hub unless the user
+  explicitly asks, N3).
+
+### Changed
+
+- **Version 0.8.0** for the node/CLI and the bridge plugin; the Android app is 0.4.0.
+- **Hub mode is the only channel when enrolled.** With `hub.enabled=true` the node sends
+  everything through the hub, refuses peer-relayed inbound messages (`relay_through_hub`), treats
+  `sync` as a no-op and logs that `peers` is ignored; disable the hub section to return to the
+  0.7 point-to-point behavior.
+- `GET /api/v1/network/nodes` on a hub returns the enrolled node table (name/status/latency/
+  version) instead of a peer graph; the Android app understands both shapes.
+- Health, audit, token and queue commands accept `--data-dir` for hub instances so a hub and a node
+  can be inspected side by side.
+
 ## [0.7.0] — 2026-11-04
 
 The "see the whole network and control it safely" release. A controller can now discover every
@@ -452,7 +537,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.0
 [0.7.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.7.0
 [0.6.2]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.2
 [0.6.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.1

@@ -14,29 +14,45 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Runs the bundled frp STCP visitor inside the app so a phone on any network can reach the
- * dsh-link node through the Aliyun relay server. frpc is shipped as libfrpc.so in the APK and
- * extracted by Android into nativeLibraryDir (the only app-owned directory Android 10+ allows
- * to execute). The visitor listens on 127.0.0.1:18788 only; the App then talks to that local port.
+ * Runs the bundled frp STCP visitor (frpc) inside the app so a phone on any network can reach the
+ * dsh-link gateway through the Aliyun relay server. frpc is shipped as libfrpc.so in the APK and
+ * extracted by Android into nativeLibraryDir (the only app-owned directory Android 10+ allows to
+ * execute).
+ *
+ * The visitor's local bind port is read from the bundled assets/tunnel/frpc.toml template, so one
+ * build works for both deployments: a node gateway usually binds 127.0.0.1:18788, a hub usually
+ * binds 127.0.0.1:18790. Re-rendering the template (dshlink tunnel sync on the node/hub side) is
+ * all it takes to switch the app to a hub, no Java change needed.
  */
 final class TunnelManager {
-    static final String LOCAL_URL = "http://127.0.0.1:18788";
     private static final String TAG = "dshlink-tunnel";
-    private static final int LOCAL_PORT = 18788;
+    private static final int DEFAULT_PORT = 18788;
     private static final long START_TIMEOUT_MS = 20000L;
+    private static final Pattern BIND_PORT = Pattern.compile("(?m)^\\s*bindPort\\s*=\\s*(\\d+)");
 
     private static Process process;
     private static File logFile;
+    private static int localPort = DEFAULT_PORT;
+    private static boolean portResolved;
 
     private TunnelManager() {}
+
+    /** Local URL of the STCP visitor, derived from the bundled template (18788 node / 18790 hub). */
+    static synchronized String localUrl(Context context) {
+        resolvePort(context);
+        return "http://127.0.0.1:" + localPort;
+    }
 
     static synchronized boolean isRunning() {
         return process != null && process.isAlive();
     }
 
     static synchronized void start(Context context) throws IOException {
+        resolvePort(context);
         if (isRunning() && healthy()) return;
         stop();
 
@@ -72,7 +88,7 @@ final class TunnelManager {
         while (System.currentTimeMillis() < deadline) {
             if (!process.isAlive()) break;
             if (healthy()) {
-                Log.i(TAG, "tunnel is healthy on port " + LOCAL_PORT);
+                Log.i(TAG, "tunnel is healthy on port " + localPort);
                 return;
             }
             try {
@@ -100,10 +116,25 @@ final class TunnelManager {
         process = null;
     }
 
+    private static void resolvePort(Context context) {
+        if (portResolved || context == null) return;
+        try {
+            String toml = readAsset(context, "tunnel/frpc.toml");
+            Matcher matcher = BIND_PORT.matcher(toml);
+            int port = 0;
+            while (matcher.find()) port = Integer.parseInt(matcher.group(1));
+            if (port > 0) localPort = port;
+            portResolved = true;
+            Log.i(TAG, "tunnel local port " + localPort);
+        } catch (IOException | RuntimeException err) {
+            Log.w(TAG, "cannot read tunnel/frpc.toml: " + err);
+        }
+    }
+
     private static boolean healthy() {
         HttpURLConnection conn = null;
         try {
-            conn = (HttpURLConnection) new URL("http://127.0.0.1:" + LOCAL_PORT + "/healthz").openConnection();
+            conn = (HttpURLConnection) new URL("http://127.0.0.1:" + localPort + "/healthz").openConnection();
             conn.setConnectTimeout(800);
             conn.setReadTimeout(1200);
             conn.setRequestMethod("GET");

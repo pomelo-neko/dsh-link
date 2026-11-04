@@ -125,13 +125,95 @@ export function normalizeGatewayConfig(raw) {
 //   bridge - only what the local dsh-link-bridge plugin needs: read inbox/read marks + bridge channel
 //   peer   - another dsh-link node: send messages, read its own inbox/outbox, read DSH view
 //   device - a mobile/desktop controller: read DSH view, call capabilities, send messages; no admin APIs
-export const TOKEN_ROLES = ['admin', 'bridge', 'peer', 'device'];
+// 'hub' is the role a node issues to the hub it enrolled with: it may deliver messages (keeping
+// the original sender's identity) and use the DSH view / file proxy, but it is not an admin token.
+export const TOKEN_ROLES = ['admin', 'bridge', 'peer', 'device', 'enroll', 'hub'];
 export const DEFAULT_TOKEN_ROLE = 'admin';
 
 export function normalizeTokenRole(value, fallback = DEFAULT_TOKEN_ROLE) {
   const role = String(value ?? fallback).trim().toLowerCase();
   if (!TOKEN_ROLES.includes(role)) throw badRequest(`token role must be one of: ${TOKEN_ROLES.join(', ')}`);
   return role;
+}
+
+// ---------------------------------------------------------------- hub link (0.8) ---
+// A node in hub topology keeps exactly one outbound channel to the hub. The hub section is
+// tolerant (a broken hub block must not stop the node from booting); the link itself only starts
+// when enabled + url + token are all present, so a half-written config stays in p2p mode.
+export const DEFAULT_HUB = {
+  enabled: false,
+  url: null,
+  token: null,
+  timeoutMs: 30_000,
+  heartbeatSeconds: 30,
+  visitorPort: 18_790,
+  reconnect: { minSeconds: 5, maxSeconds: 60 },
+  enrollment: { token: null, autoEnroll: false },
+  frp: { serverAddr: null, serverPort: null, serverName: null, secretKey: null },
+  peersIgnored: true,
+  enrolled: null
+};
+
+function hubInt(value, fallback, min, max) {
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  const n = Math.trunc(parsed);
+  return n >= min && n <= max ? n : fallback;
+}
+
+function normalizeHubUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeHubConfig(raw) {
+  const source = isPlainObject(raw) ? raw : {};
+  const url = normalizeHubUrl(source.url);
+  const token = source.token ? expandEnv(String(source.token)) : null;
+  const reconnectSource = isPlainObject(source.reconnect) ? source.reconnect : {};
+  const enrollmentSource = isPlainObject(source.enrollment) ? source.enrollment : {};
+  const frpSource = isPlainObject(source.frp) ? source.frp : {};
+  const enrolledSource = isPlainObject(source.enrolled) ? source.enrolled : null;
+  let enrolled = null;
+  if (enrolledSource) {
+    enrolled = {
+      hubName: enrolledSource.hubName ? String(enrolledSource.hubName) : null,
+      nodeName: enrolledSource.nodeName ? String(enrolledSource.nodeName) : null,
+      enrolledAt: enrolledSource.enrolledAt ? String(enrolledSource.enrolledAt) : null,
+      visitorPort: Number(enrolledSource.visitorPort ?? 0) || null,
+      downlinkUrl: enrolledSource.downlinkUrl ? String(enrolledSource.downlinkUrl) : null
+    };
+  }
+  return {
+    enabled: source.enabled === true,
+    url,
+    token,
+    timeoutMs: hubInt(source.timeoutMs, DEFAULT_HUB.timeoutMs, 1000, 600_000),
+    heartbeatSeconds: hubInt(source.heartbeatSeconds, DEFAULT_HUB.heartbeatSeconds, 5, 3600),
+    reconnect: {
+      minSeconds: hubInt(reconnectSource.minSeconds, DEFAULT_HUB.reconnect.minSeconds, 1, 300),
+      maxSeconds: hubInt(reconnectSource.maxSeconds, DEFAULT_HUB.reconnect.maxSeconds, 5, 3600)
+    },
+    enrollment: {
+      token: enrollmentSource.token ? expandEnv(String(enrollmentSource.token)) : null,
+      autoEnroll: enrollmentSource.autoEnroll === true
+    },
+    visitorPort: hubInt(source.visitorPort, DEFAULT_HUB.visitorPort, 1, 65535),
+    frp: {
+      serverAddr: frpSource.serverAddr ? String(frpSource.serverAddr) : null,
+      serverPort: frpSource.serverPort ? hubInt(frpSource.serverPort, 7000, 1, 65535) : null,
+      serverName: frpSource.serverName ? String(frpSource.serverName) : null,
+      secretKey: frpSource.secretKey ? expandEnv(String(frpSource.secretKey)) : null
+    },
+    peersIgnored: source.peersIgnored !== false,
+    enrolled
+  };
 }
 
 function normalizeExpiry(value) {
@@ -160,6 +242,7 @@ export function defaultConfig(overrides = {}) {
     dsh: normalizeDshViewConfig({}),
     capabilities: normalizeCapabilityConfig({}),
     gateway: normalizeGatewayConfig({}),
+    hub: normalizeHubConfig({}),
     peers: [],
     relay: { enabled: true },
     log: { level: 'info' }
@@ -219,6 +302,10 @@ export function normalizeConfig(raw, baseDir) {
           peer,
           expiresAt: normalizeExpiry(t.expiresAt),
           createdAt: t.createdAt ?? new Date().toISOString(),
+          // Enrollment tokens are limited-use; the hub tracks actual uses in its state file.
+          maxUses: t.maxUses === undefined || t.maxUses === null || t.maxUses === ''
+            ? null
+            : hubInt(t.maxUses, null, 1, 10_000),
           note: t.note
         };
       })
@@ -227,6 +314,7 @@ export function normalizeConfig(raw, baseDir) {
     dsh: normalizeDshViewConfig(raw.dsh ?? {}),
     capabilities: normalizeCapabilityConfig(raw.capabilities ?? {}),
     gateway: normalizeGatewayConfig(raw.gateway),
+    hub: normalizeHubConfig(raw.hub),
     files: {
       allowUpload: raw.files?.allowUpload === true,
       deny: Array.isArray(raw.files?.deny) ? raw.files.deny.map(String) : [...DEFAULT_DENY],
@@ -341,10 +429,11 @@ export function createInboundToken(cfg, label = 'peer', opts = {}) {
     role,
     peer,
     expiresAt: normalizeExpiry(opts.expiresAt),
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    maxUses: opts.maxUses === undefined || opts.maxUses === null ? null : hubInt(opts.maxUses, null, 1, 10_000)
   };
   cfg.auth.tokens.push(entry);
-  return { id: entry.id, token, label: entry.label, role: entry.role, peer: entry.peer, expiresAt: entry.expiresAt };
+  return { id: entry.id, token, label: entry.label, role: entry.role, peer: entry.peer, expiresAt: entry.expiresAt, maxUses: entry.maxUses };
 }
 
 /** Replace any stored plaintext token with its sha256 hash. Returns count sealed. */
@@ -370,7 +459,8 @@ export function verifyToken(cfg, presented) {
       // Legacy tokens (created before 0.5.0) carry no role; they keep full control.
       role: t.role ?? DEFAULT_TOKEN_ROLE,
       peer: t.peer ?? null,
-      expiresAt: t.expiresAt ?? null
+      expiresAt: t.expiresAt ?? null,
+      maxUses: t.maxUses ?? null
     };
   }
   return null;
@@ -403,6 +493,7 @@ export function publicInfo(cfg) {
     },
     allowUpload: cfg.files.allowUpload,
     relay: cfg.relay.enabled,
+    hub: { enabled: cfg.hub?.enabled === true, url: cfg.hub?.url ?? null, enrolled: !!cfg.hub?.enrolled },
     peers: cfg.peers.map((p) => ({ name: p.name, url: p.url, hasToken: !!p.token }))
   };
 }

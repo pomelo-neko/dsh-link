@@ -397,7 +397,11 @@ export function createDshOps({ ctx, log, limits = {}, status } = {}) {
 
     /**
      * Session rows for one workspace (or every workspace), newest first. Archived sessions are
-     * hidden unless the caller asks for them.
+     * hidden unless the caller asks for them. On 0.8 a row also carries `running` when the Host
+     * reports it: DSH's SessionListEntry exposes whether a turn is executing right now, which is
+     * what a hub needs to aggregate "which conversations are live" without opening every
+     * transcript. The field is omitted (rather than forced to false) when the Host surface does
+     * not report it — a missing flag means unknown, and implying "stopped" would be worse.
      */
     'sessions.list': async ({ workspace, includeArchived = false, limit = 100 } = {}) => {
       const controller = requireService('sessionController');
@@ -427,6 +431,10 @@ export function createDshOps({ ctx, log, limits = {}, status } = {}) {
           title: titleOf(item),
           workspaceId: owner ? String(owner.id ?? '') : '',
           cwd: typeof item.cwd === 'string' ? item.cwd : owner ? String(owner.path ?? '') : '',
+          // A real boolean only: DSH's SessionListEntry always carries one, but an older or
+          // partial Host surface may not, and inventing "idle" would make the hub report a live
+          // conversation as stopped. Absent field = unknown to this bridge (hub counts true only).
+          ...(typeof item.running === 'boolean' ? { running: item.running } : {}),
           updatedAt: timeOf(item.updatedAt),
           archived: isArchived
         });

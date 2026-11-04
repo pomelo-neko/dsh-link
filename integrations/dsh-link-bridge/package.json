@@ -1,21 +1,32 @@
 {
   "name": "dsh-link-bridge",
-  "version": "0.7.0",
-  "description": "Wake a DSH conversation automatically when dsh-link messages arrive (one Session per topic, retired sessions archived), deliver a peer's message into the exact Session it names (directed conversations), and serve the peer capability channel: list/read/create/prompt/rename/archive conversations on this machine on request.",
+  "version": "0.8.0",
+  "description": "Wake a DSH conversation automatically when dsh-link messages arrive (one Session per topic, retired sessions archived), deliver a peer's message into the exact Session it names (directed conversations), serve the peer capability channel: list/read/create/prompt/rename/archive conversations on this machine on request, and render this machine's hub uplink state — plus a manual reconnect — in the DSH Settings → dsh-link panel.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": {
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "lib/client.js",
     "cordis.patch.example.yml",
     "install-bridge.ps1",
     "README.md"
   ],
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
   "keywords": [
     "deepseek-harness",
     "dsh",

@@ -1,12 +1,15 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.3.0** (shipped with the dsh-link 0.7.0 tree; the app is versioned
-independently from the node). v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 makes the
+Status: **implemented, v0.4.0** (shipped with the dsh-link 0.8.0 tree; the app is versioned
+independently from the node). v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 made the
 app a network-aware controller: it discovers the dsh-link network from the node it connects to,
 lets the user pick any **directly-connected** node and browse/control that node's DSH through the
 gateway relay, labels subagent Sessions, and folds consecutive tool-call/tool-result rows into one
-expandable transcript line. The tunnel now lands on the token-checking 8788 gateway instead of the
-node's localhost-trust path.
+expandable transcript line. The tunnel lands on the token-checking 8788 gateway instead of the
+node's localhost-trust path. v0.4.0 adds the **hub entry**: when the URL points at a hub
+(`role:"hub"`) the app treats it as a central server, lists its enrolled nodes in the same
+"控制节点" dropdown, and relays every DSH call to the selected node with `peer=<node>`; the node
+entry (0.7 single node) still works unchanged from the same APK.
 This document records what the app in [`android/`](../../android/) actually does, which node APIs
 it depends on, how it was verified, and what is deliberately left out. The research that led here —
 options A/B/C, effort estimates, the 0.5 security prerequisites and the mobile-sync design review —
@@ -72,6 +75,25 @@ GET /api/v1/network/nodes?depth=2&maxNodes=50        (self + each directly conne
 Nodes reached only through another node (`via` non-empty) are shown but cannot be selected by the
 app; this keeps the relay to a single hop and avoids the entry node silently becoming a proxy for
 the whole mesh. The peer re-checks its own `capabilities` allowlist.
+
+Hub entry (0.4.0). The URL may point at a hub instead of a node; the mode is detected from
+`GET /api/v1/info` (`role:"hub"`, `software:"dsh-link-hub"`, or an `info.nodes[]` table):
+
+```text
+GET /api/v1/info                                (detect: hub vs node)
+GET /api/v1/network/nodes?depth=1               (hub: enrolled nodes, fallback info.nodes[])
+   └─ node picker: any online enrolled node selected
+        GET /api/v1/dsh/info?peer=<node>         (forwarded by hub to that node's node API)
+        GET /api/v1/dsh/workspaces?peer=<node>
+        GET /api/v1/dsh/sessions?peer=<node>&workspace=…
+        GET /api/v1/dsh/sessions/<id>/transcript?peer=<node>&sinceSeq=…
+        POST /api/v1/dsh/call {peer:<node>, method:"sessions.prompt", params:{sessionId,text,mode}}
+        GET /api/v1/dsh/call/<commandId>?peer=<node>   (poll to done; hub forwards to that node)
+```
+
+The hub is the only entry; the selected node never needs to be reachable from the phone. The app
+also accepts `device`-role tokens there — a hub never trusts localhost and always requires a token.
+The status line reads `NODE（经 HUB）`, and the summary shows the hub name/version and node counts.
 
 Optional built-in STCP tunnel (0.2.0; retargeted to the 8788 gateway in 0.3.0), used when the phone
 has no LAN/VPN route to the node:
@@ -308,8 +330,35 @@ node `alice-pc`; the node was restarted on 0.7.0 with the 8788 gateway enabled a
    uiautomator dump, not just a screenshot).
 7. **No crash** in `logcat` during any of the above.
 
-The node test suite is unchanged by the app release (`node test/run.mjs`: 190 tests, 189 pass,
-1 skipped for the missing frp binary).
+0.4.0 verification (2026-11-04, dsh-link 0.8.0 tree, Android 16 / API 36 x86_64 emulator,
+real hub harness `src/hub.mjs` on `127.0.0.1:18790` with one enrolled node and a fake bridge —
+the STCP-to-hub path was emulated with `adb reverse tcp:18790`):
+
+1. **Build**: `dshlink-control-0.4.0-debug.apk` is 11,990,118 bytes, `versionCode 5`,
+   `versionName 0.4.0`, SHA-256 `71D3516AD4ED23BE832661B197EC4AB537D739F9187A06CC66A2E46415398F08`;
+   debug signature verifies. `minSdk 26`, `targetSdk 36`.
+2. **Hub detection**: `GET /api/v1/info` returns `role:"hub"` → hub mode: status
+   "已连接 · 12 个工作区 · NODE-ANDROID · 可发送", summary
+   "中心服务器 HUB-ANDROID · dsh-link-hub 0.7.0 · 1 个节点 · 1 在线 · 当前 NODE-ANDROID",
+   node dropdown "NODE-ANDROID（在线）". Workspace/session/transcript requests went through the
+   hub with `peer=<node>`.
+3. **Hub send**: `POST /api/v1/dsh/call {peer:"NODE-ANDROID", method:"sessions.prompt",
+   params:{sessionId,text,mode}}` → polling `GET /api/v1/dsh/call/{id}?peer=…` reached `done`;
+   the hub logged `[bridge] completed sessions.prompt cmd_01m6k86fxz5b3b93e337d4` and the app
+   showed "已发送".
+4. **Edges**: an empty hub shows "还没有登记节点" + enroll hint; before the offline threshold a
+   node request returns 502 `upstream_unreachable` as an inline warning (no modal), after it the
+   dropdown marks "（离线）" and reads are skipped; a wrong token shows a 401 explanation;
+   `logcat -b crash` stayed empty (no FATAL).
+5. **Compatibility**: the same APK connected to the real 0.7 node `http://192.0.2.38:8787`
+   still used single-node mode (11 workspaces, sending allowed).
+6. **Limits recorded**: one APK embeds one STCP visitor template, so the hub path needs the hub
+   visitor template rendered into `assets/tunnel/` (no repo command yet) — the e2e used
+   `adb reverse`; the optional running badge from design §5.8 was not built. Send params follow
+   the repo contract `{sessionId,text,mode}` (queue|steer), not content blocks.
+
+The node test suite at this release: `node test/run.mjs` — see the root README for the current
+count (frp/MCP tests skip automatically when their binaries/SDK are missing).
 
 The app is a debug-signed APK; release signing, versionCode management and Play distribution are
 out of scope for this repo.
@@ -344,6 +393,10 @@ out of scope for this repo.
 
 ## 6. Known gaps / next steps (B phase)
 
+- **Hub-mode STCP template**: the app can already control a hub over plain HTTP/relay, but the
+  bundled visitor template still targets the node's `dshlink-phone` provider (8788); shipping the
+  hub path needs a `dshlink-hub` visitor template (bindPort 18789) rendered into
+  `android/app/src/main/assets/tunnel/frpc.toml` before building, and a real phone test.
 - SSE or long-poll endpoint (`/api/v1/dsh/sessions/{id}/events`) for true push and fewer requests;
   this is the main missing node feature.
 - Device-scoped token management API (create/list/revoke from the phone, last-used metadata).

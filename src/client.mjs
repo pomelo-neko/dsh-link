@@ -78,15 +78,15 @@ export class LinkClient {
   audit(limit = 50) { return this._fetch('GET', `${API_PREFIX}/audit`, { query: { limit } }); }
 
   // --- DSH view (workspaces, conversations, transcripts) and the capability channel ---
-  dshWorkspaces() { return this._fetch('GET', `${API_PREFIX}/dsh/workspaces`); }
+  dshWorkspaces(query) { return this._fetch('GET', `${API_PREFIX}/dsh/workspaces`, { query }); }
   dshSessions(query) { return this._fetch('GET', `${API_PREFIX}/dsh/sessions`, { query }); }
-  dshSession(id) { return this._fetch('GET', `${API_PREFIX}/dsh/sessions/${encodeURIComponent(id)}`); }
+  dshSession(id, query) { return this._fetch('GET', `${API_PREFIX}/dsh/sessions/${encodeURIComponent(id)}`, { query }); }
   dshTranscript(id, query) { return this._fetch('GET', `${API_PREFIX}/dsh/sessions/${encodeURIComponent(id)}/transcript`, { query }); }
-  dshCapabilities() { return this._fetch('GET', `${API_PREFIX}/dsh/capabilities`); }
+  dshCapabilities(query) { return this._fetch('GET', `${API_PREFIX}/dsh/capabilities`, { query }); }
   dshCall(body, { timeoutMs } = {}) {
     return this._fetch('POST', `${API_PREFIX}/dsh/call`, { body, timeoutMs });
   }
-  dshCallResult(id) { return this._fetch('GET', `${API_PREFIX}/dsh/call/${encodeURIComponent(id)}`); }
+  dshCallResult(id, query) { return this._fetch('GET', `${API_PREFIX}/dsh/call/${encodeURIComponent(id)}`, { query }); }
 
   async download(query, destPath) {
     const res = await this._fetch('GET', `${API_PREFIX}/files/download`, { query, raw: true });

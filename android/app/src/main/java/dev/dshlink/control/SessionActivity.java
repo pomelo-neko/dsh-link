@@ -91,7 +91,9 @@ public class SessionActivity extends Activity {
             input.setEnabled(false);
             sendButton.setEnabled(false);
             steerCheck.setEnabled(false);
-            input.setHint("只读：节点未放行 sessions.prompt");
+            input.setHint(NodeState.isHub()
+                    ? "只读：节点未放行 sessions.prompt（中心服务器只转发）"
+                    : "只读：节点未放行 sessions.prompt");
         }
 
         loadOlderButton.setOnClickListener(new View.OnClickListener() {
@@ -155,9 +157,13 @@ public class SessionActivity extends Activity {
                             totalCount = result.optLong("total", loadedCount);
                             initialLoaded = true;
                             updateOlderButton();
-                            statusView.setText("共 " + totalCount + " 条 · "
-                                    + (NodeState.isRemote() ? NodeState.nodeLabel() + " · " : "")
-                                    + "每 2.5 秒仅在前台刷新");
+                            String origin = "";
+                            if (NodeState.isHub()) {
+                                origin = " · " + NodeState.nodeLabel() + "（经 " + NodeState.hubName() + "）";
+                            } else if (NodeState.isRemote()) {
+                                origin = " · " + NodeState.nodeLabel();
+                            }
+                            statusView.setText("共 " + totalCount + " 条" + origin + " · 每 2.5 秒仅在前台刷新");
                             scrollToBottom();
                             schedulePolling();
                         }
@@ -298,13 +304,13 @@ public class SessionActivity extends Activity {
                     String commandId = result.optString("commandId", "");
                     String state = result.optString("status", "");
                     if (result.optBoolean("pending", false) || "pending".equals(state) || "claimed".equals(state)) {
-                        // GET /dsh/call/:id only polls the local command queue, so a command that is
-                        // still pending on the gateway cannot be followed from here. The message is
-                        // queued; watch the transcript for the result.
-                        if (NodeState.isRemote()) {
-                            finishSubmitted(result);
-                        } else {
+                        // Through a hub, GET /dsh/call/:id?peer=X is proxied to the target node, so a
+                        // pending remote command can be followed. In node mode a remote (direct peer)
+                        // command still cannot: /dsh/call/:id only polls the gateway's own queue.
+                        if (NodeState.isHub() || !NodeState.isRemote()) {
                             awaitCommand(commandId);
+                        } else {
+                            finishSubmitted(result);
                         }
                     } else {
                         finishSend(result);
@@ -337,7 +343,7 @@ public class SessionActivity extends Activity {
     private void awaitCommand(String commandId) throws ApiException {
         long deadline = System.currentTimeMillis() + 120000;
         while (System.currentTimeMillis() < deadline) {
-            JSONObject result = NodeState.client.get("/api/v1/dsh/call/" + enc(commandId));
+            JSONObject result = NodeState.client.get(NodeState.callResultPath(commandId));
             String state = result.optString("status", "");
             if ("done".equals(state) || "failed".equals(state) || "expired".equals(state)) {
                 finishSend(result);

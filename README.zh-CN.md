@@ -5,10 +5,11 @@
 **一句话**：在两台（或多台）跑着 DSH 的机器上各起一个 `dshlink` 节点，它们就能互相发消息、互相拉取/推送文件、离线排队、通过 MCP 直接变成 DSH 的原生工具。
 
 - 零运行时依赖：只用 Node 内置模块（`node:http` / `node:crypto` / `node:fs`），不需要 npm install。
-- 三种连通方式：**局域网/公网直连**、**FRP STCP 内网穿透**（无公网端口，推荐）、**中继转发**（A→hub→B）。
+- 三种连通方式：**局域网/公网直连**、**FRP STCP 内网穿透**（无公网端口，推荐）、**hub 中心服务器**（0.8：节点统一接入中心，A→hub→B，带持久队列与 Web 控制台）。
 - 给 DSH 的两条接入路径：**MCP**（`dsh-mcp-client` 挂本机 `/mcp`，工具名 `mcp__dshlink__link_*`）和 **CLI/技能**（agent 用 pwsh 调 `dshlink`）。
 - **定向会话（0.4）**：消息可以点名对方机器上的具体 **Session**，回复自动带回发起会话；两端真实对话可以多轮交流，而不是全部落进桥的池会话。策略可控、可关闭。
-- **手机控制端（0.6）**：`android/` 里的 App 连到一台节点，用 `device` token 浏览该节点的 DSH 工作区/会话、前台增量看对话、通过 `sessions.prompt` 发消息。它是控制端，不是节点。
+- **手机控制端（0.6）**：`android/` 里的 App 连到一台节点，用 `device` token 浏览该节点的 DSH 工作区/会话、前台增量看对话、通过 `sessions.prompt` 发消息。它是控制端，不是节点；0.4.0 起也可直连 **hub**。
+- **hub 拓扑（0.8）**：一个独立的 `dshlink hub` 进程做中心，节点用一次性 enroll token 接入；消息/DSH 视图/能力调用/文件全部经 hub 中转，hub 带持久 outbox、心跳补发与去重，并自带 Web 控制台（`/ui`）。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 
 ---
@@ -146,12 +147,12 @@ dshlink bind --thread msg_<根消息> --session session-yyyy
 那条会话。字段只决定 prompt 投到哪，不执行任何命令。策略、回退、线格式与排障见
 [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md)。
 
-### 手机控制端（0.6+，0.7 起支持网络感知）
+### 手机控制端（0.6+，0.7 支持网络感知，0.8 支持 hub 入口）
 
 [`android/`](android/) 里的安卓 App 是**控制端而不是节点**：它连到一台已有的 dsh-link 节点，列出该节点
 看到的 DSH 工作区/会话，屏幕在前台时按 `sinceSeq` 增量拉取对话，并通过能力通道往指定会话发消息。
 没有后台服务，也不在 App 不运行时轮询。0.7 起 App 还会发现入口节点所在网络的节点，可切换到任一
-**直连**节点远程浏览/发消息，标注子智能体会话，并把连续的 tool-call 行折叠成可展开的一行。
+**直连**节点远程浏览/发消息，标注子智能体会话，并把连续的 tool-call 行折叠成可展开的一行。App 0.4.0 起 URL 还可以指向 **hub**：App 识别 `role:"hub"` 后用同一个节点下拉切换 hub 已登记的节点，所有读取与发消息都带 `peer=<node>` 由 hub 转发。
 
 ```powershell
 # 节点侧：给手机铸造一个 device token（只能读 DSH 视图 + 调用被允许的能力方法）
@@ -159,7 +160,7 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # 有 JDK 17+ 与 Android SDK 36 的机器上构建
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-adb install android\dist\dshlink-control-0.3.0-debug.apk
+adb install android\dist\dshlink-control-0.4.0-debug.apk
 ```
 
 节点需要 `dsh.enabled`、`dsh.exposeWorkspaces`、`dsh.exposeTranscripts`、`capabilities.enabled` 且
@@ -172,7 +173,27 @@ token，不再依赖 `trustLocalhost` 旁路。APK 内嵌中转凭据，仍只�
 [`android/README.md`](android/README.md)，接口与验证见 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md)，
 网关见 [`docs/GATEWAY.md`](docs/GATEWAY.md)。
 
-## 3. 内网穿透（FRP STCP）
+## 3. 中心服务器（hub）拓扑（0.8）
+
+hub 是一个**独立进程**（`dshlink hub serve`，默认端口 8790），不跑 DSH、不读节点磁盘，只负责消息、DSH 视图、能力调用与文件的中转和排队。节点用一次性 enroll token 接入后，节点之间不再需要两两配置 peer：
+
+```powershell
+# hub 机器（不需要 DSH）：
+node bin\dshlink.mjs hub init --name lab-hub --port 8790
+node bin\dshlink.mjs hub token new --role enroll --ttl-hours 2 --json   # 一次性接入 token
+node bin\dshlink.mjs hub serve
+
+# 每台节点：
+node bin\dshlink.mjs hub enroll --url http://<hub>:8790 --token <enroll token>
+node bin\dshlink.mjs hub status
+node bin\dshlink.mjs tunnel sync     # 配了 FRP 时发布 节点→hub 的 visitor
+```
+
+浏览器打开 `http://<hub>:8790/ui`（admin token 登录）即可**审批/移除节点、生成/吊销 enroll token**、查看节点心跳与缓存区、重投或丢弃排队消息、看运行中的会话、修改 hub 设置（重试间隔/消息 TTL/离线阈值/接入策略/文件限制）。hub 从不信任 localhost：所有 API 都要 token（admin/enroll/device/peer 角色），控制台页面本身不含任何秘密。
+
+节点每 30s 心跳一次，90s 没心跳标记离线；投递是**至少一次**，重连后补发离线期间积压的消息（接收端按消息 id 去重）。`hub.enabled` 默认关闭——不启用时行为与 0.7 点对点完全一致；接入 hub 后该节点只经 hub 通信、拒绝 peer 直连中继并忽略 `peers` 列表。设计、决策与 API 见 [`docs/HUB-TOPOLOGY-DESIGN.md`](docs/HUB-TOPOLOGY-DESIGN.md)，控制台说明见 [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md)。
+
+## 4. 内网穿透（FRP STCP）
 
 两台机器都不在同一个局域网、也没有公网端口时，用一台公网服务器做 frps：
 
@@ -204,7 +225,7 @@ node bin\dshlink.mjs peers ping --name alice-pc
 **visitor** 在本机开一个端口（默认从 19100 递增）转发过去。双方都只做出站连接，公网只暴露
 frps 的 7000 端口，dsh-link 的 API 不直接对外。详见 [`docs/FRP.md`](docs/FRP.md)。
 
-## 4. 常用命令
+## 5. 常用命令
 
 | 命令 | 作用 |
 |---|---|
@@ -217,6 +238,7 @@ frps 的 7000 端口，dsh-link 的 API 不直接对外。详见 [`docs/FRP.md`]
 | `ls` / `pull` / `push` | 列目录、拉文件、推文件（推送需对端 `files.allowUpload: true`） |
 | `audit` | 本机审计日志（谁在什么时候拉了哪个文件） |
 | `tunnel setup\|sync\|status\|share\|import\|stop\|config` | FRP 穿透的配置与进程管理 |
+| `hub init\|serve\|enroll\|status\|nodes\|token\|outbox\|flush\|reconnect\|revoke` | hub 拓扑：起中心、节点接入、签发 enroll token、查节点/心跳/中心队列、重连（0.8；hub 命令可用 `--data-dir` 指定实例） |
 | `invite` / `peers accept --invite <码> [--reply]` | 一段配对码完成双向登记（含 token 与 STCP 信息） |
 | `doctor` | 自检：配置/共享根/端口/MCP/对端/隧道，退出码非 0 表示有 fail |
 | `install-dsh [--write]` | 把 MCP 条目写进 profile 的 `cordis.patch.yml` 并安装技能（默认只预览，写入前自动备份） |
@@ -256,7 +278,7 @@ scripts\start-dshlink.cmd      # 双击/命令行都行：幂等地把节点和 
 DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启动器给后端一个**隐藏但存在**的控制台
 （`CREATE_NEW_CONSOLE` + `STARTF_USESHOWWINDOW/SW_HIDE`），子进程继承它便不再开窗。
 
-## 5. 安全模型（默认值）
+## 6. 安全模型（默认值）
 
 | 项 | 默认 | 说明 |
 |---|---|---|
@@ -271,6 +293,7 @@ DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启�
 | DSH 视图（0.3） | 关闭 | `dsh.enabled` 才开放工作区/对话读取；`dsh.exposeTranscripts` 单独控制对话正文 |
 | 能力通道（0.3） | 关闭 | `capabilities.enabled` + 方法白名单；**动作方法（新建/发消息/改名/归档）默认不放行**，可按 peer 覆盖；命令只走本机 loopback，远端一律由节点裁决；每次调用写审计 |
 | 定向投递（0.4） | 桥默认开启、任意对端 | 桥的 `targets.{enabled,peers,allow,deny}` 决定哪个对端能向哪条本机会话投递；可关闭或收紧 |
+| hub 拓扑（0.8） | 关闭 | `hub.enabled`；节点用一次性 enroll token（默认 2h / 1 次）接入，全部流量经 hub；hub 从不信任 localhost，所有 API 都要 token（admin/enroll/device/peer 角色） |
 
 > 打开 DSH 视图 = 让持有 token 的对端读到本机**全部工作区路径与全部对话内容**（对话里可能有凭据、
 > 隐私、内部代码）。只在你信任这些对端时打开；动作能力更进一步——`sessions.prompt` 等于让对方驱动
@@ -281,7 +304,7 @@ DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启�
 绑定 peer、设置过期时间。公网部署建议：frps 强制 TLS + token（见 `docs/FRP.md`），或给 dsh-link
 前面加 HTTPS 反代；手机端优先走 WireGuard/Tailscale 等 VPN，而不是直接暴露 visitor 端口。
 
-## 6. 目录结构
+## 7. 目录结构
 
 ```
 dsh-link/
@@ -296,18 +319,21 @@ dsh-link/
 │   ├── client.mjs          # 出站 HTTP 客户端（流式下载 + 哈希校验）
 │   ├── tunnel.mjs          # FRP STCP：frpc.toml 生成、进程管理、分享/导入
 │   ├── reload.mjs          # 配置热重载（改 peer/token/根目录不用重启）
+│   ├── network.mjs         # 网络发现：peer 图与 hub 已登记节点（0.7/0.8）
+│   ├── gateway.mjs         # 回环 token 网关（手机/中转路径，0.7）
+│   ├── hub*.mjs            # hub 进程、配置、持久队列、FRP、节点链路、Web 控制台（0.8）
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
 ├── android/                # 安卓控制端 App（纯 Java，无 Gradle 依赖）+ 手动构建脚本
-├── test/                   # 166 项检查 / 22 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、手机契约）+ CLI 冒烟
-├── docs/                   # 架构、设计、协议、DSH 接入、FRP 部署、运维手册、排障手册、手机端
-└── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递）
+├── test/                   # 214 项检查 / 26 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约）+ CLI 冒烟
+├── docs/                   # 架构、设计、协议、DSH 接入、定向会话、hub 设计与控制台、FRP 部署、运维手册、排障手册、手机端
+└── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递；0.8 hub 面板）
 ```
 
-## 7. 验证
+## 8. 验证
 
 ```powershell
-node test/run.mjs                     # 166 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、DSH 视图、手机契约、doctor
+node test/run.mjs                     # 214 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 
@@ -317,12 +343,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
 
 其中 MCP 测试用的是 DSH 自己安装的 MCP TypeScript SDK（`@modelcontextprotocol/sdk` 1.x 或
 `@modelcontextprotocol/client` 2.x，均可自动发现），即 dsh-link 与 DSH 的 MCP 端点已被真实客户端验证过。
-定向会话也有端到端覆盖：HTTP 信封字段、回环 bind 端点、`link_reply` 自动 `targetSession`、桥的目标投递/策略拒绝回退/一批多目标。`test/mobile-contract.test.mjs` 固定手机 App 依赖的节点接口（快照 + `sinceSeq`、能力调用、`device` token 边界），需要 `DSH_HOME` 指向真实 DSH 安装，否则跳过。
+定向会话也有端到端覆盖：HTTP 信封字段、回环 bind 端点、`link_reply` 自动 `targetSession`、桥的目标投递/策略拒绝回退/一批多目标。0.8 的 hub 测试（`test/hub.test.mjs`、`test/bridge-hub.test.mjs`）在进程内起 hub + 两个登记节点：接入、双向消息、去重/身份校验、离线排队、DSH 与文件代理、Web 控制台及其 admin API、CLI，以及桥的 `state.json.hub` 快照与 host 路由。`test/mobile-contract.test.mjs` 固定手机 App 依赖的节点接口（快照 + `sinceSeq`、能力调用、`device` token 边界），需要 `DSH_HOME` 指向真实 DSH 安装，否则跳过。
 
 **跨公网实测**（Windows 节点 ↔ WSL 节点，经阿里云 frps）：消息双向、文件拉取（sha256 一致）、
 文件推送、双向 ping 全部通过，详见 [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md)。
 
-## 8. 已知限制 / 下一步
+## 9. 已知限制 / 下一步
 
 - 双向信任需要双方互换 token；`invite/accept` 一键式交换待做（当前用 `tunnel share` + `peers add`）。
 - FRP 侧只生成 STCP 配置，不代管公网 frps 的部署与证书。
@@ -333,9 +359,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
   会报 `zstd-unsupported`，此时改用 bridge 的能力通道读。
 - 会话摘要里的 `messages` 是下界（索引只扫日志头部），要精确条数用 `transcript` 的 `total`。
 - 定向投递需要发送端节点 ≥ 0.4、接收端节点与桥 ≥ 0.4 才会生效；旧节点会存下字段但忽略。
+- hub 投递是**至少一次**：接收端按消息 id 去重，但数据目录丢失后可能再次收到同一条；hub 本身不做 TLS，需放在 frp TLS 隧道或自己的 HTTPS 反代之后。
+- hub 控制台与 DSH Web GUI 里的 hub 面板由 bridge 插件注册，**重启 DSH Host 后**才出现（bridge 不能热重载）；`hub.enabled` 默认关闭，节点不能同时跑点对点与 hub 模式。
 - 尚无端到端加密（依赖 frps 的 TLS/网络可信）；仅在可信网络或加反代后使用。
 
-## 9. 导出给其他 DSH 使用（客户端发行包）
+## 10. 导出给其他 DSH 使用（客户端发行包）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-bundle.ps1
