@@ -50,6 +50,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        Ui.applyEdgeToEdgePadding(this, false);
         urlInput = findViewById(R.id.url_input);
         tokenInput = findViewById(R.id.token_input);
         connectButton = findViewById(R.id.connect_button);

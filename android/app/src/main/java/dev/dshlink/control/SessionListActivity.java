@@ -39,6 +39,7 @@ public class SessionListActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_session_list);
+        Ui.applyEdgeToEdgePadding(this, false);
         workspaceId = getIntent().getStringExtra(EXTRA_WORKSPACE_ID);
         String title = getIntent().getStringExtra(EXTRA_WORKSPACE_TITLE);
         setTitle(title == null || title.isEmpty() ? "会话列表" : title);

@@ -158,7 +158,7 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # 有 JDK 17+ 与 Android SDK 36 的机器上构建
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-adb install android\dist\dshlink-control-0.1.0-debug.apk
+adb install android\dist\dshlink-control-0.1.1-debug.apk
 ```
 
 节点需要 `dsh.enabled`、`dsh.exposeWorkspaces`、`dsh.exposeTranscripts`、`capabilities.enabled` 且

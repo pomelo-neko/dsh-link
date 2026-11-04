@@ -18,7 +18,7 @@ import java.nio.charset.StandardCharsets;
 final class ApiClient {
     private static final int CONNECT_TIMEOUT_MS = 8000;
     private static final int READ_TIMEOUT_MS = 60000;
-    static final String APP_VERSION = "0.1.0";
+    static final String APP_VERSION = "0.1.1";
 
     private final String baseUrl;
     private final String token;

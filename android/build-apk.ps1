@@ -7,8 +7,8 @@
 # Uses only aapt2 / javac / d8 / zipalign / apksigner from the SDK, so no network and no Gradle.
 param(
     [string]$Sdk = "D:\AndroidSdk",
-    [string]$VersionName = "0.1.0",
-    [int]$VersionCode = 1
+    [string]$VersionName = "0.1.1",
+    [int]$VersionCode = 2
 )
 
 $ErrorActionPreference = "Continue"

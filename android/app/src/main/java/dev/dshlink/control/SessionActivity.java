@@ -47,7 +47,7 @@ public class SessionActivity extends Activity {
     private CheckBox steerCheck;
     private final ExecutorService io = Executors.newFixedThreadPool(2);
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final Set<Long> seenSeq = new HashSet<>();
+    private final Set<String> seenKeys = new HashSet<>();
     private long lastSeq;
     private int loadedCount;
     private long totalCount;
@@ -72,6 +72,7 @@ public class SessionActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_session);
+        Ui.applyEdgeToEdgePadding(this, true);
         sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         String title = getIntent().getStringExtra(EXTRA_SESSION_TITLE);
         setTitle(title == null || title.isEmpty() ? "会话" : title);
@@ -147,8 +148,8 @@ public class SessionActivity extends Activity {
                         public void run() {
                             JSONArray messages = result.optJSONArray("messages");
                             adapter.setItems(messages);
-                            seenSeq.clear();
-                            rememberSeqs(messages);
+                            seenKeys.clear();
+                            rememberKeys(messages);
                             lastSeq = result.optLong("latestSeq", 0);
                             loadedCount = messages == null ? 0 : messages.length();
                             totalCount = result.optLong("total", loadedCount);
@@ -189,9 +190,12 @@ public class SessionActivity extends Activity {
                         for (int i = 0; i < messages.length(); i++) {
                             JSONObject message = messages.optJSONObject(i);
                             if (message == null) continue;
-                            long seq = message.optLong("seq", -1);
-                            if (seq > 0 && seenSeq.contains(seq)) continue;
-                            if (seq > 0) seenSeq.add(seq);
+                            // One durable event seq can render as several rows (reasoning, tool
+                            // call, assistant text), so de-duplicate on the full row identity, not
+                            // on seq alone; otherwise the second row of the same seq is dropped.
+                            String key = messageKey(message);
+                            if (seenKeys.contains(key)) continue;
+                            seenKeys.add(key);
                             fresh.put(message);
                         }
                         long next = messages.optJSONObject(messages.length() - 1) == null
@@ -241,7 +245,7 @@ public class SessionActivity extends Activity {
                             JSONArray messages = result.optJSONArray("messages");
                             int count = messages == null ? 0 : messages.length();
                             adapter.prepend(messages);
-                            rememberSeqs(messages);
+                            rememberKeys(messages);
                             loadedCount += count;
                             totalCount = result.optLong("total", totalCount);
                             updateOlderButton();
@@ -379,14 +383,19 @@ public class SessionActivity extends Activity {
         return message;
     }
 
-    private void rememberSeqs(JSONArray messages) {
+    private void rememberKeys(JSONArray messages) {
         if (messages == null) return;
         for (int i = 0; i < messages.length(); i++) {
             JSONObject message = messages.optJSONObject(i);
-            if (message == null) continue;
-            long seq = message.optLong("seq", -1);
-            if (seq > 0) seenSeq.add(seq);
+            if (message != null) seenKeys.add(messageKey(message));
         }
+    }
+
+    /** Identity of a transcript row; seq alone is not unique within one durable event. */
+    private static String messageKey(JSONObject message) {
+        return message.optLong("seq", -1) + "\u0000" + message.optString("role", "") + "\u0000"
+                + message.optString("kind", "") + "\u0000"
+                + Integer.toHexString(message.optString("text", "").hashCode());
     }
 
     private void updateOlderButton() {

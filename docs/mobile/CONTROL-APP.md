@@ -1,6 +1,7 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.1.0** (shipped with the dsh-link 0.6.0 release).
+Status: **implemented, v0.1.1** (shipped with the dsh-link 0.6.2 tree; the app is versioned
+independently from the node).
 This document records what the app in [`android/`](../../android/) actually does, which node APIs
 it depends on, how it was verified, and what is deliberately left out. The research that led here —
 options A/B/C, effort estimates, the 0.5 security prerequisites and the mobile-sync design review —
@@ -13,12 +14,15 @@ ordinary inbound token and uses that node's DSH view + capability channel.
 
 ## 0. Screenshots
 
-| Connected | Sessions of one workspace |
-|---|---|
-| ![main](screenshots/main.png) | ![sessions](screenshots/sessions.png) |
+| Connected | Sessions of one workspace | Transcript + composer |
+|---|---|---|
+| ![main](screenshots/main.png) | ![sessions](screenshots/sessions.png) | ![transcript](screenshots/transcript.png) |
 
-Both shots come from the x86_64 API 36.1 emulator during the smoke test below, talking to a local
-test node (a device token with a 1-day TTL; the token field is masked by Android).
+All shots come from the x86_64 API 36.1 emulator talking to the real node
+(`alice-pc`, dsh-link 0.6.2) through a `device` token; the token field is masked by
+Android. The transcript shot shows the final answer (`#17 · DSH`) from the real DSH agent plus the
+composer; the same-seq de-duplication fix that keeps such a row after its reasoning sibling is
+covered in section 4.
 
 ## 1. Architecture
 
@@ -51,7 +55,9 @@ Deliberate choices:
 - **Snapshot + cursor.** First transcript call requests `tail=1&limit=200` and records
   `latestSeq`; subsequent calls send `sinceSeq=<lastSeq>`, so a reconnect or a poll gap never
   re-sends the whole conversation. `seq` can be null for some rendered rows; the app only advances
-  the cursor on rows that have a numeric seq and de-duplicates by seq.
+  the cursor on rows that have a numeric seq. De-duplication is by **row identity**
+  (`seq + role + kind + text hash`), not by seq alone: one durable event can render as several
+  rows (reasoning, tool call, final answer), and those rows share the same seq.
 - **No dependencies.** Java + platform APIs only (org.json, HttpURLConnection, ListView). The build
   uses SDK command-line tools directly; see `android/build-apk.ps1`. This keeps the app buildable
   offline and reviewable in a repo that promises zero runtime dependencies.
@@ -67,7 +73,7 @@ Deliberate choices:
 | Sessions | `GET /api/v1/dsh/sessions?workspace=<id>&includeArchived=0|1&limit=300` | archived hidden by default |
 | Snapshot | `GET /api/v1/dsh/sessions/{id}/transcript?tail=1&limit=200` | `latestSeq` becomes the cursor |
 | Incremental | `GET …/transcript?sinceSeq=<n>&limit=200` | filtered to `seq > n`; returns new `latestSeq` |
-| Older | `GET …/transcript?tail=1&offset=<loaded>&limit=200` | prepended, de-duplicated by seq |
+| Older | `GET …/transcript?tail=1&offset=<loaded>&limit=200` | prepended, de-duplicated by row identity |
 | Send | `POST /api/v1/dsh/call` body `{method:"sessions.prompt", params:{sessionId,text,mode?}, waitSeconds:20}` | `mode:"steer"` when "插话" is checked; omitted = queue |
 | Command result | `GET /api/v1/dsh/call/{commandId}` | poll every 700 ms up to 120 s for pending commands |
 
@@ -131,6 +137,30 @@ What was checked (2026-11-03, dsh-link 0.6.0 tree, Android SDK 36):
    - read-only gating: removing `sessions.prompt` from `capabilities.methods` and reconnecting made
      the app show the "只读模式" warning and disable the composer/hint as designed;
    - no crash in `logcat` during any of the above.
+
+0.1.1 re-verification (2026-11-04, dsh-link 0.6.2 tree, Android 16 / API 36 emulator, real node
+`alice-pc`):
+
+1. **Build metadata**: `versionCode 2`, `versionName 0.1.1`; APK 37,580 bytes; debug signature
+   still verifies.
+2. **Edge-to-edge accessibility fix**: API 36 forces edge-to-edge even with a Material
+   `DarkActionBar` theme, so the heading, the session-list refresh button and the session status /
+   steer row were drawn underneath the ActionBar and were not tappable. `Ui.applyEdgeToEdgePadding`
+   now pads the content root by the status-bar inset plus `actionBarSize` (and by the IME inset on
+   the session screen); every control's uiautomator bounds is inside the visible area and the
+   refresh button actually re-fetches (a newly created session appeared).
+3. **Real end-to-end send**: with a `device` token, opening `session-1aa41492…` and sending with
+   "插话" checked made the node claim and complete `sessions.prompt {mode:"steer"}`; the real DSH
+   agent answered in the transcript (`seq 17`: reasoning + `OK — phone↔peer e2e probe 已收到并回复，链路正常。`).
+   This replaces the simulated-bridge send check from 0.1.0.
+4. **Same-seq rendering fix**: the earlier app de-duplicated rows by `seq`, so the second row of
+   `seq 17` was dropped and only the reasoning was visible. Rows are now keyed by
+   `seq + role + kind + text hash`; both rows render and the cursor still advances by `latestSeq`.
+5. **IME**: with the keyboard open the steer checkbox, composer and send button stay above the
+   keyboard (session screen uses the IME inset); no crash in `logcat`.
+
+The node test suite is unchanged by the app release (`node test/run.mjs`: 166 tests, 165 pass,
+1 skipped for the missing frp binary).
 
 The app is a debug-signed APK; release signing, versionCode management and Play distribution are
 out of scope for this repo.

@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+### Changed
+
+- **Android control app 0.1.1.** The app is versioned separately from the node; the node/CLI and
+  bridge code are unchanged (still 0.6.2).
+  - Fixed API 36 edge-to-edge layout: the heading, session-list refresh button, session status row
+    and steer checkbox were drawn underneath the ActionBar and could not be tapped. The app now pads
+    the content root by the status-bar inset plus `actionBarSize` (and by the IME inset on the
+    session screen).
+  - De-duplication is now per transcript row (`seq + role + kind + text hash`) instead of per seq.
+    One durable event can render as several rows (reasoning, tool call, final answer); the old code
+    dropped every row after the first one sharing a seq.
+  - Re-verified end-to-end against a real node 0.6.2 with a `device` token: connect → workspaces →
+    sessions → transcript snapshot + `sinceSeq` increments → `sessions.prompt {mode:"steer"}`
+    answered by the real DSH agent; screenshots in `docs/mobile/screenshots/` refreshed and
+    `docs/mobile/CONTROL-APP.md` / `android/README.md` updated.
+
 ## [0.6.2] — 2026-11-04
 
 The "hot reload actually reloads" patch. Changing `capabilities.methods` in a running node showed

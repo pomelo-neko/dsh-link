@@ -217,8 +217,8 @@ node bin\dshlink.mjs token new --label phone --role device --ttl-days 30 --json
 
 # on a machine with JDK 17+ and Android SDK 36
 powershell -File android\build-apk.ps1 -Sdk D:\AndroidSdk
-# -> android/dist/dshlink-control-0.1.0-debug.apk
-adb install android\dist\dshlink-control-0.1.0-debug.apk
+# -> android/dist/dshlink-control-0.1.1-debug.apk
+adb install android\dist\dshlink-control-0.1.1-debug.apk
 ```
 
 The node needs `dsh.enabled`, `dsh.exposeWorkspaces`, `dsh.exposeTranscripts`,

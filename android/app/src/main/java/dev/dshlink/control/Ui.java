@@ -3,7 +3,12 @@ package dev.dshlink.control;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.graphics.Insets;
+import android.os.Build;
 import android.util.TypedValue;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.widget.Toast;
 
 import org.json.JSONArray;
@@ -21,6 +26,47 @@ final class Ui {
     static int dp(Context context, int value) {
         return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
                 context.getResources().getDisplayMetrics()));
+    }
+
+    /**
+     * Android 15+ (API 35) enforces edge-to-edge for apps targeting SDK 35+, so the framework
+     * ActionBar is drawn on top of the content instead of inset above it. Pad the content root by
+     * the status bar + action bar heights so the first rows are not hidden, and (optionally) keep
+     * the bottom content above the IME.
+     *
+     * On older systems the window decor still handles this, so this is a no-op there.
+     */
+    static void applyEdgeToEdgePadding(Activity activity, boolean imeAware) {
+        if (Build.VERSION.SDK_INT < 35) return;
+        View content = activity.findViewById(android.R.id.content);
+        if (!(content instanceof ViewGroup) || ((ViewGroup) content).getChildCount() == 0) return;
+        ViewGroup root = (ViewGroup) ((ViewGroup) content).getChildAt(0);
+        final int baseLeft = root.getPaddingLeft();
+        final int baseTop = root.getPaddingTop();
+        final int baseRight = root.getPaddingRight();
+        final int baseBottom = root.getPaddingBottom();
+        TypedValue size = new TypedValue();
+        int actionBar = 0;
+        if (activity.getTheme().resolveAttribute(android.R.attr.actionBarSize, size, true)) {
+            actionBar = TypedValue.complexToDimensionPixelSize(size.data,
+                    activity.getResources().getDisplayMetrics());
+        }
+        final int actionBarPx = actionBar;
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                int bottom = bars.bottom;
+                if (imeAware) {
+                    Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                    if (ime.bottom > bottom) bottom = ime.bottom;
+                }
+                view.setPadding(baseLeft, baseTop + bars.top + actionBarPx, baseRight,
+                        baseBottom + bottom);
+                return insets;
+            }
+        });
+        root.requestApplyInsets();
     }
 
     static String clock(long epochMillis) {
