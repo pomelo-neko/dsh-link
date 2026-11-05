@@ -9,6 +9,7 @@
 - 给 DSH 的两条接入路径：**MCP**（`dsh-mcp-client` 挂本机 `/mcp`，工具名 `mcp__dshlink__link_*`）和 **CLI/技能**（agent 用 pwsh 调 `dshlink`）。
 - **定向会话（0.4）**：消息可以点名对方机器上的具体 **Session**，回复自动带回发起会话；两端真实对话可以多轮交流，而不是全部落进桥的池会话。策略可控、可关闭。
 - **手机控制端（0.6）**：`android/` 里的 App 连到一台节点，用 `device` token 浏览该节点的 DSH 工作区/会话、前台增量看对话、通过 `sessions.prompt` 发消息。它是控制端，不是节点；0.4.0 起也可直连 **hub**。
+- **随手交给别人（0.9）**：一个便携发行包带 CLI、文档、集成与安卓 APK（可选 frpc）；手机用一条**连接串**接入 hub——连接串自带 `device` 令牌，启用 FRP 时还内嵌 STCP 隧道与证书，APK 内不含任何密钥。
 - **hub 拓扑（0.8）**：一个独立的 `dshlink hub` 进程做中心，节点用一次性 enroll token 接入；消息/DSH 视图/能力调用/文件全部经 hub 中转，hub 带持久 outbox、心跳补发与去重，并自带 Web 控制台（`/ui`）。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 
@@ -325,7 +326,7 @@ dsh-link/
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
 ├── android/                # 安卓控制端 App（纯 Java，无 Gradle 依赖）+ 手动构建脚本
-├── test/                   # 215 项检查 / 26 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约）+ CLI 冒烟
+├── test/                   # 225 项检查 / 27 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约）+ CLI 冒烟
 ├── docs/                   # 架构、设计、协议、DSH 接入、定向会话、hub 设计与控制台、FRP 部署、运维手册、排障手册、手机端
 └── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递；0.8 hub 面板）
 ```
@@ -333,7 +334,7 @@ dsh-link/
 ## 8. 验证
 
 ```powershell
-node test/run.mjs                     # 215 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约、doctor
+node test/run.mjs                     # 225 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 
@@ -363,19 +364,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
 - hub 控制台与 DSH Web GUI 里的 hub 面板由 bridge 插件注册，**重启 DSH Host 后**才出现（bridge 不能热重载）；`hub.enabled` 默认关闭，节点不能同时跑点对点与 hub 模式。
 - 尚无端到端加密（依赖 frps 的 TLS/网络可信）；仅在可信网络或加反代后使用。
 
-## 10. 导出给其他 DSH 使用（客户端发行包）
+## 10. 分发与部署（0.9：交给别人用）
 
-```powershell
+0.9 起，发行包和手机接入都不再依赖本机私有文件：包里有 APK，手机用一次性连接串接入。
+
+\`\`\`powershell
+# 默认自动打包 android/dist 下最新的 APK；-NoApk 不带 APK；-NoVendor 跳过 frpc
 powershell -ExecutionPolicy Bypass -File scripts\build-bundle.ps1
 # 产物（dist/）：
 #   dsh-link-<版本>-portable.zip      （带 frpc 约 12 MB；-NoVendor 时约 0.1 MB）
 #   dsh-link-<版本>-portable.tar.gz   （Linux/WSL 友好，保留可执行位）
-#   SHA256SUMS.txt                              两个包的 sha256
-```
+#   SHA256SUMS.txt                    （两个包的 sha256）
+#   BUNDLE-INFO.json                  （在包内：文件数、frpc 清单、APK 版本与 sha256）
+\`\`\`
 
-包内是**客户端**：`bin/ src/ docs/ integrations/ test/` + 三个入口文件
-（`README-FIRST.md` 三步上手、`install.ps1`、`install.sh`）+ `vendor/frp/{windows-amd64,linux-amd64}/frpc`
-（**只有 frpc，不含 frps**——frps 属于服务器侧）+ `BUNDLE-INFO.json` / `SHA256SUMS.txt`。
+包内是**客户端 + hub**：\`bin/ src/ docs/ integrations/ examples/ test/\` + 入口文件
+（\`README-FIRST.md\` 三步上手、\`install.ps1\`、\`install.sh\`）+ \`vendor/frp/{windows-amd64,linux-amd64}/frpc\`
+（**只有 frpc，不含 frps**——frps 属于服务器侧）+ \`apk/dshlink-control-<版本>-debug.apk\`
+（APK 本身不含任何密钥；同目录 README 有安装与校验说明）+ \`BUNDLE-INFO.json\` / \`SHA256SUMS.txt\`。
 对方机器只需要 Node.js ≥ 20，解压后跑安装脚本即可：初始化、可选配置穿透、可选注册常驻服务、
 可选接入自己的 DSH（MCP 条目 + 技能），最后打印配对码。
 
@@ -388,3 +394,23 @@ powershell -ExecutionPolicy Bypass -File scripts\verify-bundle.ps1 -Bundle dist\
 
 已实测：Windows 侧 zip 全流程 10 项通过；WSL 侧 tar.gz 解压后 `bash install.sh` 正常，
 自带 Linux `frpc` 为可执行 ELF 且能被 `tunnel setup` 自动发现（`doctor` 7 pass / 3 warn / 0 fail）。
+
+### 10.1 在别人的服务器上部署 hub
+
+完整步骤见 [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md)：frps（0.71+）+ `scripts/gen-certs.ps1` 生成
+mTLS 证书 → `hub init`（带 `--frp-server/--frp-port/--frp-token/--frp-cert/--frp-key/--frp-ca`）→
+`hub serve` 常驻（Windows 计划任务 / Linux systemd 示例在文档里）→ 节点 `tunnel setup` +
+`hub enroll --url <hub>` + `tunnel sync`。控制台 `/ui` 只建议从本机或 SSH 端口转发访问。
+
+### 10.2 给别人的手机接入
+
+```powershell
+# hub 上生成一次性连接串（默认 2 小时；--no-tunnel 用于局域网/VPN 直连，需给 --url）
+node bin\dshlink.mjs hub invite --phone --label alice --out alice-phone.txt
+# 或在 hub 控制台 -> “手机接入”卡片 -> 生成 / 复制 / 下载
+```
+
+对方安装 `apk/` 里的 APK，用 App 的“导入连接串”粘贴（或把 `.txt` 发到手机后从文件导入）即可：
+连接串自带 hub 地址与独立的 `device` 令牌；hub 启用 FRP 时还内嵌 STCP visitor 配置和客户端证书，
+手机不需要额外配置隧道。每部手机一个令牌，丢失后在控制台或 `hub token rm --id <id>` 吊销。
+APK 本身不含任何密钥/隧道凭据，可以公开分发；连接串等同密码，请私下发送。

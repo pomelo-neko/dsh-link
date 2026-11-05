@@ -7,6 +7,7 @@
 // also proxies the read-only DSH view, capability calls and files so a phone only needs one
 // connection. It never runs a DSH host, never exposes /mcp, and never trusts loopback addresses.
 import http from 'node:http';
+import { readFileSync, statSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
   API_PREFIX, DSHLINK_VERSION, LinkError, badRequest, conflict, forbidden, notFound,
@@ -16,6 +17,7 @@ import { LinkClient } from './client.mjs';
 import { verifyHubToken, createHubToken, saveHubConfig, hubPublicInfo } from './hubconfig.mjs';
 import { HubTunnelManager } from './hubfrp.mjs';
 import { hubUiHtml } from './hubui.mjs';
+import { PHONE_TUNNEL_BIND_PORT, buildHubPhoneInvite } from './phone.mjs';
 
 const ALL_ROLES = ['admin', 'peer', 'device'];
 const DSH_ROLES = ['admin', 'peer', 'device'];
@@ -91,6 +93,30 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
   let runningRunningRefresh = null;
   let lastFlushAt = null;
 
+  // External writers (the CLI: `hub invite --phone`, `hub token new`) edit the config file
+  // directly. Hot-reload the token list on change so a running hub accepts the new token without
+  // a restart — otherwise a connect code minted by the CLI would 401 until the next restart.
+  const configFile = cfg.configPath ?? null;
+  let tokenFileSig = null;
+  function refreshTokensFromDisk() {
+    if (!configFile) return;
+    let stat;
+    try { stat = statSync(configFile); } catch { return; }
+    const sig = stat.mtimeMs + ':' + stat.size;
+    if (sig === tokenFileSig) return;
+    tokenFileSig = sig;
+    try {
+      const raw = JSON.parse(readFileSync(configFile, 'utf8'));
+      const tokens = Array.isArray(raw?.auth?.tokens) ? raw.auth.tokens : null;
+      if (!tokens) return;
+      if (!cfg.auth) cfg.auth = {};
+      cfg.auth.tokens = tokens;
+      log.debug('hub: token list reloaded from ' + configFile + ' (' + tokens.length + ' tokens)');
+    } catch (err) {
+      log.warn('hub: could not reload tokens from ' + configFile + ': ' + (err?.message ?? err));
+    }
+  }
+
   const frp = cfg.frp?.enabled === true
     ? (tunnel ?? new HubTunnelManager(cfg, [], { log }))
     : null;
@@ -116,6 +142,7 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
   }
 
   function authorize(req) {
+    refreshTokensFromDisk();
     const ip = clientIp(req);
     const token = presentedToken(req);
     if (token) {
@@ -996,6 +1023,45 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
       self, by: ctx.auth.token?.label ?? null, ip: ctx.auth.ip
     });
     sendJson(ctx.res, 200, { removed: id, self });
+  }, { roles: ['admin'] });
+
+  add('POST', API_PREFIX + '/hub/phone-invite', async (ctx) => {
+    const body = await readJson(ctx.req, 64 * 1024);
+    const ttlRaw = body.ttlHours;
+    const ttlHours = ttlRaw === undefined || ttlRaw === null || ttlRaw === ''
+      ? 2
+      : intSetting(ttlRaw, 'ttlHours', 0, 24 * 365);
+    const maxRaw = body.maxUses;
+    const maxUses = maxRaw === undefined || maxRaw === null || maxRaw === ''
+      ? null
+      : intSetting(maxRaw, 'maxUses', 1, 10_000);
+    const visitorRaw = body.visitorPort;
+    const visitorPort = visitorRaw === undefined || visitorRaw === null || visitorRaw === ''
+      ? PHONE_TUNNEL_BIND_PORT
+      : intSetting(visitorRaw, 'visitorPort', 1, 65_535);
+    if (cfg.auth.tokens.length >= 200) throw conflict('too_many_tokens', 'the hub already has 200 tokens; remove one first');
+    const created = await buildHubPhoneInvite(cfg, {
+      label: String(body.label ?? '').trim().slice(0, 64) || 'phone',
+      ttlHours,
+      maxUses,
+      visitorPort,
+      tunnel: body.tunnel !== false && body.noTunnel !== true,
+      url: body.url ? String(body.url) : null,
+      note: body.note ? String(body.note) : null
+    });
+    if (saveConfig) await saveConfig(cfg);
+    await audit({
+      event: 'hub_phone_invite_created', tokenId: created.tokenId, label: created.summary.label,
+      tunnel: created.tunnel, expiresAt: created.expiresAt,
+      by: ctx.auth.token?.label ?? null, ip: ctx.auth.ip
+    });
+    sendJson(ctx.res, 201, {
+      code: created.code,
+      summary: created.summary,
+      tokenId: created.tokenId,
+      expiresAt: created.expiresAt,
+      tunnel: created.tunnel
+    });
   }, { roles: ['admin'] });
 
   add('POST', API_PREFIX + '/hub/flush', async (ctx) => {

@@ -7,6 +7,7 @@ Entry points, in the order most readers want them:
 | [`../README.md`](../README.md) · [`../README.zh-CN.md`](../README.zh-CN.md) | Overview, quick start, command reference, security model |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | 组件地图、状态文件、消息与唤醒链路、判据速查（0.8 hub 目标架构 + 当前 0.7 说明） |
 | [`HUB-TOPOLOGY-DESIGN.md`](HUB-TOPOLOGY-DESIGN.md) | 0.8 中心服务器（hub）拓扑设计稿：动机、新拓扑、数据流、Hub API、FRP/配置、安全、迁移阶段与待拍板问题 |
+| [`DISTRIBUTION.md`](DISTRIBUTION.md) | 0.9 分发与部署：发行包构建（含手机 APK）、在别人的服务器上部署 hub、手机连接串/APK 分发、升级与发布检查清单 |
 | [`HUB-CONSOLE.md`](HUB-CONSOLE.md) | 0.8 hub 自带 Web 控制台：`/ui` 登录、enroll 令牌生成/吊销、状态监控、缓存区重投/丢弃、设置管理、admin API 与安全边界 |
 | [`OPERATIONS.md`](OPERATIONS.md) | 部署、升级、常驻、巡检、令牌轮换、唤醒排障 |
 | [`DSH-INTEGRATION.md`](DSH-INTEGRATION.md) | MCP 条目、技能安装、桥插件安装、profile patch 机制 |

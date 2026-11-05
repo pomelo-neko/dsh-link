@@ -72,6 +72,22 @@ try {
   $back = Run-Node (Join-Path $root 'bin\dshlink.mjs') @('peers', 'accept', '--data-dir', $PeerDataDir, '--invite', "@$(Join-Path $work 'invite-export.txt')", '--json') | ConvertFrom-Json
   Check '本机节点接受了回执' ($back.peer.name -eq 'export-peer') (ConvertTo-Json $back -Compress)
 
+  # 包内节点每 1 秒热重载一次配置文件：它刚接受的配对 token 还没进内存时立刻 send 会撞上 401。
+  # 用回执里的 token 轮询 /api/v1/info，等它真正生效后再继续（最多 10 秒）。
+  $payload = $accepted.replyCode -replace '^dshlink1:', ''
+  $b64 = $payload.Replace('-', '+').Replace('_', '/')
+  switch ($b64.Length % 4) { 2 { $b64 += '==' } 3 { $b64 += '=' } }
+  $peerToken = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | ConvertFrom-Json).token
+  $tokenReady = $false
+  for ($i = 0; $i -lt 34; $i++) {
+    Start-Sleep -Milliseconds 300
+    try {
+      $probe = Invoke-RestMethod "http://127.0.0.1:$Port/api/v1/info" -Headers @{ Authorization = "Bearer $peerToken" } -TimeoutSec 2
+      if ($probe.name -eq 'export-peer') { $tokenReady = $true; break }
+    } catch { }
+  }
+  Check '包内节点热重载并接受配对 token' $tokenReady "token did not take effect within 10s on port $Port"
+
   Write-Host '--- 5. 跨节点发消息 + 拉文件 ---'
   $send = Run-Node (Join-Path $root 'bin\dshlink.mjs') @('send', '--data-dir', $PeerDataDir, '--to', 'export-peer', '--subject', 'bundle check', '--body', 'hello from the packaged peer', '--json') | ConvertFrom-Json
   Check '消息投递成功' ($send.delivery.state -eq 'delivered') (ConvertTo-Json $send.delivery -Compress)

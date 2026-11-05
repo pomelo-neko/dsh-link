@@ -19,52 +19,117 @@ import java.util.regex.Pattern;
 
 /**
  * Runs the bundled frp STCP visitor (frpc) inside the app so a phone on any network can reach the
- * dsh-link gateway through the Aliyun relay server. frpc is shipped as libfrpc.so in the APK and
+ * dsh-link hub (or node) through an STCP relay. frpc is shipped as libfrpc.so in the APK and
  * extracted by Android into nativeLibraryDir (the only app-owned directory Android 10+ allows to
  * execute).
  *
- * The visitor's local bind port is read from the bundled assets/tunnel/frpc.toml template, so one
- * build works for both deployments: a node gateway usually binds 127.0.0.1:18788, a hub usually
- * binds 127.0.0.1:18790. Re-rendering the template (dshlink tunnel sync on the node/hub side) is
- * all it takes to switch the app to a hub, no Java change needed.
+ * <p>The visitor configuration used to be baked into the APK under assets/tunnel/frpc.toml. Since
+ * 0.5.0 the distribution build is credential-free and the configuration is imported at runtime
+ * from a connection string minted by the hub administrator (see ConnectProfile): it lands in
+ * filesDir/tunnel/frpc.toml and takes priority. A build that still bundles assets/tunnel keeps
+ * working (internal deployments), and only when neither source exists does the app refuse to
+ * start the tunnel with an actionable message.
+ *
+ * <p>The visitor's local bind port is always read from the frpc.toml that is actually used, so one
+ * APK works for a node gateway (usually 18788) and for a hub (usually 18790).
  */
 final class TunnelManager {
     private static final String TAG = "dshlink-tunnel";
-    private static final int DEFAULT_PORT = 18788;
+    static final int DEFAULT_PORT = 18788;
+    static final String NO_PROFILE_MESSAGE =
+            "尚未导入隧道配置，请向 hub 管理员获取连接串/配置文件并导入";
     private static final long START_TIMEOUT_MS = 20000L;
     private static final Pattern BIND_PORT = Pattern.compile("(?m)^\\s*bindPort\\s*=\\s*(\\d+)");
+    private static final Pattern ANSI_ESCAPE = Pattern.compile("\\u001B\\[[0-9;]*[A-Za-z]");
+    private static final String[] TLS_FILES = {"ca.crt", "client.crt", "client.key"};
 
     private static Process process;
     private static File logFile;
     private static int localPort = DEFAULT_PORT;
-    private static boolean portResolved;
 
     private TunnelManager() {}
 
-    /** Local URL of the STCP visitor, derived from the bundled template (18788 node / 18790 hub). */
+    /** The frpc.toml imported from a connection profile (filesDir/tunnel/frpc.toml). */
+    static File importedConfig(Context context) {
+        return new File(context.getFilesDir(), "tunnel/frpc.toml");
+    }
+
+    static boolean hasImportedProfile(Context context) {
+        return context != null && importedConfig(context).isFile();
+    }
+
+    /** Local URL of the STCP visitor, derived from the profile/asset config that would be used. */
     static synchronized String localUrl(Context context) {
-        resolvePort(context);
-        return "http://127.0.0.1:" + localPort;
+        int port = currentPort(context);
+        return "http://127.0.0.1:" + port;
     }
 
     static synchronized boolean isRunning() {
         return process != null && process.isAlive();
     }
 
+    /** Parses the visitor's local bindPort out of an frpc.toml text. Returns 0 when absent. */
+    static int parseBindPort(String toml) {
+        if (toml == null || toml.isEmpty()) return 0;
+        Matcher matcher = BIND_PORT.matcher(toml);
+        int port = 0;
+        while (matcher.find()) {
+            try {
+                port = Integer.parseInt(matcher.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return port;
+    }
+
     static synchronized void start(Context context) throws IOException {
-        resolvePort(context);
-        if (isRunning() && healthy()) return;
-        stop();
+        if (context == null) throw new IOException("应用上下文为空");
 
         File dir = new File(context.getFilesDir(), "tunnel");
         if (!dir.isDirectory() && !dir.mkdirs()) {
             throw new IOException("无法创建中转目录 " + dir);
         }
-        copyAsset(context, "tunnel/ca.crt", new File(dir, "ca.crt"));
-        copyAsset(context, "tunnel/client.crt", new File(dir, "client.crt"));
-        copyAsset(context, "tunnel/client.key", new File(dir, "client.key"));
-        String template = readAsset(context, "tunnel/frpc.toml");
-        File config = new File(dir, "frpc.toml");
+
+        // Imported profile first; the build-time asset is only an internal-deployment fallback.
+        File imported = importedConfig(context);
+        String template = null;
+        boolean fromProfile = false;
+        if (imported.isFile()) {
+            template = readText(imported);
+            fromProfile = true;
+        } else {
+            try {
+                template = readAsset(context, "tunnel/frpc.toml");
+            } catch (IOException ignored) {
+                template = null;
+            }
+        }
+        if (template == null || template.trim().isEmpty()) {
+            throw new IOException(NO_PROFILE_MESSAGE);
+        }
+        int port = parseBindPort(template);
+        if (port <= 0) port = DEFAULT_PORT;
+        localPort = port;
+
+        if (isRunning() && healthy()) return;
+        stop();
+
+        if (fromProfile) {
+            // Only demand the certificate files the rendered frpc.toml actually references: a
+            // profile may legitimately carry a subset (e.g. STCP secret only, no mutual TLS).
+            for (String name : TLS_FILES) {
+                if (template.contains("{{DIR}}/" + name) && !new File(dir, name).isFile()) {
+                    throw new IOException("导入的隧道配置缺少 " + name + "，请重新导入连接串/配置文件");
+                }
+            }
+        } else {
+            copyAsset(context, "tunnel/ca.crt", new File(dir, "ca.crt"));
+            copyAsset(context, "tunnel/client.crt", new File(dir, "client.crt"));
+            copyAsset(context, "tunnel/client.key", new File(dir, "client.key"));
+        }
+        // Keep the imported frpc.toml verbatim (with its {{DIR}} placeholders); the render used by
+        // frpc is written next to it as frpc.runtime.toml.
+        File config = new File(dir, "frpc.runtime.toml");
         writeText(config, template.replace("{{DIR}}", dir.getAbsolutePath()));
 
         ApplicationInfo info = context.getApplicationInfo();
@@ -81,7 +146,7 @@ final class TunnelManager {
         builder.directory(dir);
         builder.redirectErrorStream(true);
         builder.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile));
-        Log.i(TAG, "starting " + binary + " -c " + config);
+        Log.i(TAG, "starting " + binary + " -c " + config + " (" + (fromProfile ? "imported profile" : "bundled asset") + ")");
         process = builder.start();
 
         long deadline = System.currentTimeMillis() + START_TIMEOUT_MS;
@@ -98,7 +163,7 @@ final class TunnelManager {
                 break;
             }
         }
-        String tail = readTail(logFile, 4000);
+        String tail = readTail(logFile, 16000);
         stop();
         throw new IOException("frpc 未能在 " + (START_TIMEOUT_MS / 1000) + " 秒内建立中转。日志：\n" + tail);
     }
@@ -116,19 +181,28 @@ final class TunnelManager {
         process = null;
     }
 
-    private static void resolvePort(Context context) {
-        if (portResolved || context == null) return;
-        try {
-            String toml = readAsset(context, "tunnel/frpc.toml");
-            Matcher matcher = BIND_PORT.matcher(toml);
-            int port = 0;
-            while (matcher.find()) port = Integer.parseInt(matcher.group(1));
-            if (port > 0) localPort = port;
-            portResolved = true;
-            Log.i(TAG, "tunnel local port " + localPort);
-        } catch (IOException | RuntimeException err) {
-            Log.w(TAG, "cannot read tunnel/frpc.toml: " + err);
+    /** Port of the configuration that the next start would use (imported profile, else asset). */
+    private static int currentPort(Context context) {
+        String toml = null;
+        if (context != null) {
+            File imported = importedConfig(context);
+            if (imported.isFile()) {
+                try {
+                    toml = readText(imported);
+                } catch (IOException err) {
+                    Log.w(TAG, "cannot read imported frpc.toml: " + err);
+                }
+            }
         }
+        if (toml == null && context != null) {
+            try {
+                toml = readAsset(context, "tunnel/frpc.toml");
+            } catch (IOException err) {
+                toml = null;
+            }
+        }
+        int port = parseBindPort(toml);
+        return port > 0 ? port : DEFAULT_PORT;
     }
 
     private static boolean healthy() {
@@ -175,6 +249,19 @@ final class TunnelManager {
         }
     }
 
+    private static String readText(File file) throws IOException {
+        InputStream in = new FileInputStream(file);
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            in.close();
+        }
+    }
+
     private static void writeText(File file, String text) throws IOException {
         OutputStream out = new FileOutputStream(file);
         try {
@@ -200,12 +287,34 @@ final class TunnelManager {
                     if (read < 0) break;
                     offset += read;
                 }
-                return new String(buffer, 0, offset, StandardCharsets.UTF_8);
+                return cleanLogTail(new String(buffer, 0, offset, StandardCharsets.UTF_8));
             } finally {
                 in.close();
             }
         } catch (IOException err) {
             return "(cannot read log: " + err.getMessage() + ")";
         }
+    }
+
+    /**
+     * frpc writes ANSI-coloured log lines; the colour codes are noise in an AlertDialog, and a
+     * retry loop can log hundreds of lines before the 20 s timeout. Keep the last handful of
+     * distinct lines so the dialog stays readable while still showing the actual error.
+     */
+    private static String cleanLogTail(String raw) {
+        if (raw == null || raw.isEmpty()) return "(no log)";
+        String text = ANSI_ESCAPE.matcher(raw).replaceAll("");
+        String[] lines = text.split("\n", -1);
+        StringBuilder builder = new StringBuilder();
+        int first = Math.max(0, lines.length - 12);
+        for (int i = first; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.isEmpty()) continue;
+            builder.append(line).append('\n');
+        }
+        String result = builder.toString().trim();
+        if (result.isEmpty()) return "(no log)";
+        if (result.length() > 1200) result = result.substring(result.length() - 1200);
+        return result;
     }
 }

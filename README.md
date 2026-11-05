@@ -29,6 +29,10 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - **A phone controller (0.6).** The Android app in `android/` connects to one node with a
   `device` token, lists its DSH workspaces/sessions, follows a transcript live while the screen is
   on, and sends messages via `sessions.prompt`. It is a controller, not a node.
+- **Hand it to someone else (0.9).** One portable bundle carries the CLI, docs, integrations and
+  the Android APK (plus optional frpc), and one **phone connect code** onboards a phone to a hub:
+  the code carries its own `device` token and, with FRP, the STCP tunnel and certificates. Nothing
+  secret is baked into the APK.
 
 ---
 
@@ -41,6 +45,7 @@ files, queue messages while the other side is offline, and appear inside DSH as 
 - [Talk to a specific conversation (0.4)](#talk-to-a-specific-conversation-04)
 - [Control DSH from a phone (0.6, hub entry 0.8)](#control-dsh-from-a-phone-06-hub-entry-08)
 - [Hub topology: one centre, many nodes (0.8)](#hub-topology-one-centre-many-nodes-08)
+- [Distribute and deploy (0.9)](#distribute-and-deploy-09)
 - [NAT traversal with FRP STCP](#nat-traversal-with-frp-stcp)
 - [Command reference](#command-reference)
 - [Security model](#security-model)
@@ -271,6 +276,32 @@ peer-relayed inbound messages and ignores its `peers` list. The phone app 0.4.0 
 instead of a node. Design, decisions and API: [`docs/HUB-TOPOLOGY-DESIGN.md`](docs/HUB-TOPOLOGY-DESIGN.md);
 console guide: [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md).
 
+## Distribute and deploy (0.9)
+
+`npm run bundle` (or `powershell -File scripts\build-bundle.ps1`) produces
+`dist/dsh-link-<version>-portable.zip` / `.tar.gz`: CLI + source + docs + integrations + examples
++ tests, the frpc binaries (`-NoVendor` to skip) and — by default — the newest Android APK under
+`apk/`, plus `SHA256SUMS.txt` and `BUNDLE-INFO.json` (with the APK version and sha256).
+`-Apk <path>` pins a specific build, `-NoApk` omits it. `scripts/verify-bundle.ps1` unpacks the
+result and pairs it with a local node end to end.
+
+To run a hub **for other people**, [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) walks through
+frps + certificates, `hub init` with the FRP parameters, running `hub serve` as a service,
+enrolling nodes (the first enrollment needs a route to the hub) and handing out access. A phone is
+onboarded with a **connect code**:
+
+```powershell
+# on the hub
+node bin\dshlink.mjs hub invite --phone --label alice --out alice-phone.txt
+# or: hub console -> 手机接入 -> generate / copy / download
+```
+
+The recipient installs the APK (`apk/` in the bundle) and imports the code; it already carries the
+hub URL, a fresh `device` token and — when the hub has FRP enabled — the STCP visitor config and
+client certificate. Codes expire (default 2 h), every phone gets its own token, and revoking that
+token cuts the phone off. The APK itself contains no secrets and no relay credentials; it can also
+reach a hub over a LAN/VPN without a tunnel (`--no-tunnel --url http://<hub>:8790`).
+
 ## NAT traversal with FRP STCP
 
 When the machines share no LAN and you have no public port, put an `frps` on a host with a public
@@ -402,7 +433,7 @@ dsh-link/
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
 ├── android/                # Android controller app (Java, no Gradle dependencies) + build-apk.ps1
-├── test/                   # 26 test files / 215 checks + CLI smoke script
+├── test/                   # 27 test files / 225 checks + CLI smoke script
 ├── docs/                   # architecture, design, protocol, DSH access, directed conversations, hub, FRP, operations, troubleshooting, mobile
 └── examples/               # sanitised config samples
 ```
@@ -410,7 +441,7 @@ dsh-link/
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 215 checks (frp/MCP suites skip if absent), ~15 s
+node test/run.mjs                                                        # 225 checks (frp/MCP suites skip if absent), ~15 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
@@ -471,7 +502,8 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/DSH-ACCESS.md`](docs/DSH-ACCESS.md) | The 0.3 switches: read-only view, transcripts, capability actions, threat model |
 | [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md) | 0.4: addressing a peer Session, bindings, the bridge's targets policy, fallbacks, wire format |
 | [`docs/HUB-TOPOLOGY-DESIGN.md`](docs/HUB-TOPOLOGY-DESIGN.md) | 0.8 hub topology: architecture, data flows, hub API, enrollment, FRP, security, decisions |
-| [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md) | The hub web console at `/ui`: enroll tokens, node approval, queue, settings, admin APIs |
+| [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md) | The hub web console at `/ui`: enroll tokens, node approval, queue, settings, phone invites, admin APIs |
+| [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) | 0.9 distribution: build a portable bundle, deploy a hub for others, hand out the APK, upgrade/rollback, security, checklist |
 | [`docs/GATEWAY.md`](docs/GATEWAY.md) | The 8788 loopback token gateway used by the phone relay path |
 | [`docs/FRP.md`](docs/FRP.md) | Public `frps` deployment, STCP provider/visitor, TLS, verification |
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |

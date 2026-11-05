@@ -9,6 +9,7 @@ an STCP `secretKey` or a real host name.
 | `cordis.patch.example.yml` | The DSH profile patch: MCP entry + bridge plugin (what `dshlink install-dsh` writes) |
 | `dsh-mcp-settings.example.yaml` | The same MCP entry on its own, if you edit settings by hand |
 | `frps.toml` | A public-relay `frps` configuration to start from |
+| `hub.config.example.json` | A complete hub config (`<data-dir>/dshlink-hub.config.json`): enrollment limits, files cache, FRP provider |
 
 ## Node config
 
@@ -33,3 +34,26 @@ noticing:
 # try it without touching a real data dir
 node bin\dshlink.mjs status --config examples\dshlink.config.example.json --json
 ```
+
+## Hub config
+
+`hub.config.example.json` is what `dshlink hub init` produces (plus every knob spelled out). It is
+read from `<data-dir>/dshlink-hub.config.json` — a **separate** data dir and port from a node
+(`8790` vs `8787`). Things that matter when handing a hub to someone else:
+
+- `bind` stays `127.0.0.1`: remote access goes through the FRP STCP provider, never a public port.
+  The hub does **not** trust loopback callers; every request needs a token.
+- `frp.provider.secretKey` is the secret a phone/node visitor must present; it is embedded in the
+  phone invite codes issued by `dshlink hub invite --phone` — treat those codes as passwords.
+- `enrollment`: `autoApprove: false` means a new node waits in the console until an admin approves
+  it; `tokenTtlHours` / `maxUsesPerToken` bound how long an enroll token lives.
+- `files`: the hub caches file payloads, so `maxBytes` is a per-file ceiling for transfers that
+  pass through the hub (default 10 MiB).
+- `auth.tokens` starts empty because `hub init` mints the admin token; its sha256 lives here.
+  Never commit a real value of this file.
+
+```powershell
+# validate a candidate config without starting anything
+node bin\dshlink.mjs hub status --config examples\hub.config.example.json --json
+```
+

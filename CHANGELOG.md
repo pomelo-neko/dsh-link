@@ -9,6 +9,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-05
+
+"Hand it to someone else": the project can now be distributed as a portable bundle that ships the
+Android control app, and a phone joins any hub with one connect code — no secrets are baked into
+the APK.
+
+### Added
+
+- **Phone connect codes.** `dshlink hub invite --phone` (and the hub console's "手机接入" card,
+  backed by `POST /api/v1/hub/phone-invite`) mints a `dshlink1:` code that carries everything a
+  phone needs: the entry URL (hub visitor port), a fresh `device` token and — when the hub has
+  FRP enabled — the rendered STCP visitor config plus the client certificate. Codes expire
+  (default 2 h), each phone gets its own, and a lost phone is revoked with one token. The console
+  card takes the phone-reachable hub URL when FRP is off (required) and prefills it from the
+  console's own origin when it is opened on a non-loopback address.
+- **Android control app 0.5.0** (`android/`): imports a connect code, optional embedded frpc
+  tunnel, no bundled tunnel template and no built-in token — the APK itself is safe to hand out.
+- **Distribution docs**: `docs/DISTRIBUTION.md` (build a bundle, deploy a hub for other people,
+  hand out the APK, upgrade/rollback, security boundaries, release checklist),
+  `docs/HUB-CONSOLE.md` §3.5 (phone onboarding), `examples/hub.config.example.json` (sanitized
+  hub config with an FRP provider), `examples/README.md` hub section and
+  `packaging/README-FIRST.md` hub/APK sections.
+- **The bundle ships the APK**: `scripts/build-bundle.ps1` gained `-Apk <path>` / `-NoApk`,
+  picks the newest `android/dist/dshlink-control-*.apk` by default, puts it under `apk/` with an
+  install README, records `apk` in `BUNDLE-INFO.json` and copies `examples/`, `CHANGELOG.md`,
+  `SECURITY.md`, `AIGC-Notice.md` and `README.zh-CN.md`.
+
+### Changed
+
+- Bundle `kind` is now `client+hub` (one archive can run a node or a hub) and `test/` is copied
+  without `.tmp`, so scratch data never leaks into a release.
+- `scripts/build-bundle.ps1` must keep its UTF-8 BOM (`node scripts/ensure-bom.mjs`): Windows
+  PowerShell 5.1 misreads a BOM-less file and the Chinese text breaks the parser.
+
+### Fixed
+
+- **A connect code minted by the CLI was rejected until the hub restarted.** `dshlink hub invite
+  --phone` and `hub token new` edit the hub config file from another process, but a running hub
+  kept the token list it had loaded at startup, so a freshly minted code failed with
+  `401 unauthorized` (the console and HTTP API paths looked fine, which made it look like a bad
+  code). The hub now stat-checks its config file before every authenticated request and swaps in
+  a newer token list; console-side mints merge with it instead of overwriting it. A code works the
+  moment it is generated, no restart.
+- **`scripts/verify-bundle.ps1` raced the unpacked node's config hot-reload.** The script paired
+  the bundle node and immediately sent it a message, but a node reloads its config file on a 1 s
+  poll: the first send could arrive before the freshly minted peer token was in memory and fail
+  with `missing or invalid token`. The script now waits (up to 10 s) until the node's API accepts
+  the paired token before testing delivery.
+
 ## [0.8.1] — 2026-11-05
 
 Real-relay hardening for the hub and a loss-proof enrollment path, found while deploying the hub
@@ -575,7 +624,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.0
 [0.8.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.1
 [0.8.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.0
 [0.7.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.7.0

@@ -75,18 +75,55 @@ node bin\dshlink.mjs push --to <对端名> --root drop --path my.txt --file .\my
 
 细节见 `PAIRING.md`；完整文档在 `docs/`。
 
+## 四、部署 hub（可选：多节点/手机协作）
+
+点对点互连不需要 hub。当节点在 NAT 后面、或要让手机接入时，在**一台有公网 IP 的服务器**上跑 hub：
+
+```powershell
+# 服务器：装 Node 20+，解压本包，初始化（需要先有 frps 与证书，见 docs/FRP.md、docs/DISTRIBUTION.md）
+node bin\dshlink.mjs hub init --name team-hub --port 8790 --frp-server <frps-host> --frp-port 16443 --frp-token <frps-token> --frp-cert C:\certs\client.crt --frp-key C:\certs\client.key --frp-ca C:\certs\ca.crt
+node bin\dshlink.mjs hub serve
+# Web 控制台：http://127.0.0.1:8790/ui （admin token 在 init 时只显示一次）
+```
+
+节点加入：
+
+```powershell
+node bin\dshlink.mjs tunnel setup --server <frps-host> --port 16443 --token <frps-token>
+node bin\dshlink.mjs hub enroll --url http://<hub 地址>:8790 --token <enroll token>   # enroll token 在 hub 上签发
+node bin\dshlink.mjs tunnel sync
+node bin\dshlink.mjs hub status
+```
+
+完整步骤、拓扑与排错见 `docs/DISTRIBUTION.md`、`docs/HUB-TOPOLOGY-DESIGN.md`、`docs/HUB-CONSOLE.md`。
+
+## 五、手机控制端（APK）
+
+包内 `apk/` 里是 Android 控制端（0.5.0+，**不含任何密钥**）：
+
+1. 把 APK 传到手机安装（允许安装未知来源应用）；
+2. 在 hub 上生成连接串：`node bin\dshlink.mjs hub invite --phone --out phone.txt`
+   （或 Web 控制台“手机接入”卡片）；
+3. 手机 App → **导入连接串**（粘贴或选文件）→ 勾选 STCP 中转 → 连接；
+4. 之后可以浏览工作区/会话、看实时消息、发送消息（steer/queue）。
+
+连接串等同密码（内含 device token 与隧道凭据），请私下发送；每个手机一份，丢失后在 hub 上
+`hub token rm --id <id>` 吊销。
+
 ## 包里有什么
 
 | 路径 | 说明 |
 |---|---|
-| `bin/dshlink.mjs` | CLI：init / serve / send / inbox / pull / push / tunnel / invite / doctor / install-dsh |
-| `src/` | HTTP API、MCP 端点、消息存储、文件沙箱、FRP 隧道 |
+| `bin/dshlink.mjs` | CLI：init / serve / send / inbox / pull / push / tunnel / invite / hub / doctor / install-dsh |
+| `src/` | HTTP API、MCP 端点、消息存储、文件沙箱、FRP 隧道、hub（中心服务器） |
+| `apk/` | Android 控制端 APK（0.5.0+，出厂不含密钥；连接串在手机上导入） |
 | `vendor/frp/windows-amd64/frpc.exe` | FRP **客户端**（v0.71.0，Windows） |
 | `vendor/frp/linux-amd64/frpc` | FRP **客户端**（v0.71.0，Linux x86_64） |
 | `integrations/dsh-skill/` | 给 DSH agent 的技能（install-dsh 会装上） |
 | `integrations/aliyun-mcp.mjs` | 可选：经 MCPHub 调阿里云 OpenAPI MCP |
-| `docs/` | 设计、协议、DSH 接入、FRP 部署、跨公网实测记录 |
-| `test/` | 116 项自测 + 真实进程冒烟：`node test/run.mjs` |
+| `docs/` | 设计、协议、DSH 接入、FRP 部署、hub 拓扑、分发部署、跨公网实测记录 |
+| `examples/` | 节点 / hub / frps / DSH 配置样例（全部为占位值） |
+| `test/` | 全量自测 + 真实进程冒烟：`node test/run.mjs` |
 | `install.ps1` / `install.sh` | 本页的安装脚本 |
 | `SHA256SUMS.txt` | 完整性校验（`sha256sum -c` / `Get-FileHash`） |
 

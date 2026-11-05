@@ -127,6 +127,23 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   </section>
 
   <section class="card">
+    <div class="card-head"><h2>手机接入</h2><span class="muted">为一部手机生成一次性连接串：内含 device 令牌；hub 已启用 FRP 时还会内嵌 STCP 隧道与证书。APK 本身不含任何密钥。</span></div>
+    <div class="row wrap">
+      <input id="phLabel" placeholder="标签（例如 我的手机）" class="short">
+      <input id="phTtl" type="number" min="0" value="2" title="有效小时数，0 表示不过期" class="tiny">
+      <span class="muted">小时有效</span>
+      <input id="phUrl" placeholder="手机可访问的 hub 地址（无 STCP 时必填，如 http://192.0.2.10:8790）" class="short" style="min-width:300px">
+      <button id="phoneBtn" class="btn primary" type="button">生成手机连接串</button>
+    </div>
+    <div id="phoneOut" class="minted hidden">
+      <div class="muted" id="phoneMeta"></div>
+      <textarea id="phoneCode" readonly rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px"></textarea>
+      <div class="row"><button id="phoneCopy" class="btn" type="button">复制连接串</button><button id="phoneDownload" class="btn" type="button">下载连接文件</button></div>
+      <div class="muted">手机 App 0.5.0+：导入连接串 → 粘贴；或把下载的文件发到手机后从文件导入。令牌只显示这一次。</div>
+    </div>
+  </section>
+
+  <section class="card">
     <div class="card-head"><h2>缓存区（待投递队列）</h2>
       <div class="grow"></div>
       <label class="muted"><input id="pendingOnly" type="checkbox" checked> 只看待投递</label>
@@ -160,7 +177,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   'use strict';
   var TOKEN_KEY = 'dshlink-hub-token';
   var state = {
-    token: '', timer: null, signedIn: false, settingsDirty: false, mintedToken: '',
+    token: '', timer: null, signedIn: false, settingsDirty: false, mintedToken: '', phoneCode: '',
     status: null, nodes: [], tokens: [], outbox: [], hub: null, settings: null,
     consoleUrl: '', running: null
   };
@@ -549,6 +566,42 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     try { document.execCommand('copy'); toast('已复制'); } catch (err) { toast('复制失败，请手动选择令牌', true); }
     document.body.removeChild(area);
   }
+  function generatePhone() {
+    var label = $('phLabel').value.trim() || 'phone';
+    var ttl = Number($('phTtl').value);
+    var url = ($('phUrl').value || '').trim();
+    request('/api/v1/hub/phone-invite', { method: 'POST', body: { label: label, ttlHours: isNaN(ttl) ? 2 : ttl, url: url || null } }).then(function (result) {
+      state.phoneCode = result.code;
+      $('phoneCode').value = result.code;
+      var summary = result.summary;
+      $('phoneMeta').textContent = '入口 ' + summary.entry.url + ' · ' +
+        (summary.hasTunnel ? '内嵌 STCP（本地端口 ' + summary.tunnelBindPort + '）' : '无隧道，需手机直连') +
+        ' · 令牌 ' + summary.tokenId + (result.expiresAt ? '，' + fmtTime(result.expiresAt) + ' 过期' : '，不过期');
+      show('phoneOut', true);
+      toast('连接串已生成，只显示这一次');
+      return load(true);
+    }).catch(function (err) { toast(err.message || String(err), true); });
+  }
+  function copyPhone() {
+    var text = state.phoneCode || '';
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制连接串'); }, function () { fallbackCopy(text); });
+    } else fallbackCopy(text);
+  }
+  function downloadPhone() {
+    var code = state.phoneCode || '';
+    if (!code) return;
+    var blob = new Blob([code + '\n'], { type: 'text/plain' });
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'dshlink-phone-connect.txt';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+    toast('已下载连接文件');
+  }
   function flushQueue() {
     request('/api/v1/hub/flush', { method: 'POST' }).then(function (result) {
       toast('已重投 ' + result.attempted + ' 条：成功 ' + result.delivered + '，失败 ' + result.failed + '，跳过 ' + result.skipped);
@@ -645,12 +698,20 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   }
 
   function init() {
+    // When the console is opened on a LAN/public address, that address is what the phone should dial.
+    var hostName = location.hostname;
+    if (hostName && hostName !== '127.0.0.1' && hostName !== 'localhost' && hostName !== '::1' && hostName !== '[::1]') {
+      $('phUrl').value = location.origin;
+    }
     $('loginBtn').addEventListener('click', login);
     $('tokenInput').addEventListener('keydown', function (ev) { if (ev.key === 'Enter') login(); });
     $('refreshBtn').addEventListener('click', function () { load(false); });
     $('logoutBtn').addEventListener('click', logout);
     $('mintBtn').addEventListener('click', mintToken);
     $('copyBtn').addEventListener('click', copyMinted);
+    $('phoneBtn').addEventListener('click', generatePhone);
+    $('phoneCopy').addEventListener('click', copyPhone);
+    $('phoneDownload').addEventListener('click', downloadPhone);
     $('flushBtn').addEventListener('click', flushQueue);
     $('saveSettingsBtn').addEventListener('click', saveSettings);
     $('auditBtn').addEventListener('click', loadAudit);

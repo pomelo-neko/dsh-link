@@ -17,10 +17,31 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="连接一个 dsh-link 中心服务器（hub，默认 8790）或单个节点（8787），浏览并控制它登记或直连的 DSH 工作区与会话。只在连接或刷新时传输数据。"
+        android:text="连接一个 dsh-link 中心服务器（hub）或单个节点，浏览并控制它登记或直连的 DSH 工作区与会话。通用 APK 不含任何凭据：先导入 hub 管理员给你的连接串/配置文件。只在连接或刷新时传输数据。"
         android:textSize="12sp"
         android:textColor="#6B7280"
-        android:paddingBottom="12dp" />
+        android:paddingBottom="8dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="4dp">
+
+        <Button
+            android:id="@+id/import_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="2"
+            android:text="导入连接串/配置文件" />
+
+        <Button
+            android:id="@+id/import_file_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="从文件导入" />
+    </LinearLayout>
 
     <EditText
         android:id="@+id/url_input"
@@ -42,8 +63,17 @@
         android:id="@+id/tunnel_check"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="通过阿里云 STCP 中转（内置 frpc；端口来自内置隧道模板：节点网关 18788 / hub 18790）"
+        android:text="通过阿里云 STCP 中转（需先导入隧道配置；端口从 frpc.toml 读取）"
         android:textSize="12sp" />
+
+    <TextView
+        android:id="@+id/profile_info"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="2dp"
+        android:textSize="11sp"
+        android:textColor="#6B7280"
+        android:visibility="gone" />
 
     <LinearLayout
         android:layout_width="match_parent"

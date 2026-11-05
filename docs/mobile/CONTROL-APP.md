@@ -1,7 +1,10 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.4.0** (shipped with the dsh-link 0.8.0 tree; the app is versioned
-independently from the node). v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 made the
+Status: **implemented, v0.5.0** (shipped with the dsh-link 0.9.0 tree; the app is versioned
+independently from the node). v0.5.0 makes the APK **safe to hand out**: a phone joins with a
+`dshlink1:` connect code that carries the entry URL, its own `device` token and (when the hub has
+FRP) the rendered STCP visitor profile + client certificate, so no tunnel template or credential is
+baked into the APK. v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 made the
 app a network-aware controller: it discovers the dsh-link network from the node it connects to,
 lets the user pick any **directly-connected** node and browse/control that node's DSH through the
 gateway relay, labels subagent Sessions, and folds consecutive tool-call/tool-result rows into one
@@ -144,12 +147,13 @@ Deliberate choices:
   body. This keeps long agent transcripts readable without hiding data from the user.
 - **Subagent Sessions are labelled (0.3.0).** Session rows with `origin:"subagent"`, a parent or a
   delegation depth show the prefix `子智能体 ·` plus parent/depth; the workspace line counts them.
-- **Optional built-in relay (0.2.0, gateway path since 0.3.0).** Android cannot run a desktop frpc,
-  so the APK packages `frpc` as a native library for x86_64 and arm64-v8a. Checking
-  "通过阿里云 STCP 中转至 8788 网关" starts that visitor as a child process, waits for
-  `http://127.0.0.1:18788/healthz`, then points the normal `ApiClient` at it; unchecking (or leaving
-  the screen) stops the child. This is deliberately self-use only: the APK contains the relay
-  credentials (section 5).
+- **Optional built-in relay (0.2.0, gateway path since 0.3.0, runtime profile since 0.5.0).**
+  Android cannot run a desktop frpc, so the APK packages `frpc` as a native library for x86_64 and
+  arm64-v8a. Checking "通过阿里云 STCP 中转" starts a visitor as a child process, waits for
+  `http://127.0.0.1:<bindPort>/healthz`, then points the normal `ApiClient` at it; unchecking (or
+  leaving the screen) stops the child. The visitor config and client certificate come from the
+  imported connect code (0.5.0), not from the APK; an internal build may still fall back to
+  `assets/tunnel/` when no profile was imported (section 5).
 
 ## 2. API surface used
 
@@ -392,11 +396,13 @@ out of scope for this repo.
   tunnel lands on the token-checking gateway, so the STCP secret is not by itself enough to reach
   the node API. For any other internet path, terminate TLS in a reverse proxy (Caddy/Nginx) or keep
   the node off the public internet.
-- **Bundled relay credentials (0.2.0/0.3.0)**: the APK embeds the frps auth token, the mTLS client
-  certificate/key and the STCP `secretKey`. Anyone with the APK can reach the gateway port, but the
-  gateway still requires a device token on every request. Treat the APK as a private build: do not
-  upload it to a store or public link, and if it leaks rotate the frps token, re-issue the client
-  certificate, change the STCP secret and revoke the device token.
+- **Connect codes and credentials (0.5.0)**: a distributed APK ships **no** frps token, mTLS key or
+  STCP `secretKey`; everything arrives in the `dshlink1:` code the user imports, so the APK itself
+  is safe to pass around. A code is single-phone, expires (default 2 h) and is revoked with its
+  token. The imported profile (URL, token, tunnel seed, certificate) is stored as plain JSON in the
+  app-private directory — not encrypted at rest — and only one profile is kept at a time. Older
+  self-use builds (0.2.0–0.4.0) with `assets/tunnel/` embedded the relay credentials: treat those
+  as private builds and rotate the frps token / certificate / STCP secret if one leaks.
 - **The gateway closes the trustLocalhost bypass.** STCP requests arrive at the node from
   `127.0.0.1`, which would satisfy `auth.trustLocalhost`; the 0.3.0 tunnel therefore points at
   8788, where every request must present a token and loopback is never trusted. The gateway also
@@ -414,10 +420,10 @@ out of scope for this repo.
 
 ## 6. Known gaps / next steps (B phase)
 
-- **Hub-mode STCP template**: the app can already control a hub over plain HTTP/relay, but the
-  bundled visitor template still targets the node's `dshlink-phone` provider (8788); shipping the
-  hub path needs a `dshlink-hub` visitor template (bindPort 18789) rendered into
-  `android/app/src/main/assets/tunnel/frpc.toml` before building, and a real phone test.
+- **Real-phone acceptance and profile management**: hub-mode STCP works from a hub-minted connect
+  code (verified on the emulator with a real frps), but a physical arm64 phone has not re-run the
+  tunnel path since 0.2.0 and only one profile is saved. Next: multiple saved profiles, encrypted
+  storage keyed by Android Keystore, and an explicit "remove tunnel profile" action.
 - SSE or long-poll endpoint (`/api/v1/dsh/sessions/{id}/events`) for true push and fewer requests;
   this is the main missing node feature.
 - Device-scoped token management API (create/list/revoke from the phone, last-used metadata).

@@ -26,6 +26,7 @@ import { createInboundToken, normalizeConfig, normalizeHubConfig as normalizeNod
 import { createDshView } from '../src/dshview.mjs';
 import { createBridgePresence, createCommandQueue } from '../src/capabilities.mjs';
 import { sha256Hex } from '../src/util.mjs';
+import { PHONE_TUNNEL_BIND_PORT, decodePhoneInvite } from '../src/phone.mjs';
 
 const QUIET = { info() {}, warn() {}, error() {}, debug() {} };
 let counter = 0;
@@ -694,6 +695,9 @@ test('hub: web console serves the UI and its admin APIs', async () => {
     assert.match(page.text, /\/api\/v1\/hub\/status/);
     // A data-URI favicon keeps browsers from requesting /favicon.ico (a 404 shows up as a console error).
     assert.match(page.text, /<link rel="icon" href="data:image\/svg\+xml/);
+    // Phone onboarding card: label + TTL + optional phone-reachable URL (required when FRP is off).
+    assert.match(page.text, /<h2>手机接入<\/h2>/);
+    assert.match(page.text, /id="phUrl"/);
     assert.doesNotMatch(page.text, /tok_/, 'the page must not embed tokens');
 
     const redirect = await fetch(hub.url + '/', { redirect: 'manual' });
@@ -848,4 +852,105 @@ test('hub: web console serves the UI and its admin APIs', async () => {
     await hub.close();
   }
 });
+
+// ---------------------------------------------------------- phone invites ---
+
+test('hub: admins mint phone connect invites with the tunnel embedded', async (t) => {
+  const hub = await startHub('phone', {
+    frp: {
+      enabled: true,
+      serverAddr: '203.0.113.10',
+      serverPort: 16443,
+      token: 'frps-secret',
+      provider: { name: 'dshlink-hub', secretKey: 'stcp-secret' }
+    }
+  });
+  t.after(() => hub.close());
+
+  const minted = await httpJson(hub.url + '/api/v1/hub/phone-invite', {
+    method: 'POST', token: hub.adminToken, body: { label: 'phone-test', ttlHours: 2, maxUses: 3 }
+  });
+  assert.equal(minted.status, 201);
+  assert.ok(minted.json.code.startsWith('dshlink1:'));
+  assert.equal(minted.json.tunnel, true);
+  assert.equal(minted.json.summary.label, 'phone-test');
+  assert.equal(minted.json.summary.entry.url, 'http://127.0.0.1:' + PHONE_TUNNEL_BIND_PORT);
+  assert.ok(!Object.prototype.hasOwnProperty.call(minted.json.summary, 'token'));
+  const decoded = decodePhoneInvite(minted.json.code);
+  assert.equal(decoded.entry.kind, 'hub');
+  assert.equal(decoded.tunnel.bindPort, PHONE_TUNNEL_BIND_PORT);
+  assert.match(decoded.tunnel.frpc, /serverAddr = "203\.0\.113\.10"/);
+  assert.match(decoded.tunnel.frpc, /serverPort = 16443/);
+  assert.match(decoded.tunnel.frpc, /secretKey = "stcp-secret"/);
+  assert.match(decoded.tunnel.frpc, /bindPort = 18790/);
+  const verified = verifyHubToken(hub.cfg, decoded.token);
+  assert.equal(verified.role, 'device');
+  assert.equal(verified.maxUses, 3);
+
+  // The invite token is persisted, so a hub restart keeps it valid.
+  const reloaded = await loadHubConfig({ dataDir: hub.dir });
+  assert.equal(verifyHubToken(reloaded, decoded.token).role, 'device');
+
+  // The mint is audited; device and anonymous callers cannot mint.
+  const audit = await httpJson(hub.url + '/api/v1/audit?limit=50', { token: hub.adminToken });
+  assert.equal(audit.status, 200);
+  assert.ok(audit.json.entries.some((entry) => entry.event === 'hub_phone_invite_created' && entry.tokenId === decoded.tokenId));
+  const asDevice = await httpJson(hub.url + '/api/v1/hub/phone-invite', { method: 'POST', token: hub.deviceToken, body: {} });
+  assert.equal(asDevice.status, 403);
+  const anonymous = await httpJson(hub.url + '/api/v1/hub/phone-invite', { method: 'POST', body: {} });
+  assert.equal(anonymous.status, 401);
+});
+
+test('hub: a hub without frp needs an explicit phone URL', async (t) => {
+  const hub = await startHub('phone-direct');
+  t.after(() => hub.close());
+
+  const missing = await httpJson(hub.url + '/api/v1/hub/phone-invite', {
+    method: 'POST', token: hub.adminToken, body: { label: 'no-url' }
+  });
+  assert.equal(missing.status, 400);
+  assert.match(missing.json.error.message, /frp tunnel|explicit --url/);
+
+  const direct = await httpJson(hub.url + '/api/v1/hub/phone-invite', {
+    method: 'POST', token: hub.adminToken,
+    body: { label: 'lan', noTunnel: true, url: 'http://192.0.2.50:8790/', ttlHours: 0 }
+  });
+  assert.equal(direct.status, 201);
+  assert.equal(direct.json.tunnel, false);
+  assert.equal(direct.json.expiresAt, null);
+  const decoded = decodePhoneInvite(direct.json.code);
+  assert.equal(decoded.tunnel, null);
+  assert.equal(decoded.entry.url, 'http://192.0.2.50:8790');
+});
+
+test('hub: tokens minted by the CLI apply to a running hub without a restart', async (t) => {
+  const hub = await startHub('hot-tokens');
+  t.after(() => hub.close());
+  await saveHubConfig(hub.cfg); // startHub keeps the first config in memory; the CLI edits the file.
+
+  // Simulate `dshlink hub token new` / `hub invite --phone`: another process edits the config
+  // file while the hub is running. The running hub must accept the new token on the next request.
+  const external = await loadHubConfig({ configPath: hub.cfg.configPath });
+  const created = createHubToken(external, { role: 'device', label: 'cli-added' });
+  await saveHubConfig(external);
+  const viaCli = await httpJson(hub.url + '/api/v1/info', { token: created.token });
+  assert.equal(viaCli.status, 200);
+  assert.equal(viaCli.json.name, hub.cfg.name);
+  assert.equal(viaCli.json.role, 'hub');
+  const listed = await httpJson(hub.url + '/api/v1/hub/tokens', { token: hub.adminToken });
+  assert.ok(listed.json.tokens.some((entry) => entry.id === created.id));
+
+  // A console-side mint afterwards must not clobber the externally added token: the hub reloads
+  // the file before handling the request and saves the merged list.
+  const minted = await httpJson(hub.url + '/api/v1/hub/tokens', {
+    method: 'POST', token: hub.adminToken, body: { role: 'device', label: 'console-added' }
+  });
+  assert.equal(minted.status, 201);
+  const afterConsole = await httpJson(hub.url + '/api/v1/info', { token: created.token });
+  assert.equal(afterConsole.status, 200);
+  const reloaded = await loadHubConfig({ configPath: hub.cfg.configPath });
+  assert.ok(reloaded.auth.tokens.some((entry) => entry.id === created.id), 'external token must be persisted');
+  assert.ok(reloaded.auth.tokens.some((entry) => entry.id === minted.json.entry.id), 'console token must be persisted');
+});
+
 

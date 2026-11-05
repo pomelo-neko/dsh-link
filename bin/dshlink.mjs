@@ -25,6 +25,7 @@ import { createHub } from '../src/hub.mjs';
 import { HubStore } from '../src/hubstore.mjs';
 import { HubTunnelManager } from '../src/hubfrp.mjs';
 import { createHubLink } from '../src/hublink.mjs';
+import { PHONE_TUNNEL_BIND_PORT, buildHubPhoneInvite } from '../src/phone.mjs';
 
 const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek Harness 互相通信 / talk between DSH machines
 
@@ -69,6 +70,8 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
               hub status [--node]                           中心状态 / 本机节点链路状态
               hub reconnect                                 手动重连中心（本机节点）
               hub nodes | token list | outbox --pending | flush | revoke <node>
+              hub invite --phone [--ttl-hours 2] [--label L] [--no-tunnel] [--url U] [--out F]
+                                                      生成手机连接串（device token + 内嵌 STCP 隧道）
   install-dsh 把 MCP 配置和技能装进 DSH_HOME                   --profile web --url --write（默认只预览）
               token 认证: --token <admin token> [--bridge-token <bridge token>]
               自动唤醒桥（收到消息自动开对话）:              --bridge --bridge-workspace <目录> [--bridge-session <id>]
@@ -382,6 +385,54 @@ async function cmdHub(args) {
     return;
   }
 
+  if (sub === 'invite') {
+    if (!flagBool(args.phone)) {
+      throw new LinkError(2, 'usage', 'hub invite currently supports --phone (a connect code for the Android control app)');
+    }
+    const { cfg } = await loadHubCtx(args);
+    const maxUses = flagString(args['max-uses']) ? Number(flagString(args['max-uses'])) : null;
+    const created = await buildHubPhoneInvite(cfg, {
+      label: flagString(args.label) ?? 'phone',
+      ttlHours: Number(flagString(args['ttl-hours']) ?? 2),
+      maxUses,
+      visitorPort: Number(flagString(args['visitor-port']) ?? PHONE_TUNNEL_BIND_PORT),
+      tunnel: !flagBool(args['no-tunnel']),
+      url: flagString(args.url) ?? null,
+      note: flagString(args.note) ?? null
+    });
+    await saveHubConfig(cfg);
+    const outFile = flagString(args.out);
+    let saved = null;
+    if (outFile) {
+      saved = path.resolve(outFile);
+      await fs.mkdir(path.dirname(saved), { recursive: true });
+      await fs.writeFile(saved, created.code + '\n', 'utf8');
+    }
+    const summary = created.summary;
+    const lines = [
+      'mobile connect profile for hub "' + summary.entry.name + '"',
+      '  label      ' + summary.label,
+      '  entry      ' + summary.entry.url + ' (kind ' + summary.entry.kind + ')',
+      '  tunnel     ' + (summary.hasTunnel
+        ? 'embedded STCP (visitor bind 127.0.0.1:' + summary.tunnelBindPort + ')'
+        : 'none - the phone must reach the entry URL directly'),
+      '  token      ' + summary.tokenId + ' (device) expires ' + (summary.expiresAt ?? 'never'),
+      saved ? '  file       ' + saved : null,
+      '',
+      'on the phone (dsh-link 控制端 0.5.0+): 导入连接串 → 粘贴下面的 code，或导入已保存的文件',
+      summary.hasTunnel
+        ? '  keep the STCP toggle checked; the app writes the embedded frpc config itself (the APK has no built-in secret)'
+        : '  no STCP in this profile: connect the phone to ' + summary.entry.url + ' over LAN/VPN',
+      '',
+      'code:',
+      created.code,
+      '',
+      'revoke: dshlink hub token rm --id ' + summary.tokenId
+    ].filter((line) => line !== null).join('\n');
+    out({ code: created.code, file: saved, summary, tokenId: created.tokenId, expiresAt: created.expiresAt, tunnel: created.tunnel }, asJson, lines);
+    return;
+  }
+
   if (sub === 'serve') {
     const { cfg, store } = await loadHubCtx(args);
     const hub = createHub({ cfg, store, logger, saveConfig: async (next) => { await saveHubConfig(next); } });
@@ -547,7 +598,7 @@ async function cmdHub(args) {
     return;
   }
 
-  throw new LinkError(2, 'unknown_subcommand', 'unknown: hub ' + sub + ' (try: init | serve | enroll | status | reconnect | nodes | token | outbox | flush | revoke)');
+  throw new LinkError(2, 'unknown_subcommand', 'unknown: hub ' + sub + ' (try: init | serve | invite | enroll | status | reconnect | nodes | token | outbox | flush | revoke)');
 }
 
 async function cmdStatus(args) {

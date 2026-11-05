@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "role": "hub",
+  "name": "team-hub",
+  "nodeId": "hub_0000000000000000",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "publicUrl": null,
+  "dataDir": "C:\\Users\\alice\\.dshlink-hub",
+  "bind": "127.0.0.1",
+  "port": 8790,
+  "defaultNode": null,
+  "retrySeconds": 5,
+  "messageTtlSeconds": 604800,
+  "maxPendingPerTarget": 1000,
+  "heartbeatSeconds": 30,
+  "offlineAfterSeconds": 90,
+  "networkCacheSeconds": 20,
+  "auth": {
+    "tokens": []
+  },
+  "limits": {
+    "maxBodyBytes": 33554432,
+    "maxMessageBytes": 1048576,
+    "maxListEntries": 2000,
+    "requestTimeoutMs": 60000,
+    "maxRequestsPerMinute": 1200
+  },
+  "files": {
+    "enabled": true,
+    "maxBytes": 10485760,
+    "maxConcurrent": 4
+  },
+  "enrollment": {
+    "enabled": true,
+    "mode": "token",
+    "autoApprove": false,
+    "maxNodes": 32,
+    "maxUsesPerToken": 1,
+    "rateLimitPerMinute": 30,
+    "tokenTtlHours": 2
+  },
+  "frp": {
+    "enabled": true,
+    "frpcPath": null,
+    "configPath": null,
+    "logDir": null,
+    "adminPort": 7401,
+    "visitorPortBase": 19110,
+    "serverAddr": "frps.example.com",
+    "serverPort": 16443,
+    "user": "dsh-link",
+    "token": "REPLACE_WITH_YOUR_FRPS_AUTH_TOKEN",
+    "tls": true,
+    "certFile": "C:\\dshlink-certs\\client.crt",
+    "keyFile": "C:\\dshlink-certs\\client.key",
+    "trustedCaFile": "C:\\dshlink-certs\\ca.crt",
+    "provider": {
+      "name": "dshlink-hub",
+      "secretKey": "REPLACE_WITH_A_RANDOM_SECRET_FOR_THE_HUB_PROVIDER"
+    }
+  }
+}

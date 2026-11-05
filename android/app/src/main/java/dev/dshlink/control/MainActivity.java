@@ -1,12 +1,17 @@
 package dev.dshlink.control;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -14,6 +19,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ListView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -21,7 +27,10 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -42,6 +51,12 @@ public class MainActivity extends Activity {
     private static final String KEY_URL = "url";
     private static final String KEY_TOKEN = "token";
     private static final String KEY_TUNNEL = "tunnel";
+    private static final String KEY_PROFILE_LABEL = "profile.label";
+    private static final String KEY_PROFILE_ENTRY_KIND = "profile.entryKind";
+    private static final String KEY_PROFILE_ENTRY_NAME = "profile.entryName";
+    private static final String KEY_PROFILE_EXPIRES_AT = "profile.expiresAt";
+    private static final String KEY_PROFILE_HAS_TUNNEL = "profile.hasTunnel";
+    private static final int REQUEST_OPEN_PROFILE = 1001;
 
     private EditText urlInput;
     private EditText tokenInput;
@@ -49,10 +64,13 @@ public class MainActivity extends Activity {
     private Spinner nodeSpinner;
     private Button connectButton;
     private Button refreshButton;
+    private Button importButton;
+    private Button importFileButton;
     private TextView statusView;
     private TextView summaryView;
     private TextView warningView;
     private TextView emptyView;
+    private TextView profileView;
     private ListView listView;
     private WorkspaceAdapter adapter;
     private ArrayAdapter<String> nodeAdapter;
@@ -79,6 +97,7 @@ public class MainActivity extends Activity {
         summaryView = findViewById(R.id.summary);
         warningView = findViewById(R.id.warning);
         emptyView = findViewById(R.id.empty);
+        profileView = findViewById(R.id.profile_info);
         listView = findViewById(R.id.workspace_list);
         adapter = new WorkspaceAdapter(this);
         listView.setAdapter(adapter);
@@ -111,16 +130,34 @@ public class MainActivity extends Activity {
         tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         tunnelCheck.setChecked(prefs.getBoolean(KEY_TUNNEL, false));
         urlInput.setEnabled(!tunnelCheck.isChecked());
+        updateProfileUi();
         tunnelCheck.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean checked) {
                 urlInput.setEnabled(!checked);
                 if (checked) {
-                    status("将经内置 frpc 连接 " + TunnelManager.localUrl(getApplicationContext())
-                            + "（端口来自内置隧道模板：节点网关 18788 / hub 18790）");
-                } else if (statusView.getText().toString().startsWith("将经内置")) {
+                    String source = TunnelManager.hasImportedProfile(getApplicationContext())
+                            ? "已导入的隧道配置" : "内置隧道模板；尚未导入隧道配置";
+                    status("将经 frpc 连接 " + TunnelManager.localUrl(getApplicationContext())
+                            + "（端口从 " + source + " 的 frpc.toml 读取）");
+                } else if (statusView.getText().toString().startsWith("将经 frpc")) {
                     status("");
                 }
+            }
+        });
+
+        importButton = findViewById(R.id.import_button);
+        importFileButton = findViewById(R.id.import_file_button);
+        importButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                openImportDialog();
+            }
+        });
+        importFileButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                pickProfileFile();
             }
         });
 
@@ -209,8 +246,17 @@ public class MainActivity extends Activity {
                             setBusy(false);
                             status("中转启动失败");
                             String message = tunnelErr.getMessage() == null
-                                    ? "内置 frpc 启动失败" : tunnelErr.getMessage();
-                            Ui.showError(MainActivity.this, new ApiException(0, message, "tunnel_error"));
+                                    ? "frpc 启动失败" : tunnelErr.getMessage();
+                            if (message.contains("尚未导入隧道配置")) {
+                                message += "\n\n点上面的“导入连接串/配置文件”，用 hub 管理员给你的连接串"
+                                        + "导入隧道凭据；或者取消勾选“通过阿里云 STCP 中转”，"
+                                        + "改用局域网/VPN 直连入口地址。";
+                            }
+                            new AlertDialog.Builder(MainActivity.this)
+                                    .setTitle("中转启动失败")
+                                    .setMessage(message)
+                                    .setPositiveButton("知道了", null)
+                                    .show();
                         }
                     });
                 } catch (final ApiException err) {
@@ -697,6 +743,220 @@ public class MainActivity extends Activity {
             return name + (heartbeat.isEmpty() ? "（离线）" : "（离线 · " + heartbeat + "）");
         }
         return name + "（在线）";
+    }
+
+    /** Asks for a connection string / profile and also offers the system file picker. */
+    private void openImportDialog() {
+        final EditText input = new EditText(this);
+        input.setHint("粘贴 dshlink1: 开头的连接串，或打开 .json/.dshlink 文件后粘贴其中的内容");
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setMinLines(5);
+        input.setMaxLines(12);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        int pad = Ui.dp(this, 16);
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(pad, Ui.dp(this, 4), pad, 0);
+        box.addView(input, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle("导入连接串/配置文件")
+                .setMessage("连接串和配置文件由 hub 管理员生成，包含你专用的入口地址、device token"
+                        + "（可能还有 STCP 隧道凭据）。导入后只保存在本机 App 私有目录。")
+                .setView(box)
+                .setPositiveButton("导入", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        importText(input.getText().toString(), "粘贴的连接串");
+                    }
+                })
+                .setNeutralButton("从文件选择", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        pickProfileFile();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** Opens the system document picker for a .txt/.json/.dshlink profile file. */
+    private void pickProfileFile() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                new String[]{"text/plain", "application/json", "application/octet-stream"});
+        try {
+            startActivityForResult(intent, REQUEST_OPEN_PROFILE);
+        } catch (ActivityNotFoundException err) {
+            Ui.toast(this, "没有可用的文件选择器，请把配置内容粘贴到导入对话框");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_OPEN_PROFILE || resultCode != RESULT_OK) return;
+        if (data == null || data.getData() == null) return;
+        final Uri uri = data.getData();
+        status("正在读取连接配置文件…");
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                String text;
+                try {
+                    text = readTextUri(uri);
+                } catch (final IOException err) {
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            status("导入失败");
+                            showImportError("无法读取所选文件："
+                                    + (err.getMessage() == null ? "未知错误" : err.getMessage()));
+                        }
+                    });
+                    return;
+                }
+                final String content = text;
+                final String source = "文件 " + displayName(uri);
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        importText(content, source);
+                    }
+                });
+            }
+        });
+    }
+
+    /** Parses the pasted/loaded profile off the UI thread, then applies and connects. */
+    private void importText(final String text, final String source) {
+        status("正在解析连接配置…");
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final ConnectProfile profile = ConnectProfile.parse(text);
+                    profile.applyTunnelFiles(getApplicationContext());
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            applyProfile(profile, source);
+                        }
+                    });
+                } catch (final IOException err) {
+                    final String message = err.getMessage() == null
+                            ? "无法导入连接配置" : err.getMessage();
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            status("导入失败");
+                            showImportError(message);
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    /** Stores an imported profile in prefs, fills the form and connects right away. */
+    private void applyProfile(ConnectProfile profile, String source) {
+        // A new profile may point at a different frpc visitor; restart the tunnel on connect.
+        TunnelManager.stop();
+        SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        editor.putString(KEY_URL, profile.url);
+        editor.putString(KEY_TOKEN, profile.token);
+        editor.putBoolean(KEY_TUNNEL, profile.hasTunnel);
+        editor.putString(KEY_PROFILE_LABEL, profile.label);
+        editor.putString(KEY_PROFILE_ENTRY_KIND, profile.entryKind);
+        editor.putString(KEY_PROFILE_ENTRY_NAME, profile.entryName);
+        editor.putString(KEY_PROFILE_EXPIRES_AT, profile.expiresAt);
+        editor.putBoolean(KEY_PROFILE_HAS_TUNNEL, profile.hasTunnel);
+        editor.apply();
+
+        urlInput.setText(profile.url);
+        urlInput.setEnabled(!profile.hasTunnel);
+        tokenInput.setText(profile.token);
+        tunnelCheck.setChecked(profile.hasTunnel);
+        updateProfileUi();
+
+        String message = profile.summary() + "\n来源：" + source;
+        if (profile.expired()) {
+            message += "\n\n注意：该连接配置已过期，连接可能被拒绝；请让 hub 管理员重新生成。";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("已导入连接配置")
+                .setMessage(message)
+                .setPositiveButton("开始连接", null)
+                .show();
+        connect();
+    }
+
+    /** Shows which connection profile is stored (hidden until one is imported). */
+    private void updateProfileUi() {
+        if (profileView == null) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String label = prefs.getString(KEY_PROFILE_LABEL, "");
+        if (label.isEmpty()) {
+            profileView.setVisibility(View.GONE);
+            return;
+        }
+        String entryName = prefs.getString(KEY_PROFILE_ENTRY_NAME, "");
+        String entryKind = prefs.getString(KEY_PROFILE_ENTRY_KIND, "hub");
+        String expiresAt = prefs.getString(KEY_PROFILE_EXPIRES_AT, "");
+        boolean hasTunnel = prefs.getBoolean(KEY_PROFILE_HAS_TUNNEL, false);
+        StringBuilder text = new StringBuilder("已导入：").append(label)
+                .append(" · ").append("node".equals(entryKind) ? "节点" : "中心服务器");
+        if (!entryName.isEmpty()) text.append(" ").append(entryName);
+        if (!expiresAt.isEmpty()) text.append(" · 到期 ").append(ConnectProfile.formatExpires(expiresAt));
+        text.append(" · ").append(hasTunnel ? "含内置隧道" : "无隧道（直连）");
+        profileView.setText(text.toString());
+        profileView.setVisibility(View.VISIBLE);
+    }
+
+    private void showImportError(String message) {
+        new AlertDialog.Builder(this)
+                .setTitle("导入失败")
+                .setMessage(message + "\n\n请向 hub 管理员索取新的连接串/配置文件："
+                        + "连接串以 dshlink1: 开头，文件导入支持 .json/.txt/.dshlink 内容。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    private String readTextUri(Uri uri) throws IOException {
+        InputStream in = getContentResolver().openInputStream(uri);
+        if (in == null) throw new IOException("文件不可读");
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+                if (out.size() > 4 * 1024 * 1024) {
+                    throw new IOException("文件超过 4 MB，可能不是连接配置文件");
+                }
+            }
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            in.close();
+        }
+    }
+
+    private String displayName(Uri uri) {
+        String name = null;
+        android.database.Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(uri,
+                    new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+        } catch (RuntimeException ignored) {
+            // Some providers reject the query; the last path segment is good enough for a label.
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+        if (name == null || name.isEmpty()) name = uri.getLastPathSegment();
+        return name == null ? uri.toString() : name;
     }
 
     private void status(String text) {

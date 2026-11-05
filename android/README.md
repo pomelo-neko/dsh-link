@@ -5,7 +5,7 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 模式），把入口背后的 DSH 工作区/会话/transcript 显示在手机上，并通过能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.4.0`，minSdk 26，targetSdk 36
+- 包名：`dev.dshlink.control`，版本 `0.5.0`，minSdk 26，targetSdk 36
 - 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX、无第三方依赖**
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
 - 0.3.0：连接后可选择该节点网络里**直连**的其他节点并远程读写/发消息；标注子智能体会话；
@@ -13,6 +13,10 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 - 0.4.0：连接后先探测 `/api/v1/info`，`role:"hub"` / `software:"dsh-link-hub"` / 带
   `nodes` 数组的入口自动进入 **hub 模式**：节点下拉来自 hub 登记表，工作区/会话/transcript/
   发送全部带 `peer=<节点>` 由 hub 转发；默认端口 8790，STCP 模板用 hub 版（本地 18790）
+- 0.5.0：**分发化**——通用 APK 不含任何 frps/STCP 凭据，可以直接发给别人；用户从 hub 管理员
+  拿到 `dshlink1:` 连接串/配置文件，在 App 里“导入连接串/配置文件”或“从文件导入”，App 把
+  自己的隧道 profile 写进私有目录后连接。新增 `-Release` 签名构建、`assets/tunnel/` 改为可选、
+  构建产物附带 SHA-256 清单（见 §3）
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -41,7 +45,8 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 > （已 gitignore）。UI 细节见 `docs/mobile/CONTROL-APP.md` §4 与本文 §7。
 
 0.3.0 内置阿里云 STCP 中转（勾选后不填节点地址，App 自己启动 frpc visitor，落到 8788 网关）；
-经中转连接与收到的真实 DSH 回复见 `docs/mobile/CONTROL-APP.md` §4。
+0.5.0 起凭据不再内置，改为导入 hub 管理员给的连接串（§1.2）。经中转连接与收到的真实 DSH
+回复见 `docs/mobile/CONTROL-APP.md` §4。
 
 ### 1.1 hub 直连模式（0.4.0）
 
@@ -85,6 +90,50 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
   transcript 增量。
 - “插话（steer）”勾选后，`sessions.prompt` 带 `mode:"steer"`：插到 DSH 下一步边界执行，
   优先于排队回合；不勾选则用默认 `queue`。
+
+### 1.2 分发模式：导入连接串/配置文件（0.5.0）
+
+0.5.0 起 App **不再内置任何 frps/STCP 凭据**，所以通用 APK 可以分发给任何人：连哪台 hub、
+用哪套隧道，由 hub 管理员生成的“连接串/配置文件”决定。管理员在 hub 侧执行：
+
+```powershell
+dshlink hub invite --phone --label phone --ttl-hours 2 --out phone.dshlink
+# 可选：--url http://<hub>:8790   指定入口地址（默认 http://127.0.0.1:18790）
+# 可选：--no-tunnel                不打包 STCP 隧道，只给入口地址 + token
+# 可选：--max-uses N --note <备注> 控制 code 使用次数/加说明
+```
+
+hub 的 Web 面板也有对应入口（“手机连接码”，同一个 `POST /api/v1/hub/phone-invite`）。
+
+code 是 `dshlink1:` + `base64url(gzip(JSON))`，里面包含：
+
+- 入口地址（`entry.kind` 为 `hub` 或 `node`）与一个 **device token**（默认限时，可吊销）；
+- 可选的 STCP visitor 配置：`frpc.toml` 文本（含 `{{DIR}}` 占位）+ 实际带上的 mTLS 证书；
+- label / 签发时间 / 到期时间等元数据，用于 App 里展示。
+
+手机上的操作（二选一）：
+
+1. **粘贴**：点“导入连接串/配置文件”→ 把整段 `dshlink1:…` 贴进对话框 → 导入。
+2. **文件**：管理员把 code 保存成文件（`--out` 生成，或文本另存为 `.txt/.json/.dshlink`），
+   传到手机 → 点“从文件导入”→ 选择该文件。
+
+导入后 App 的行为：
+
+- 弹窗显示摘要（标签 / 入口 / 到期时间 / 是否含隧道 / 备注），成功后自动连接；
+- **含隧道**：把 `frpc.toml` 和证书写到应用私有目录 `files/tunnel/`，勾选“通过阿里云 STCP
+  中转”，启动内置 frpc 后用本地端口连接。本地端口从 `frpc.toml` 的 `bindPort` 读取
+  （hub 生成的模板默认 18790）；导入时只要求 `frpc.toml` 实际引用的证书文件存在；
+- **含隧道但写文件失败/缺文件**：提示“导入的隧道配置缺少 xxx，请重新导入连接串/配置文件”；
+- **不含隧道**（`--no-tunnel`）：清掉旧的 `files/tunnel/frpc.toml` 与证书、取消勾选隧道，
+  直接连 `entry.url`（要求手机能 LAN/VPN 到 hub）；
+- URL、token、隧道勾选框自动填好；App 只保存这一份配置，重新导入整体替换；
+- 非法 code / 文件：弹“导入失败”并说明原因，不会崩溃；过期 code 仍可导入，但会提示
+  “该连接配置已过期，连接可能被拒绝；请让 hub 管理员重新生成”。
+
+> 兼容：内部部署仍可把 `assets/tunnel/` 打进 APK（构建脚本检测到 4 个文件齐全时会警告
+> “this APK will contain tunnel credentials”）。带凭据的 APK 只能内部使用、不要分发；
+> 没有 `assets/tunnel/` 时构建出的是通用 APK，运行时若勾选了隧道却还没导入配置，App 会
+> 提示“尚未导入隧道配置，请向 hub 管理员获取连接串/配置文件并导入”。
 
 ## 2. 节点侧准备
 
@@ -140,6 +189,10 @@ node bin\dshlink.mjs hub token new --data-dir <hub数据目录> --role device --
 # 也可以 dshlink hub token new --role device --label phone（用默认数据目录）
 ```
 
+> 0.5.0 起通常不需要手工铸 token：`dshlink hub invite --phone`（或 hub 面板的“手机连接码”）
+> 会把一枚新的 hub device token 直接打进 code，App 导入即可（见 1.2）。手工 `hub token new`
+> 仍适合“已有 token、只想配一个不含隧道的入口”的场景。
+
 hub **从不信任 localhost**：即使 App 经 `adb reverse`/STCP 落到 `127.0.0.1:8790`，也必须带
 token；只有 `/healthz` 匿名可读（App 的中转体检探针用它），其余 API 一律要 Bearer token。
 device token 可访问 `/api/v1/info`、`/api/v1/network/nodes`、`/api/v1/dsh/*`、`/dsh/call`
@@ -157,9 +210,10 @@ device token 可访问 `/api/v1/info`、`/api/v1/network/nodes`、`/api/v1/dsh/*
    手机填 `http://<节点IP>:8787`。若用 Tailscale/WireGuard，节点只需 bind 到 VPN 地址，
    公网不暴露任何端口。
 2. **反代 + TLS**：在节点前放 Caddy/Nginx，给手机一个 HTTPS 域名；App 支持 https。
-3. **内置阿里云 STCP 中转（0.2.0 起，0.3.0 改进：跨公网）**：App 自己带 frpc，勾选复选框后
-   无需填节点地址，由手机经 frps 连接到节点发布给手机的 STCP provider（`dshlink-phone`），
-   落到 **8788 token 网关**。详见 2.4。**不要把明文 8787 直接暴露到公网。**
+3. **内置阿里云 STCP 中转（0.2.0 起；0.5.0 起凭据来自导入的连接串）**：App 自己带 frpc，
+   导入含隧道的 code 后勾选复选框即可，无需填节点地址；手机经 frps 连接到节点/hub 发布给
+   手机的 STCP provider（`dshlink-phone`），落到 **8788 token 网关**。详见 2.4。
+   **不要把明文 8787 直接暴露到公网。**
 4. **中心服务器入口（0.4.0）**：hub 默认 `bind: 127.0.0.1:8790`；手机到达 hub 的方式与节点
    相同（LAN/VPN/HTTPS 反代/内置 STCP），地址填 `http://<hub>:8790`，token 用 2.2b 的
    hub device token。hub 对每个请求都校验 token，不信任回环来源。
@@ -167,45 +221,48 @@ device token 可访问 `/api/v1/info`、`/api/v1/network/nodes`、`/api/v1/dsh/*
 App 允许 cleartext HTTP（`usesCleartextTraffic="true"`），这是为局域网/VPN/STCP 场景准备的；
 公网路径必须由 STCP 的 TLS 或反代承担加密。
 
-### 2.4 内置阿里云 STCP 中转（0.2.0 起；0.3.0 经 8788 网关）
+### 2.4 内置阿里云 STCP 中转（0.2.0 起；0.5.0 起凭据运行期导入）
 
-手机不在节点局域网时，不需要 VPN，也不需要节点开公网端口：把 frpc 的 STCP **visitor** 跑在手机里。
-0.2.0 把 Linux x86_64（模拟器）和 arm64（真机）的 frpc 作为 `libfrpc.so` 打进 APK，启动时
-解压证书/配置到应用私有目录，执行 visitor，在本机 `127.0.0.1:18788` 打开一个端口；App 随后
-像连普通节点一样连这个本地端口。
+手机不在节点/hub 局域网时，不需要 VPN，也不需要把 API 端口暴露到公网：把 frpc 的 STCP
+**visitor** 跑在手机里。0.2.0 起 App 把 Linux x86_64（模拟器）和 arm64（真机）的 frpc 作为
+`libfrpc.so` 打进 APK，启动时把配置/证书写到应用私有目录并执行 visitor，在本机
+`127.0.0.1:<bindPort>` 打开一个端口，App 随后像连普通入口一样连这个本地端口。
 
-0.3.0 改变了隧道落点：节点侧由 `dshlink tunnel sync` 额外发布一个 **指向 8788 网关**的 STCP
-provider（默认名 `dshlink-phone`，配置来自 `gateway.provider`），不再是旧的 8787 provider。
-所以手机 → frps → `dshlink-phone` → `127.0.0.1:8788` → 网关校验 device token → 8787。
-网关对每个请求都要求 token 且**不信任回环来源**，因此 STCP 凭据本身不再能绕过 dsh-link 认证；
-audit 里能看到真实 device 角色。frps 仍是阿里云 `203.0.113.10:16443`。
+> **0.5.0 起 visitor 配置不再内置在 APK 里**：frpc.toml 和证书由 hub 管理员生成的连接串在
+> 导入时写入 `files/tunnel/`（见 1.2）。通用 APK 不含任何隧道凭据；只有内部构建（手动放了
+> `assets/tunnel/` 且 4 个文件齐全）才会把凭据打进 APK，构建脚本会显式警告。
+
+0.3.0 起隧道落点是 **8788 token 网关**：节点/hub 侧由 `dshlink tunnel sync` 发布一个指向
+8788 网关的 STCP provider（默认名 `dshlink-phone`，配置来自 `gateway.provider`），不再是
+旧的 8787 provider。所以手机 → frps → provider → `127.0.0.1:8788` → 网关校验 device token
+→ API。网关对每个请求都要求 token 且**不信任回环来源**，因此 STCP 凭据本身不能绕过 dsh-link
+认证，audit 里能看到真实 device 角色。frps 仍是阿里云 `203.0.113.10:16443`。
 
 前提（缺一不可）：
 
-- 节点 `gateway.enabled=true`、`gateway.provider.secretKey` 已填，且节点侧 frpc 配置里有
-  对应的 STCP provider（`dshlink tunnel sync` 会自动生成；本机是
-  `C:\Users\example\.dshlink\frp\frpc.toml` 里的 `dshlink-phone` → localPort 8788）；
+- hub 侧已配置 frps（`frp.enabled=true` + `frp.serverAddr`）与 STCP provider
+  （`gateway.provider.secretKey`；`dshlink tunnel sync` 会发布它），`dshlink hub invite --phone`
+  才能生成带 tunnel 的 code；
 - 手机能出站访问 frps 的 `serverPort`（16443/TCP）；
-- 构建前要在本地生成 `android/app/src/main/assets/tunnel/`（frpc.toml + 三份证书），其中
-  `serverName` 必须是节点发布给手机的那个 provider 名（`dshlink-phone`）。这个目录含共享凭据，
-  已被 `.gitignore` 忽略、不进仓库；模板与生成步骤见
-  [`android/tunnel/README.md`](tunnel/README.md)。换环境时必须替换，且**不要把这个 APK
-  公开分发**。
+- 管理员把 code **私下**发给用户，用户在 App 里导入（1.2）。导入后 App 把 frpc.toml
+  （原样保存，`{{DIR}}` 在启动时替换为私有目录绝对路径）和 code 里带的证书写到
+  `files/tunnel/`；只要求 frpc.toml 实际引用的证书文件存在（code 可能只带部分证书，例如
+  只用 STCP secretKey 时没有 mTLS）。**APK 本身不需要、也不应该包含任何凭据。**
 
-0.4.0 起同一套内置 frpc 也用于 hub：App 从 `assets/tunnel/frpc.toml` 的 `bindPort` 读取本地
-端口（节点模板 18788、hub 模板建议 18790），所以把模板换成 hub 侧发布的 visitor 模板后，
-勾选中转即可连 hub（`serverName` 换成 hub 的 provider 名，如 `dshlink-hub`；证书与 provider
-由负责 hub 的人生成，App 只做 visitor）；勾选后 URL 框被禁用并显示该本地地址。**一个 APK
-只装一套模板**：节点模板（`dshlink-phone`/18788）与 hub 模板（`dshlink-hub`/18790）二选一，
-按目标环境重新生成（本仓库当前还没有“生成 hub 手机 visitor 模板”的命令，需按
-`frp.provider.secretKey` 手工渲染）。hub 的公网落点应只经 STCP/反代，不要把 8790 明文暴露
-到公网。
+0.4.0 把同一套内置 frpc 也用于 hub；0.5.0 起**不再有“一个 APK 只装一套模板”的限制**：本地
+端口一律从实际使用的 frpc.toml 的 `bindPort` 读取（hub 生成的模板默认 18790，节点模板
+18788），A 环境与 B 环境的配置通过导入不同 code 切换，互不覆盖。导入带隧道的 code 后隧道
+勾选框自动勾上、URL 框禁用并显示解析出的本地地址；导入 `--no-tunnel` 的 code 则清掉隧道
+文件、自动取消勾选，改为直连 `entry.url`（所以 `--no-tunnel` 需要同时给 `--url`）。hub 的
+公网落点应只经 STCP/反代，不要把 8790 明文暴露到公网。
 
-App 里的操作：打开 App → 勾选“通过阿里云 STCP 中转（内置 frpc…）” → 填 device token →
-点“连接”。URL 输入框会被禁用并显示本地 visitor 地址（节点模板 `http://127.0.0.1:18788`、
-hub 模板 `http://127.0.0.1:18790`）。首次连接会等待最多 20 秒
-让 frpc 登录 frps、注册 visitor；失败时弹窗会带 `frpc` 日志尾部。成功后所有请求都走
-手机 → frps → 节点 provider → 8788 网关，与局域网连接完全相同，只是必须带 device token。
+真机上的操作：导入管理员给的 code（1.2）→ App 自动填好 URL/token/隧道并连接。含隧道的
+配置会启动内置 frpc，第一次连接最多等 20 秒让 frpc 登录 frps、注册 visitor；失败弹窗会带
+最近 12 行 `frpc` 日志（已去掉 ANSI 颜色码），常见原因是 frps 不可达、provider/secretKey
+不匹配、证书缺失（提示“导入的隧道配置缺少 xxx，请重新导入连接串/配置文件”）。成功后所有
+请求都走 手机 → frps → provider → 8788 网关，与局域网连接完全相同，只是必须带 device token。
+隧道勾选但还没导入配置时，App 会直接提示“尚未导入隧道配置，请向 hub 管理员获取连接串/
+配置文件并导入”。
 
 自测（本机，不经手机）：
 
@@ -215,10 +272,13 @@ hub 模板 `http://127.0.0.1:18790`）。首次连接会等待最多 20 秒
 Invoke-WebRequest http://127.0.0.1:18788/healthz   # 无 token 应是 401（网关拒绝），而不是 200
 ```
 
-> 安全警告：`assets/tunnel/` 里的 frpc 配置包含 frps auth token、mTLS 客户端证书/私钥和 STCP
-> `secretKey`。它们等价于“能连到节点 8788 网关的凭据”，但**不再等价于节点 API 权限**：
-> 网关仍要求 device token，且拒绝 `/mcp`、`/api/v1/bridge/*`。泄露后仍应轮换 frps token、
-> 重签 mTLS 证书、更换 STCP secretKey 并吊销 device token。不要把 APK 公开分发。
+> 安全警告：导入的 code 里包含 frps auth token、mTLS 客户端证书/私钥、STCP `secretKey` 和
+> hub device token。它们等价于“能连到网关的凭据”，但**不携带节点 API 权限**：网关仍要求
+> device token，且拒绝 `/mcp`、`/api/v1/bridge/*`。这些内容明文存在 App 私有目录
+> （`files/tunnel/` 与 `SharedPreferences`，未加密），手机丢失/换手请让管理员
+> `dshlink hub token rm --id <tokenId>` 吊销；code 泄露时还要轮换 frps token、重签 mTLS
+> 证书、更换 STCP secretKey。内部构建（`assets/tunnel/` 存在）的 APK 仍包含凭据，
+> **只可内部使用，不要分发**；通用 APK 不含凭据，可以分发。
 
 ## 3. 构建（无 Gradle）
 
@@ -241,7 +301,7 @@ D:\AndroidSdk\cmdline-tools\bin\android.exe --sdk=D:\AndroidSdk sdk install 'pla
 ### 3.2 一条命令
 
 ```powershell
-$env:JAVA_HOME = 'C:\Program Files\Java\jdk-26.0.2.1'
+$env:JAVA_HOME = 'D:\AndroidSdk\jdk17\jdk-17.0.21.0.2+1'   # JDK 17+ 即可
 powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSdk
 ```
 
@@ -250,44 +310,81 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
 ```text
 aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 → jar uf classes.dex / assets / lib/<abi>/libfrpc.so → zipalign
-→ (首次) keytool 生成 debug.keystore → apksigner sign/verify
+→ (debug 首次) keytool 生成 debug.keystore → apksigner sign/verify
+→ 打印 APK 路径/大小/SHA-256，并重写 dist/SHA256SUMS
 ```
 
-内置中转所需的 `assets/tunnel/` 与 `native/lib/<abi>/libfrpc.so` 不在仓库里：先按
-[`android/tunnel/README.md`](tunnel/README.md) 在本地生成，否则构建脚本会直接报缺文件。
+必选与可选：
+
+- **必需**：`native/lib/{x86_64,arm64-v8a}/libfrpc.so`（内置 frpc，不进仓库；按
+  [`android/tunnel/README.md`](tunnel/README.md) 在本地生成，缺了构建脚本直接报错）；
+- **可选**：`assets/tunnel/{frpc.toml,ca.crt,client.crt,client.key}`。0.5.0 起**四个文件齐全**
+  时才打进 APK（构建时警告 `this APK will contain tunnel credentials (internal build only…)`）；
+  缺任何一个都按**通用 APK** 构建（打印 `tunnel credentials: none (distribution build)`），
+  不再报错——这就是可以分发给他人的产物。
 
 产物：
 
 ```text
-android/dist/dshlink-control-0.4.0-debug.apk
+android/dist/dshlink-control-0.5.0-debug.apk     # debug 签名（默认）
+android/dist/dshlink-control-0.5.0.apk           # -Release 签名（见 3.3）
+android/dist/SHA256SUMS                          # 每次构建后对 dist/*.apk 全量重写
 ```
 
-`build-apk.ps1` 默认 `-VersionName "0.4.0" -VersionCode 5`（与 `ApiClient.APP_VERSION` 一致，
+`build-apk.ps1` 默认 `-VersionName "0.5.0" -VersionCode 6`（与 `ApiClient.APP_VERSION` 一致，
 发版时两处一起改）。
 
-这是 **debug 签名**的 APK，适合自用/内测；上架或长期分发请换成自己的 release keystore
-（`build-apk.ps1` 里的 `keytool`/`apksigner` 两步）。
+APK 内容（0.5.0 通用构建）：
 
-0.2.0 起 APK 还包含（0.3.0 把隧道指向 8788 网关，`frpc.toml` 的 provider 名相应改为
-`dshlink-phone`）：
-
-- `assets/tunnel/{frpc.toml,ca.crt,client.crt,client.key}`：内置 visitor 配置与证书（本地生成，
-  不进仓库）；
-- `lib/x86_64/libfrpc.so`、`lib/arm64-v8a/libfrpc.so`：模拟器/真机可执行的 frpc。
-  源码是 frp v0.71.0 的 Linux 二进制（x86_64 来自本机 frp-stcp-base，arm64 来自
+- `lib/x86_64/libfrpc.so`、`lib/arm64-v8a/libfrpc.so`：模拟器/真机可执行的 frpc。源码是
+  frp v0.71.0 的 Linux 二进制（x86_64 来自本机 frp-stcp-base，arm64 来自
   `frp_0.71.0_linux_arm64.tar.gz`），打包进 APK 的 `lib/<abi>/`，Android 解压到
-  `nativeLibraryDir` 后 App 直接 exec。换 frp 版本时同时替换这两个文件和
-  `vendor/frp/README` 记录，并验证 `frpc --version`。
+  `nativeLibraryDir` 后 App 直接 exec。换 frp 版本时同时替换这两个文件并验证
+  `frpc --version`；
+- **没有 `assets/tunnel/`**：通用 APK 里查不到任何 frps token / mTLS 私钥 / STCP `secretKey`
+  （`jar tf` / `unzip -l` 即可确认）；隧道配置只在用户导入 code 后才写进 `files/tunnel/`
+  （见 1.2）；
+- 内部构建（本地放了 `assets/tunnel/` 四件套）仍会把凭据打进 APK，只能内部使用、不要分发。
 
-### 3.3 安装
+### 3.3 release 签名（分发给他人）
+
+debug 签名只适合自用/内测。分发给别人前，先生成（或复用）自己的 release keystore：
 
 ```powershell
-D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.3.0-debug.apk
+keytool -genkeypair -keystore android\release.keystore -alias dshlink -keyalg RSA `
+  -keysize 2048 -validity 3650 -storepass <密码> -keypass <密码> `
+  -dname "CN=dsh-link, O=YourOrg"
 ```
 
-或者把 APK 传到手机点击安装（需允许“安装未知来源应用”）。
+用 `-Release` 构建（keystore 路径/密码/alias 都由参数传入，脚本不保存密码）：
+
+```powershell
+$env:JAVA_HOME = 'D:\AndroidSdk\jdk17\jdk-17.0.21.0.2+1'
+powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSdk `
+  -Release -Keystore android\release.keystore -KeystorePassword <密码> `
+  -KeyAlias dshlink -KeyPassword <密码>
+```
+
+- 输出 `android/dist/dshlink-control-0.5.0.apk`（release 不带 `-debug` 后缀）；
+- `-KeyPassword` 省略时用 `-KeystorePassword`；`-KeyAlias` 省略时用 keystore 里的别名；
+- 结尾会 `apksigner verify --print-certs`，打印 size / SHA-256，并把 `dist/*.apk` 的 SHA-256
+  全量重写到 `dist/SHA256SUMS`（格式 `<大写 SHA-256>  <文件名>`）；把 APK 和校验值一起发给用户；
+- release APK 的 `aapt2 dump badging` 里**没有** `application-debuggable`，本地没有
+  `assets/tunnel/` 时也**不含**任何隧道凭据。
+
+### 3.4 安装
+
+```powershell
+D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.5.0-debug.apk
+```
+
+或者把（`-Release` 或 debug）APK 传到手机点击安装（需允许“安装未知来源应用”）。
 
 ## 4. 使用
+
+**（0.5.0 起，推荐）先导入连接串/配置文件**：点“导入连接串/配置文件”粘贴 `dshlink1:…`，
+或点“从文件导入”选 `.txt/.json/.dshlink` 文件；导入成功后 App 自动填好入口地址、token、
+隧道勾选并连接（见 1.2）。下面是手工填写的等价流程。
 
 1. 打开 App，填入口地址 + token，点“连接”。入口可以是：
    - **中心服务器（0.4.0，推荐）**：`http://<hub>:8790` + hub device token（2.2b）；不在同一
@@ -353,11 +450,13 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 
 - **传输**：公网必须走 VPN（Tailscale/WireGuard 等）、HTTPS 反代或内置 STCP 中转；
   明文 HTTP 仅限可信局域网。
-- **内置中转凭据（0.2.0 新增；0.3.0 已有网关兜底）**：APK 的 `assets/tunnel/` 里有 frps auth
-  token、mTLS 客户端证书/私钥和 STCP `secretKey`；拿到 APK 的人可以连到节点的 STCP provider。
-  0.3.0 起该 provider 指向 **8788 网关**，网关对每个请求都要求 device token 且不信任回环来源，
-  所以 STCP 凭据不再等于节点 API 权限；但 APK 仍只私下给自己/信任的人，不要上传应用商店或
-  公开链接。泄露后要换 frps token、重签 mTLS 证书、改 STCP secretKey，并吊销 device token。
+- **分发模式（0.5.0）**：通用 APK **不含**任何 frps auth token、mTLS 私钥或 STCP `secretKey`
+  （构建产物可 `jar tf` 确认）；隧道凭据来自用户导入的连接串，只落在 App 私有目录
+  `files/tunnel/`（`frpc.toml`、证书）与 `SharedPreferences`（url/token，均未加密）。所以
+  **通用 APK 可以分发**。但 code 本身等价于凭据：管理员应私下发放、设到期时间/使用次数上限；
+  泄露或手机丢失时用 `dshlink hub token rm --id <tokenId>` 吊销 device token，必要时轮换 frps
+  token / 重签 mTLS / 更换 STCP secretKey。内部构建（本地 `assets/tunnel/` 四件套齐全）的 APK
+  仍含凭据，**只可内部使用，不要分发**。
 - **token**：device token 存在 App 的 `SharedPreferences`（应用私有，但未加密）；手机丢失
   请在节点上 `token rm --id` 吊销。token 可以只给 30 天有效期。
 - **hub token 与节点 token 是两套**：连 hub 时 App 只携带 hub 的 device token，由 hub 代转；
@@ -385,6 +484,12 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 - **单入口**：一个 App 实例只保存一组入口 URL + token；0.3.0 可以切换到该入口节点的直连
   peer（经其他节点中转的二跳节点只展示、不可控制）；0.4.0 的 hub 模式可切换 hub 登记表里的
   任意节点，但一次只控制一个。
+- **单份配置**：App 只保存最近一次导入的连接串（URL/token/隧道文件整体替换），不支持多 hub/
+  多环境 profile 存储；换环境重新导入即可，旧配置不保留。
+- **导入内容未加密**：code 解码后的 token、`frpc.toml`、证书以明文存于 `SharedPreferences` 与
+  `files/tunnel/`（应用私有目录），依赖 Android 沙箱保护；手机丢失请吊销 token 并轮换隧道凭据。
+- **到期时间仅提示**：`expiresAt` 只用于展示和警告（过期仍可导入/连接，是否拒绝由 hub/节点的
+  token 校验决定）；真正吊销要走 `dshlink hub token rm --id <tokenId>`。
 - **hub 模式**：只能看到 hub 登记表里的节点；节点离线时只显示状态、不能读取/发送；hub 未提供
   `/api/v1/network/nodes` 时退化到 `info.nodes`。
 - **远程发送**：单节点模式不跟踪命令 id，只提示“已提交 · 由 <节点> 处理”；hub 模式会轮询
@@ -502,5 +607,57 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   - 全程 `logcat -b crash` 为空、无 `FATAL EXCEPTION`；截图仅本地留存
     （`android/.tmp/hub-e2e/`，含真实主机地址与临时 token，不入库）。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.4.0，与节点/CLI 独立演进（当前仓库/节点
-> 0.7.0；hub 为 0.8 拓扑的中心服务器实现，hub 直连是 0.4.0 App 的主推入口）。
+- 0.5.0 分发化冒烟（2026-11-05，Android 16 / API 36 x86_64 模拟器；真 hub 0.9.0
+  `http://127.0.0.1:8790`、真节点 `DESKTOP-NODE-A` 在线；`adb reverse tcp:8790 tcp:8790`）：
+  - **通用 debug APK**：`dshlink-control-0.5.0-debug.apk` 11,993,941 bytes，SHA-256
+    `9EC9B661A3A7A82F2B1846AA8906E8C644070FE1EAA1D4742CFBC551314A026A`；
+    `aapt2 dump badging` 显示 versionCode 6 / versionName 0.5.0 / debuggable；`jar tf` 里
+    **没有任何** `assets/tunnel/*` 条目（通用 APK 不含凭据）。
+  - **release 签名 APK**：`dshlink-control-0.5.0.apk` 11,993,940 bytes，SHA-256
+    `8828B1C42F75277067ED0D4670CAEE7DA1F00126B53E2A6D0133A212C34DF406`；
+    `apksigner verify --print-certs` 通过（测试 keystore，CN=DshLink Test）；badging 里没有
+    `application-debuggable`，也没有 `assets/tunnel/*`。
+  - **内部构建回退校验**：把 `assets/tunnel/` 四件套放回后构建 → 警告 `this APK will contain
+    tunnel credentials (internal build only…)`，`jar tf` 含四个 `assets/tunnel/*` 条目；该 APK
+    仅本地留存（`android/.tmp/internal-0.5.0-debug.apk`），随后移走 `assets/tunnel/` 重建为
+    通用 APK。
+  - **CLI code 导入连接（文件 + 粘贴各一次）**：`dshlink hub invite --phone --no-tunnel` 现签
+    code（label `android-dist-cli`，tokenId `tok_01example0000000000000000`，入口
+    `http://127.0.0.1:8790`）分别用“从文件导入”（.txt）和“粘贴导入”导入：摘要显示
+    标签/入口/地址/到期/隧道=无；点“开始连接”后状态“已连接 · 11 个工作区 ·
+    DESKTOP-NODE-A · 可发送”，节点下拉“DESKTOP-NODE-A（在线）”，工作区/会话正常
+    加载。→ CLI 生成 code 在 hub 0.9.0 热加载修复后可直接导入连接。
+  - **真实远程发送 / transcript 增长**：hub 模式打开 `[phone-e2e] 手机控制端联调`
+    （`session-573fa0ec…`），App 内发送 queue 消息；hub API 查 transcript 从 38 条增长到 54 条
+    （用户消息 seq 174），bridge 命令 `cmd_01m6p2kpe28022041c4b91`（`sessions.prompt`，
+    origin `hub:DESKTOP-HUB-A`）claim/done，节点真实回复 seq 216，端到端约 4.7 s；
+    全程 DSH host / 节点未重启。
+  - **合成隧道 profile**：导入含 `frpc.toml`（含 `{{DIR}}`）+ 假证书的 code →
+    `files/tunnel/` 写入 `frpc.toml`/证书，生成 `frpc.runtime.toml`（`{{DIR}}` 已替换为私有目录
+    绝对路径），prefs 记录 label/entry/expires/tunnel 等；假证书使 frpc 20 秒超时 → 弹
+    “中转启动失败”+ 最近 12 行日志（已去 ANSI 颜色码）。
+  - **无隧道导入清理**：导入 `tunnel:null` 的 code 后 `files/tunnel/` 里 `frpc.toml` 与证书被
+    删除、`tunnel=false`、URL 框恢复可编辑并直连 `entry.url`。
+  - **真实 STCP 隧道导入（手机不在任何同一网络）**：本机 hub 的 `frp.enabled` 已配置（公网
+    frps + mTLS 证书 + provider `dshlink-phone`），用 hub HTTP API 现签一份 `tunnel:true` 的 code
+    （7,031 字符，内嵌 `frpc.toml` 与 base64 mTLS 证书），用“从文件导入”导入 → 摘要显示
+    “隧道：含 STCP 中转凭据（本机 127.0.0.1:18790）”；App 把 `frpc.toml` + 三张证书写进
+    `files/tunnel/`，生成 `frpc.runtime.toml`（`{{DIR}}` 已替换为私有目录绝对路径），拉起
+    `libfrpc.so` 子进程；`frpc.log` 显示 `login to server success`、`visitor added: [phone-to-hub]`；
+    状态“已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送”，全程**没有** `adb reverse` ——
+    请求路径是 手机 → 公网 frps → hub 的 STCP provider → hub `8790`。
+  - **真实隧道远程发送**：经该隧道打开 `session-573fa0ec…` 发送
+    `android stcp e2e 2302 no action needed`，App 显示“已发送 · #225 · 用户”；hub API 查
+    transcript 从 54 条增长到 63 条（`latestSeq 245`），bridge 命令
+    `cmd_01m6p3k3cpcccff7b1ee72`（`sessions.prompt`，origin `hub:DESKTOP-HUB-A`）
+    claim/done，节点真实回复 seq 227/245；DSH host、节点、hub 全程未重启。
+  - **错误路径（均不崩溃；`logcat` 无 `FATAL EXCEPTION`）**：粘贴/文件导入非法内容 →
+    “导入失败”+原因；过期 code → 摘要标注“（已过期）”并提示重新生成（导入不拒绝；token 尚未
+    过期时仍能连，`expiresAt` 仅提示）；token 被 hub 吊销后点“刷新工作区/连接” →
+    “鉴权失败：token 无效或已过期”；勾选隧道但未导入 profile → “尚未导入隧道配置，请向 hub
+    管理员获取连接串/配置文件并导入”；导入含隧道 profile 后删掉证书 → “导入的隧道配置缺少
+    client.crt，请重新导入连接串/配置文件”。
+  - 截图与测试工件仅本地留存（`android/.tmp/`，含真实主机名/token，不入库）。
+
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.5.0，与节点/CLI 独立演进（当前仓库/节点
+> 0.8.1，hub 0.9.0；hub 直连 + 导入连接串是 0.5.0 App 的主推入口）。
