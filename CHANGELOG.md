@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-11-05
+
+### Fixed
+
+- **`dshlink status` no longer reports a phantom hub outage.** One-shot CLI commands build a
+  `HubLink` but never start its heartbeat, so the constructor default (`state: "disabled"`) was
+  printed even while the running node was online — a user checking `dshlink status` next to
+  `GET /api/v1/status` saw contradictory answers. The CLI now marks an unstarted uplink as
+  `state: "unknown"` with `snapshot: true` and a note pointing at the running node's
+  `/api/v1/status`; `dshlink hub status --node` does the same. Hub mode that is genuinely off still
+  reports `disabled`.
+
 ## [0.9.0] — 2026-11-05
 
 "Hand it to someone else": the project can now be distributed as a portable bundle that ships the
@@ -624,7 +636,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.1
 [0.9.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.0
 [0.8.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.1
 [0.8.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.0

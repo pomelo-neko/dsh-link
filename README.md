@@ -433,7 +433,7 @@ dsh-link/
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
 ├── android/                # Android controller app (Java, no Gradle dependencies) + build-apk.ps1
-├── test/                   # 27 test files / 225 checks + CLI smoke script
+├── test/                   # 28 test files / 228 checks + CLI smoke script
 ├── docs/                   # architecture, design, protocol, DSH access, directed conversations, hub, FRP, operations, troubleshooting, mobile
 └── examples/               # sanitised config samples
 ```
@@ -441,7 +441,7 @@ dsh-link/
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 225 checks (frp/MCP suites skip if absent), ~15 s
+node test/run.mjs                                                        # 228 checks (frp/MCP suites skip if absent), ~15 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```

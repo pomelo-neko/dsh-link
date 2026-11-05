@@ -118,6 +118,19 @@ function rootLabel(root) {
   return `${root.name}=${root.path}${root.write ? ':rw' : root.read ? '' : ':none'}`;
 }
 
+// One-shot CLI commands build a HubLink but never start it. Its constructor default is "disabled",
+// which describes this CLI process, not the running node — without this, `dshlink status` while the
+// node is online reports "disabled" and sends people chasing a phantom outage.
+function markHubSnapshot(status) {
+  if (!status || typeof status !== 'object') return status;
+  if (status.enabled && !status.startedAt) {
+    status.snapshot = true;
+    status.state = 'unknown';
+    status.note = 'CLI snapshot: this process did not start the hub uplink; the running node reports the live state via GET /api/v1/status';
+  }
+  return status;
+}
+
 async function loadCtx(args, { allowMissing = false, nodeOverrides = {} } = {}) {
   const configPath = flagString(args.config) ?? process.env.DSHLINK_CONFIG;
   const dataDir = flagString(args['data-dir']) ?? process.env.DSHLINK_HOME;
@@ -477,9 +490,9 @@ async function cmdHub(args) {
 
   if (sub === 'status' && flagBool(args.node)) {
     const { ops } = await loadCtx(args);
-    const status = await ops.hubStatus();
+    const status = markHubSnapshot(await ops.hubStatus());
     out(status, asJson, [
-      'hub ' + (status.enabled ? status.state : 'disabled') + (status.url ? ' ' + status.url : ''),
+      'hub ' + (status.enabled ? (status.snapshot ? 'unknown (CLI snapshot; the live state is on the running node)' : status.state) : 'disabled') + (status.url ? ' ' + status.url : ''),
       '  last heartbeat ' + (status.lastHeartbeatAt ?? '-'),
       '  last error     ' + (status.lastError ?? '-'),
       '  queued         ' + (status.pendingOutbox ?? 0) + ' message(s)',
@@ -604,6 +617,7 @@ async function cmdHub(args) {
 async function cmdStatus(args) {
   const { cfg, ops } = await loadCtx(args);
   const status = await ops.status({ probe: flagBool(args.probe) });
+  markHubSnapshot(status.hub);
   out(status, flagBool(args.json), [
     `node ${status.node.name} (${status.node.nodeId})`,
     `  url        ${status.node.url}`,
@@ -611,6 +625,7 @@ async function cmdStatus(args) {
     `  mailbox    inbox ${status.stats.inbox} (${status.stats.inboxUnread} unread) / outbox ${status.stats.outbox} (${status.stats.outboxPending} pending)`,
     `  roots      ${status.roots.map(rootLabel).join(', ') || '(none)'}`,
     `  upload     ${status.allowUpload ? 'allowed' : 'disabled'}`,
+    `  hub        ${status.hub?.enabled ? `enrolled ${status.hub.enrolled?.hubName ?? '?'}${status.hub.snapshot ? ' (state unknown from this CLI snapshot; see the running node)' : ' · ' + status.hub.state}` : 'disabled'}`,
     '',
     table(status.peers, [
       { key: 'name', header: 'PEER' },

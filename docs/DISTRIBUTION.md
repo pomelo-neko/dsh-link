@@ -71,7 +71,7 @@ powershell -File scripts/build-bundle.ps1 -Suffix -rc1
 
 ```powershell
 # 校验发行包自身（Windows）
-powershell -File scripts/verify-bundle.ps1 -Bundle dist/dsh-link-0.9.0-portable.zip
+powershell -File scripts/verify-bundle.ps1 -Bundle dist/dsh-link-0.9.1-portable.zip
 # 校验内容（任意平台）
 sha256sum -c SHA256SUMS.txt
 ```
