@@ -9,6 +9,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-11-05
+
+Real-relay hardening for the hub and a loss-proof enrollment path, found while deploying the hub
+against a production frps (0.71.0) and a real node over STCP.
+
+### Fixed
+
+- **Hub frpc config rejected by frp 0.71.** The generated `hub-frpc.toml` wrote `compression` /
+  `useEncryption` as bare proxy fields, which frpc refuses with
+  `decode proxy ... unknown field "useEncryption"`; they now use the nested
+  `transport.useEncryption = true` / `transport.useCompression = false` form for the provider and
+  every per-node visitor. The hub's own client certificate is configurable too:
+  `hub init --frp-cert/--frp-key/--frp-ca` map to `transport.tls.certFile/keyFile/trustedCaFile`
+  (paths normalized to forward slashes for TOML).
+- **STCP work connections rejected by frps (`invalid NewWorkConn`).** A hub provider created
+  without `auth.additionalScopes = ["HeartBeats", "NewWorkConns"]` registers its proxy, but every
+  visitor connection fails; the generated config now always sets that scope.
+- **Enrollment response lost when the hub restarts frpc.** `POST /api/v1/hub/enroll` used to
+  `await frp.relaunch()` before replying, which tore down the STCP provider carrying the request:
+  the node saw `fetch failed` even though the hub had persisted it. The hub now replies first and
+  defers the frpc sync by a short timer (`deferFrpSync`); `HubTunnelManager.sync()` only restarts
+  frpc when the rendered config actually differs. `approve` / `remove` use the same deferred path.
+- **Re-enrollment of an already known node.** A retry (or a reinstall) of the same `nodeId` now
+  succeeds instead of `conflict node_exists`: the hub refreshes the provider/downlink credentials,
+  reuses the visitor port, rotates the uplink token and reports `reenrolled: true`; a different
+  nodeId claiming the same name is still rejected with 409. The node-side `hub enroll` retries the
+  request up to 3 times on network/5xx failures (500 ms × attempt backoff), so a lost response can
+  recover on its own.
+
+### Changed
+
+- `hub init` accepts `--frp-cert`, `--frp-key`, `--frp-ca` (mutual-TLS files for frps) and
+  `--frpc-path`.
+- Docs: `docs/HUB-TOPOLOGY-DESIGN.md` §5.10 records the real-frps compatibility and enrollment
+  resilience; `docs/TROUBLESHOOTING.md` gains `invalid NewWorkConn` and `enroll: fetch failed`
+  entries; `docs/mobile/CONTROL-APP.md` records the first hub-mode end-to-end run against a real
+  hub + enrolled node.
+
 ## [0.8.0] — 2026-11-04
 
 The "one centre, many nodes" release. dsh-link gains a **hub topology**: a standalone hub process
@@ -537,7 +575,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.1
 [0.8.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.0
 [0.7.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.7.0
 [0.6.2]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.6.2

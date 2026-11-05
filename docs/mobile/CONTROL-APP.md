@@ -357,6 +357,27 @@ the STCP-to-hub path was emulated with `adb reverse tcp:18790`):
    `adb reverse`; the optional running badge from design §5.8 was not built. Send params follow
    the repo contract `{sessionId,text,mode}` (queue|steer), not content blocks.
 
+Real hub + real node (2026-11-05, dsh-link 0.8.1 tree, APK 0.4.0, same Android 16 emulator). The
+app was re-pointed at a production hub instead of a harness: `hub serve` on
+`http://127.0.0.1:8790` publishing the `dshlink-hub` STCP provider over the Aliyun frps, with the
+real node `DESKTOP-NODE-A` enrolled (visitor port 19111) and running in hub mode. The phone
+path was again `adb reverse tcp:8790 tcp:8790` because the APK still embeds only the node visitor
+template:
+
+- Login with a hub `device` token → status "已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送",
+  summary "中心服务器 DESKTOP-HUB-A · dsh-link-hub 0.8.0 · 1 个节点 · 1 在线 · 当前
+  DESKTOP-NODE-A", dropdown "DESKTOP-NODE-A（在线）"; workspace list loaded through the
+  hub with `peer=`.
+- `dsh-link` session list read "共 10 个会话（5 个子智能体） · DESKTOP-NODE-A · 进入后才会
+  拉取消息"; transcript for `session-1aa41492…` read "共 21 条 · DESKTOP-NODE-A（经
+  DESKTOP-HUB-A） · 每 2.5 秒仅在前台刷新" and refreshed incrementally.
+- A steer message ("hub e2e probe: reply HUB_OK") reached the real DSH Session through
+  phone → hub(8790) → node STCP visitor(19111) → bridge (`seq 58` user, `seq 64` assistant
+  `HUB_OK`); the reply appeared in the app. Hub audit is admin-only, so the device token sees 403
+  there (expected).
+- Screenshots (not committed, they show real names): `test/.tmp/hub-main-2.png`,
+  `test/.tmp/hub-sessions-2.png`, `test/.tmp/hub-transcript-bottom.png`.
+
 The node test suite at this release: `node test/run.mjs` — see the root README for the current
 count (frp/MCP tests skip automatically when their binaries/SDK are missing).
 

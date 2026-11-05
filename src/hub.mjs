@@ -423,6 +423,20 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
       });
     }
   }
+  // Restarting frpc tears down the STCP provider that is carrying the request we are answering,
+  // so a relaunch must never happen before the response has been written. Defer it just past the
+  // response, and only restart when the generated config actually changed.
+  function deferFrpSync(reason) {
+    if (!(cfg.frp?.enabled && frp)) return;
+    const timer = setTimeout(() => {
+      activeNodes()
+        .then((nodes) => frp.sync(nodes))
+        .then((result) => { if (result?.changed) log.info('dsh-link hub: frpc restarted after ' + reason); })
+        .catch((err) => log.warn('hub frp sync after ' + reason + ' failed:', err?.message ?? String(err)));
+    }, 500);
+    timer.unref?.();
+  }
+
   async function enroll(body, auth) {
     if (!cfg.enrollment.enabled) throw forbidden('enrollment is disabled on this hub');
     if (enrollRateLimited(auth.ip)) throw new LinkError(429, 'rate_limited', 'too many enrollment attempts; wait a minute');
@@ -433,9 +447,14 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     const name = nodeSlug(body.name);
     if (!name) throw badRequest('a node name is required');
     if (name === cfg.name || name === 'hub' || name === 'self') throw badRequest('a node cannot be called ' + name);
-    if (await store.getNode(name)) throw conflict('node_exists', 'a node named ' + name + ' is already enrolled');
+    const existing = await store.getNode(name);
+    // Re-enrolling the same node is allowed: when a node loses the enrollment response (for
+    // example because the hub restarted frpc mid-request) it must be able to enroll again and
+    // receive fresh tokens instead of being locked out by a 409.
+    const reenroll = Boolean(existing && body.nodeId && existing.nodeId && String(existing.nodeId) === String(body.nodeId));
+    if (existing && !reenroll) throw conflict('node_exists', 'a node named ' + name + ' is already enrolled');
     const nodes = await activeNodes();
-    if (nodes.length >= cfg.enrollment.maxNodes) throw new LinkError(429, 'max_nodes', 'the hub already has ' + nodes.length + ' nodes');
+    if (!reenroll && nodes.length >= cfg.enrollment.maxNodes) throw new LinkError(429, 'max_nodes', 'the hub already has ' + nodes.length + ' nodes');
     if (!body.downlinkToken || typeof body.downlinkToken !== 'string') {
       throw badRequest('downlinkToken is required: the node must create a peer token for the hub first');
     }
@@ -445,9 +464,12 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
       if (!body.provider?.serverName || !body.provider?.secretKey) {
         throw badRequest('provider {serverName, secretKey} is required when hub frp is enabled');
       }
-      const existing = await activeNodes();
-      visitorPort = frp ? await frp.allocateVisitorPort(existing) : null;
+      const active = await activeNodes();
+      visitorPort = frp ? await frp.allocateVisitorPort(active) : null;
       if (!visitorPort) throw new LinkError(503, 'frp_unavailable', 'could not allocate a visitor port');
+      // Keep the port the node already had, so a re-enroll leaves the generated frpc config
+      // unchanged and the running visitor connection survives.
+      if (reenroll && existing.visitorPort) visitorPort = existing.visitorPort;
       downlinkUrl = 'http://127.0.0.1:' + visitorPort;
     } else if (!downlinkUrl) {
       throw new LinkError(409, 'downlink_url_required', 'hub frp is disabled; pass downlinkUrl in the enroll request');
@@ -465,15 +487,13 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
       provider,
       visitorPort,
       status: autoApprove ? 'active' : 'pending',
-      enrolledAt: nowIso(),
+      enrolledAt: existing?.enrolledAt ?? nowIso(),
       enrolledBy: token.label,
       lastHeartbeatAt: null
     };
     await store.upsertNode(record);
     await store.recordEnrollUse(token.id);
-    if (cfg.frp?.enabled && frp) {
-      try { await frp.relaunch(await activeNodes()); } catch (err) { log.warn('hub frp relaunch after enrollment failed:', err?.message ?? String(err)); }
-    }
+    deferFrpSync('enrollment');
     if (!autoApprove) {
       await audit({ event: 'hub_enroll_pending', node: name, by: token.label, ip: auth.ip });
       return { pending: true, node: { name, status: 'pending' } };
@@ -484,6 +504,7 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     log.info('dsh-link hub: enrolled node ' + name + (visitorPort ? ' (visitor port ' + visitorPort + ')' : ''));
     return {
       pending: false,
+      reenrolled: reenroll,
       node: { name, status: 'active', visitorPort, downlinkUrl, enrolledAt: record.enrolledAt },
       hub: { name: cfg.name, url: cfg.publicUrl ?? localUrl(cfg), version: DSHLINK_VERSION },
       frp: cfg.frp?.enabled ? {
@@ -644,9 +665,7 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     }
     const updated = { ...record, status: 'active', visitorPort, url, enrolledAt: record.enrolledAt ?? nowIso() };
     await store.upsertNode(updated);
-    if (cfg.frp?.enabled && frp) {
-      try { await frp.relaunch(await activeNodes()); } catch (err) { log.warn('hub frp relaunch after approval failed:', err?.message ?? String(err)); }
-    }
+    deferFrpSync('approval');
     const uplink = createHubToken(cfg, 'node:' + name, { role: 'peer', peer: name });
     if (saveConfig) await saveConfig(cfg);
     await audit({ event: 'hub_node_approved', node: name, by: ctx.auth.token?.label ?? null });
@@ -668,9 +687,7 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     const name = ctx.params.name;
     const record = await nodeOrThrow(name);
     await store.removeNode(name);
-    if (cfg.frp?.enabled && frp) {
-      try { await frp.relaunch(await activeNodes()); } catch (err) { log.warn('hub frp relaunch after removal failed:', err?.message ?? String(err)); }
-    }
+    deferFrpSync('removal');
     await audit({ event: 'hub_node_removed', node: name, by: ctx.auth.token?.label ?? null });
     sendJson(ctx.res, 200, { removed: true, name, hadStatus: record.status ?? null });
   }, { roles: ['admin'] });

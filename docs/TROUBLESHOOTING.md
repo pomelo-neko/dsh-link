@@ -237,6 +237,22 @@ schtasks /Run /TN "dshlink-node-autostart"
 
 ---
 
+## 17. hub 的 STCP 连不上：`invalid NewWorkConn` / `hub enroll` 报 `fetch failed`
+
+*症状 A*：hub 的 `hub-frpc.log` 里 provider `start proxy success`，但节点/手机 visitor 连 `127.0.0.1:<visitorPort>` 一直超时；frps 日志出现 `StartWorkConn contains error: invalid NewWorkConn`。
+
+*原因*：frps 要求 STCP work conn 的 token 带 `NewWorkConns` scope；0.8.0 生成的 `hub-frpc.toml` 没写 `auth.additionalScopes`。
+
+*处理*：升级 0.8.1（生成配置固定包含 `auth.additionalScopes = ["HeartBeats", "NewWorkConns"]`），或手工在 `%USERPROFILE%\.dshlink-hub\frp\hub-frpc.toml` 的 `[auth]` 段补上并重启 hub。
+
+*症状 B*：`dshlink hub enroll` 退出码 1、只有 `dshlink: [error] fetch failed`，但 hub 的 `GET /api/v1/hub/nodes` 里节点已经 active。
+
+*原因*：旧版 enroll 在回包前重启 hub frpc，拆掉了承载该请求的 STCP provider。
+
+*处理*：0.8.1 起先回包再延迟同步，且同 `nodeId` 可重入（自动轮换 uplink token）；仍失败时用 admin token `DELETE /api/v1/hub/nodes/<name>` 后重新 enroll，或直接重跑 `dshlink hub enroll`（会走 re-enroll）。节点侧 `hub enroll` 自身也会重试 3 次。
+
+---
+
 ## 附：一分钟体检清单
 
 | 检查 | 命令 | 期望 |

@@ -650,6 +650,18 @@ hub.enrollment:
 验证：\`test/hub.test.mjs\` 的 web console 测试覆盖页面/CSP/匿名 401/device 403/令牌一次性明文/配置脱敏/设置落盘/outbox 重投与丢弃；另用无头 Edge + CDP 对真实 hub 进程跑了 18 项端到端断言全通过（登录、生成 enroll token、enroll 假节点、造 pending、重投、丢弃（含 confirm 对话框）、修改设置、吊销令牌、审计、退出登录、零 JS 异常/零 console error/零失败资源），截图见 \`docs/images/hub-console.png\`。
 
 
+### 5.10 真实 frps 兼容与 enroll 韧性（0.8.1 实现补充）
+
+0.8.0 的 hub 只在本地假 frps / 无 frp 环境下测过，第一次接真实 frps 0.71.0 时暴露四处问题，已在 0.8.1 修复（`src/hubfrp.mjs`、`src/hub.mjs`、`src/hublink.mjs`）：
+
+1. **TLS 客户端证书**：真实 frps 要求 mTLS 时，`hub init --frp-cert/--frp-key/--frp-ca` 写 `transport.tls.certFile/keyFile/trustedCaFile`；路径统一转 `/`（TOML 反斜杠转义问题）。
+2. **嵌套 transport**：frpc 0.71 拒绝 proxy 级裸 `compression`/`useEncryption`（`unknown field`）；provider 与每个 node visitor 都写 `transport.useEncryption = true` / `transport.useCompression = false`。
+3. **`auth.additionalScopes = ["HeartBeats", "NewWorkConns"]`**：缺它时 provider 能注册，但每个 STCP work conn 都报 `invalid NewWorkConn`、visitor 超时；生成配置固定带上。
+4. **enroll 响应先于 frpc 重启**：旧实现 `await frp.relaunch()` 再回包，重启会拆掉承载该请求的 STCP provider，节点侧只看到 `fetch failed`（hub 实际已登记）。现在先回包、`setTimeout 500ms` 后 `frp.sync(nodes)`，且 `sync` 比对渲染后的 TOML，未变化不重启；`approve`/`remove` 同样延迟。
+5. **同 nodeId 重入 enroll**：同一节点重试/重装可直接再 enroll（复用 visitor 端口、刷新凭据、轮换 uplink token、返回 `reenrolled: true`）；不同 nodeId 冒用同名仍 409 `node_exists`。节点侧 `hub enroll` 对网络/5xx 失败重试 3 次（500 ms × attempt）。
+
+验证：`test/hub.test.mjs` 覆盖 TOML 证书路径、嵌套 transport、additionalScopes 与重入语义；真实链路（Aliyun frps 203.0.113.10:16443、hub 8790、节点 STCP visitor 19111、Android 0.4.0）完成手机控制端全链路 e2e。
+
 ## 6. 配置设计
 
 ### 6.1 Hub 配置（示例）

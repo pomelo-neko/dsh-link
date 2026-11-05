@@ -62,6 +62,7 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
               dsh enable [--actions m1,m2]   打开 DSH 视图（可选打开动作能力）
   hub         中心服务器（hub 拓扑）: init | serve | enroll | status | nodes | token | outbox | flush | reconnect | revoke
               hub init --name --bind --port [--frp-server H --frp-port P --frp-token T]
+                       [--frp-cert F --frp-key F --frp-ca F --frpc-path P]
               hub serve                                     前台运行中心（Web 控制台在 <url>/ui）
               hub token new --role enroll --ttl-hours 2     一次性接入 token（默认 TTL 2h）
               hub enroll --url <hub> --token <t>            本机节点加入中心（之后 dshlink tunnel sync）
@@ -354,6 +355,14 @@ async function cmdHub(args) {
       if (frpToken) cfg.frp.token = frpToken;
       const frpProvider = flagString(args['frp-provider']);
       if (frpProvider) cfg.frp.provider.name = frpProvider;
+      const frpCert = flagString(args['frp-cert']);
+      if (frpCert) cfg.frp.certFile = path.resolve(frpCert);
+      const frpKey = flagString(args['frp-key']);
+      if (frpKey) cfg.frp.keyFile = path.resolve(frpKey);
+      const frpCa = flagString(args['frp-ca']);
+      if (frpCa) cfg.frp.trustedCaFile = path.resolve(frpCa);
+      const frpcPath = flagString(args['frpc-path']);
+      if (frpcPath) cfg.frp.frpcPath = path.resolve(frpcPath);
     }
     const admin = createHubToken(cfg, 'admin', { role: 'admin' });
     await saveHubConfig(cfg);

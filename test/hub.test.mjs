@@ -151,6 +151,8 @@ test('hub: config defaults, token roles and static nodes', async () => {
   assert.equal(defaults.enrollment.maxUsesPerToken, 1);
   assert.equal(defaults.frp.enabled, false);
   assert.equal(defaults.frp.provider.name, 'dshlink-hub');
+  assert.equal(defaults.frp.certFile, null);
+  assert.equal(defaults.frp.trustedCaFile, null);
 
   const cfg = normalizeHubConfig({
     name: '  h  ',
@@ -254,6 +256,9 @@ test('hub: config defaults, token roles and static nodes', async () => {
       enabled: true,
       serverAddr: 'frp.example',
       serverPort: 7000,
+      certFile: path.join(dir, 'certs', 'client.crt'),
+      keyFile: path.join(dir, 'certs', 'client.key'),
+      trustedCaFile: path.join(dir, 'certs', 'ca.crt'),
       provider: { name: 'dshlink-hub-test', secretKey: 'hub-provider-secret' }
     }
   }, dir);
@@ -264,6 +269,16 @@ test('hub: config defaults, token roles and static nodes', async () => {
   assert.match(hubToml, /localPort = 8790/);
   assert.match(hubToml, /name = "to-NODE-A"/);
   assert.match(hubToml, /bindPort = 19111/);
+  // Optional mutual-TLS files are rendered with forward slashes so Windows paths stay readable.
+  assert.match(hubToml, /transport\.tls\.certFile = "[A-Za-z]:\/[^"]*client\.crt"/);
+  assert.match(hubToml, /transport\.tls\.keyFile = "[A-Za-z]:\/[^"]*client\.key"/);
+  assert.match(hubToml, /transport\.tls\.trustedCaFile = "[A-Za-z]:\/[^"]*ca\.crt"/);
+  // frpc 0.52+ parses proxy tuning as nested transport.useEncryption/useCompression.
+  assert.match(hubToml, /transport\.useEncryption = true/);
+  assert.match(hubToml, /transport\.useCompression = false/);
+  assert.doesNotMatch(hubToml, /^useCompression =/m);
+  // STCP work connections need the token attached to the NewWorkConns scope.
+  assert.match(hubToml, /auth\.additionalScopes = \["HeartBeats", "NewWorkConns"\]/);
   const hubSummary = parseFrpcTomlSummary(hubToml);
   assert.equal(hubSummary.visitors.length, 1);
   assert.throws(() => hubFrpConfigToml(normalizeHubConfig({ frp: { enabled: true } }, dir)), (err) => err.code === 'frp_not_configured');
@@ -493,6 +508,36 @@ test('hub: enroll two nodes, deliver messages both ways, dedupe and identity che
   assert.equal(nodeStatus.hub.state, 'online');
   assert.equal(nodeStatus.hub.pendingOutbox, 1);
   assert.deepEqual(nodeStatus.hub.pendingTargets, ['GHOST-NODE']);
+});
+
+test('hub: re-enrollment of the same node is allowed and rotates its uplink', async (t) => {
+  const hub = await startHub('reenroll');
+  const node = await startNode('reenroll');
+  t.after(async () => { await node.close(); await hub.close(); });
+
+  const first = await enroll(node, hub);
+  const firstToken = node.cfg.hub.token;
+  assert.ok(firstToken);
+  assert.equal(first.result.reenrolled, false);
+
+  // The node lost the first response (for example because the hub restarted frpc): enrolling the
+  // same name + nodeId again must hand back fresh credentials instead of a 409.
+  const second = await enroll(node, hub);
+  assert.equal(second.result.reenrolled, true);
+  assert.equal(second.result.node.status, 'active');
+  assert.ok(node.cfg.hub.token);
+  assert.notEqual(node.cfg.hub.token, firstToken);
+  const nodes = await hub.store.listNodes();
+  assert.equal(nodes.filter((n) => n.name === node.cfg.name).length, 1);
+
+  // A different node may not steal an enrolled name.
+  const intruder = await startNode('intruder');
+  t.after(async () => { await intruder.close(); });
+  intruder.cfg.name = node.cfg.name; // same name, different nodeId
+  await assert.rejects(
+    () => intruder.hubLink.enroll({ url: hub.url, token: hub.enrollToken, downlinkUrl: intruder.url }),
+    (err) => err.status === 409 && err.message === 'node_exists'
+  );
 });
 
 // --------------------------------------------------------- dsh / file proxying ---

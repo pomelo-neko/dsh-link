@@ -243,14 +243,29 @@ export class HubLink {
     if (!hubName) throw new LinkError(502, 'upstream_error', 'the hub did not report a name');
     if (!this.cfg.stcp?.secretKey) throw new LinkError(409, 'provider_missing', 'run "dshlink tunnel setup" first: enrollment publishes the node STCP provider');
     const downlink = createInboundToken(this.cfg, 'hub:' + hubName, { role: 'hub', peer: hubName });
-    const result = await this._jsonAt(base, token, 'POST', '/api/v1/hub/enroll', {
+    // The hub persists the node and then has to restart frpc to open the node's visitor, which can
+    // tear down the STCP tunnel that carries this very response. Retry is safe: the hub accepts a
+    // re-enrollment of the same nodeId and returns fresh tokens, so a lost response is recoverable.
+    const request = {
       name: this.cfg.name,
       nodeId: this.cfg.nodeId,
       softwareVersion: DSHLINK_VERSION,
       provider: { serverName: this.cfg.stcp.proxyName, secretKey: this.cfg.stcp.secretKey },
       downlinkToken: downlink.token,
       downlinkUrl
-    });
+    };
+    let result = null;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        result = await this._jsonAt(base, token, 'POST', '/api/v1/hub/enroll', request);
+        break;
+      } catch (err) {
+        const transient = !(err instanceof LinkError) || err.status >= 500;
+        if (!transient || attempt >= 3) throw err;
+        this.log.warn?.('hub enrollment attempt ' + attempt + ' failed (' + (err?.message ?? err) + '); retrying');
+        await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+      }
+    }
     this.cfg.hub.enabled = true;
     this.cfg.hub.url = base;
     if (result?.uplinkToken) this.cfg.hub.token = result.uplinkToken;

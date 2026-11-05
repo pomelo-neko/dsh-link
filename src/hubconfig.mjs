@@ -53,6 +53,11 @@ export const DEFAULT_HUB_FRP = {
   user: 'dsh-link',
   token: null,
   tls: true,
+  // Optional mutual-TLS files for an frps that requires client certificates (same semantics as
+  // frpc's transport.tls.{certFile,keyFile,trustedCaFile}).
+  certFile: null,
+  keyFile: null,
+  trustedCaFile: null,
   provider: { name: 'dshlink-hub', secretKey: null }
 };
 
@@ -210,6 +215,9 @@ export function normalizeHubConfig(raw, baseDir) {
       user: frpSource.user ? String(frpSource.user) : DEFAULT_HUB_FRP.user,
       token: frpSource.token ? expandEnv(String(frpSource.token)) : null,
       tls: frpSource.tls !== false,
+      certFile: frpSource.certFile ? path.resolve(expandEnv(String(frpSource.certFile))) : null,
+      keyFile: frpSource.keyFile ? path.resolve(expandEnv(String(frpSource.keyFile))) : null,
+      trustedCaFile: frpSource.trustedCaFile ? path.resolve(expandEnv(String(frpSource.trustedCaFile))) : null,
       provider: {
         name: typeof frpSource.provider?.name === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(frpSource.provider.name.trim())
           ? frpSource.provider.name.trim()

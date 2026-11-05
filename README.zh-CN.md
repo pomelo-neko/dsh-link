@@ -325,7 +325,7 @@ dsh-link/
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
 ├── android/                # 安卓控制端 App（纯 Java，无 Gradle 依赖）+ 手动构建脚本
-├── test/                   # 214 项检查 / 26 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约）+ CLI 冒烟
+├── test/                   # 215 项检查 / 26 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约）+ CLI 冒烟
 ├── docs/                   # 架构、设计、协议、DSH 接入、定向会话、hub 设计与控制台、FRP 部署、运维手册、排障手册、手机端
 └── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递；0.8 hub 面板）
 ```
@@ -333,7 +333,7 @@ dsh-link/
 ## 8. 验证
 
 ```powershell
-node test/run.mjs                     # 214 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约、doctor
+node test/run.mjs                     # 215 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 

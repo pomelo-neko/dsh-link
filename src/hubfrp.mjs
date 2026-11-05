@@ -14,6 +14,12 @@ function tomlString(value) {
   return JSON.stringify(String(value ?? ''));
 }
 
+// frpc accepts both separators on Windows; forward slashes keep the generated TOML readable and
+// avoid JSON/TOML double-escaping of backslashes.
+function tomlPath(value) {
+  return String(value ?? '').replace(/\\/g, '/');
+}
+
 function podName(node) {
   return `to-${String(node.name ?? '').replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 48)}`;
 }
@@ -30,9 +36,15 @@ export function hubFrpConfigToml(cfg, nodes = []) {
     'loginFailExit = false',
     '',
     `auth.token = ${tomlString(f.token ?? '')}`,
+    // frps only accepts STCP work connections when the token is attached to the NewWorkConns
+    // scope; without this the provider fails every visitor with "invalid NewWorkConn".
+    'auth.additionalScopes = ["HeartBeats", "NewWorkConns"]',
     '',
     `transport.tls.enable = ${f.tls !== false}`,
     `transport.tls.disableCustomTLSFirstByte = false`,
+    ...(f.certFile ? [`transport.tls.certFile = ${tomlString(tomlPath(f.certFile))}`] : []),
+    ...(f.keyFile ? [`transport.tls.keyFile = ${tomlString(tomlPath(f.keyFile))}`] : []),
+    ...(f.trustedCaFile ? [`transport.tls.trustedCaFile = ${tomlString(tomlPath(f.trustedCaFile))}`] : []),
     '',
     `webServer.addr = "127.0.0.1"`,
     `webServer.port = ${Number(f.adminPort ?? 7401)}`,
@@ -44,8 +56,8 @@ export function hubFrpConfigToml(cfg, nodes = []) {
     'allowUsers = ["dsh-link"]',
     'localIP = "127.0.0.1"',
     `localPort = ${Number(cfg.port)}`,
-    'useEncryption = true',
-    'compression = false'
+    'transport.useEncryption = true',
+    'transport.useCompression = false'
   ];
   for (const node of nodes) {
     if (!node.provider?.serverName || !node.provider?.secretKey || !node.visitorPort) continue;
@@ -57,7 +69,9 @@ export function hubFrpConfigToml(cfg, nodes = []) {
       `serverName = ${tomlString(node.provider.serverName)}`,
       `secretKey = ${tomlString(node.provider.secretKey)}`,
       'bindAddr = "127.0.0.1"',
-      `bindPort = ${Number(node.visitorPort)}`
+      `bindPort = ${Number(node.visitorPort)}`,
+      'transport.useEncryption = true',
+      'transport.useCompression = false'
     );
   }
   return lines.join('\n') + '\n';
@@ -211,6 +225,22 @@ export class HubTunnelManager {
     await this._waitAdminPortFree();
     await fs.rm(this.pidPath, { force: true });
     return { stopped: true, pid };
+  }
+
+  /**
+   * Bring the generated config in line with the current node list. Restarts frpc only when the
+   * config actually changed, so re-enrolling a node with the same provider/visitor port never
+   * tears down the very tunnel that carries the enrollment response.
+   */
+  async sync(nodes = this.nodes) {
+    if (!this.cfg.frp?.enabled) return { running: false, reason: 'frp disabled', changed: false, configPath: this.configPath };
+    let current = null;
+    try { current = await fs.readFile(this.configPath, 'utf8'); } catch { /* first run */ }
+    const next = hubFrpConfigToml(this.cfg, nodes);
+    const pid = await this.readPid();
+    const alive = await pidAlive(pid);
+    if (alive && current === next) return { running: true, pid, changed: false, reused: true, configPath: this.configPath };
+    return { ...(await this.relaunch(nodes)), changed: true };
   }
 
   /** Rebuild the visitor list and restart frpc. Failures are reported, never thrown. */
