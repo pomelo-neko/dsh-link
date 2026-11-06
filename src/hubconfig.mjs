@@ -10,7 +10,7 @@ import {
   DSHLINK_VERSION, expandEnv, isPlainObject, newId, randomToken, sha256Hex
 } from './util.mjs';
 import {
-  DEFAULT_TOKEN_ROLE, normalizeTokenRole, verifyToken
+  DEFAULT_TOKEN_ROLE, isLoopbackAddress, normalizeTokenRole, verifyToken
 } from './config.mjs';
 
 export const HUB_CONFIG_FILENAME = 'dshlink-hub.config.json';
@@ -59,6 +59,42 @@ export const DEFAULT_HUB_FRP = {
   keyFile: null,
   trustedCaFile: null,
   provider: { name: 'dshlink-hub', secretKey: null }
+};
+
+// B2/B4 (0.10): the phone control plane. The phone gateway is a loopback HTTPS listener with
+// mutual TLS; phones reach it through a dedicated phone-frps tunnel and never see a hub token.
+// The phone CA issues a client certificate per phone, so revoking one phone is a local action.
+export const DEFAULT_HUB_PHONE_GATEWAY = {
+  enabled: false,
+  bind: '127.0.0.1',
+  port: 8791,
+  opensslPath: null,
+  caDir: null,
+  hubToken: null,
+  maxBodyBytes: 2 * 1024 * 1024,
+  timeoutMs: 60_000,
+  bootstrapTtlHours: 2,
+  deviceDays: 365,
+  maxDevices: 64,
+  allowNewDevices: true
+};
+
+export const DEFAULT_HUB_PHONE_FRP = {
+  enabled: false,
+  frpcPath: null,
+  configPath: null,
+  logDir: null,
+  adminPort: 7402,
+  serverAddr: null,
+  serverPort: 7000,
+  user: 'dsh-link-phone',
+  token: null,
+  tls: true,
+  certFile: null,
+  keyFile: null,
+  trustedCaFile: null,
+  bindPort: 18790,
+  provider: { name: 'dshlink-phone', secretKey: null }
 };
 
 export function defaultHubDataDir() {
@@ -157,6 +193,8 @@ export function defaultHubConfig(overrides = {}) {
     files: { ...DEFAULT_HUB_FILES },
     enrollment: { ...DEFAULT_HUB_ENROLLMENT },
     frp: { ...DEFAULT_HUB_FRP, provider: { ...DEFAULT_HUB_FRP.provider } },
+    phoneGateway: { ...DEFAULT_HUB_PHONE_GATEWAY },
+    phoneFrp: { ...DEFAULT_HUB_PHONE_FRP, provider: { ...DEFAULT_HUB_PHONE_FRP.provider } },
     nodes: [],
     log: { level: 'info' }
   };
@@ -175,6 +213,8 @@ export function normalizeHubConfig(raw, baseDir) {
   const filesSource = isPlainObject(raw.files) ? raw.files : {};
   const enrollmentSource = isPlainObject(raw.enrollment) ? raw.enrollment : {};
   const frpSource = isPlainObject(raw.frp) ? raw.frp : {};
+  const phoneGatewaySource = isPlainObject(raw.phoneGateway) ? raw.phoneGateway : {};
+  const phoneFrpSource = isPlainObject(raw.phoneFrp) ? raw.phoneFrp : {};
   const logSource = isPlainObject(raw.log) ? raw.log : {};
   const cfg = {
     ...defaults,
@@ -223,6 +263,44 @@ export function normalizeHubConfig(raw, baseDir) {
           ? frpSource.provider.name.trim()
           : DEFAULT_HUB_FRP.provider.name,
         secretKey: frpSource.provider?.secretKey ? expandEnv(String(frpSource.provider.secretKey)) : null
+      }
+    },
+    phoneGateway: {
+      enabled: hubBool(phoneGatewaySource.enabled, DEFAULT_HUB_PHONE_GATEWAY.enabled),
+      // The gateway terminates mTLS and injects a hub token; exposing it beyond loopback would
+      // only widen the attack surface. Phones reach it through a local STCP visitor instead.
+      bind: isLoopbackAddress(String(phoneGatewaySource.bind ?? '')) ? String(phoneGatewaySource.bind).trim() : DEFAULT_HUB_PHONE_GATEWAY.bind,
+      port: hubInt(phoneGatewaySource.port, DEFAULT_HUB_PHONE_GATEWAY.port, 1, 65535),
+      opensslPath: phoneGatewaySource.opensslPath ? path.resolve(expandEnv(String(phoneGatewaySource.opensslPath))) : null,
+      caDir: phoneGatewaySource.caDir ? path.resolve(expandEnv(String(phoneGatewaySource.caDir))) : path.join(dataDir, 'phone-ca'),
+      hubToken: phoneGatewaySource.hubToken ? expandEnv(String(phoneGatewaySource.hubToken)) : null,
+      maxBodyBytes: hubInt(phoneGatewaySource.maxBodyBytes, DEFAULT_HUB_PHONE_GATEWAY.maxBodyBytes, 64 * 1024, 64 * 1024 * 1024),
+      timeoutMs: hubInt(phoneGatewaySource.timeoutMs, DEFAULT_HUB_PHONE_GATEWAY.timeoutMs, 1000, 600_000),
+      bootstrapTtlHours: hubInt(phoneGatewaySource.bootstrapTtlHours, DEFAULT_HUB_PHONE_GATEWAY.bootstrapTtlHours, 1, 24 * 30),
+      deviceDays: hubInt(phoneGatewaySource.deviceDays, DEFAULT_HUB_PHONE_GATEWAY.deviceDays, 1, 3650),
+      maxDevices: hubInt(phoneGatewaySource.maxDevices, DEFAULT_HUB_PHONE_GATEWAY.maxDevices, 1, 500),
+      allowNewDevices: phoneGatewaySource.allowNewDevices !== false
+    },
+    phoneFrp: {
+      enabled: hubBool(phoneFrpSource.enabled, DEFAULT_HUB_PHONE_FRP.enabled),
+      frpcPath: phoneFrpSource.frpcPath ? path.resolve(expandEnv(String(phoneFrpSource.frpcPath))) : null,
+      configPath: phoneFrpSource.configPath ? path.resolve(expandEnv(String(phoneFrpSource.configPath))) : null,
+      logDir: phoneFrpSource.logDir ? path.resolve(expandEnv(String(phoneFrpSource.logDir))) : null,
+      adminPort: hubInt(phoneFrpSource.adminPort, DEFAULT_HUB_PHONE_FRP.adminPort, 1, 65535),
+      serverAddr: phoneFrpSource.serverAddr ? expandEnv(String(phoneFrpSource.serverAddr)) : null,
+      serverPort: hubInt(phoneFrpSource.serverPort, DEFAULT_HUB_PHONE_FRP.serverPort, 1, 65535),
+      user: phoneFrpSource.user ? String(phoneFrpSource.user) : DEFAULT_HUB_PHONE_FRP.user,
+      token: phoneFrpSource.token ? expandEnv(String(phoneFrpSource.token)) : null,
+      tls: phoneFrpSource.tls !== false,
+      certFile: phoneFrpSource.certFile ? path.resolve(expandEnv(String(phoneFrpSource.certFile))) : null,
+      keyFile: phoneFrpSource.keyFile ? path.resolve(expandEnv(String(phoneFrpSource.keyFile))) : null,
+      trustedCaFile: phoneFrpSource.trustedCaFile ? path.resolve(expandEnv(String(phoneFrpSource.trustedCaFile))) : null,
+      bindPort: hubInt(phoneFrpSource.bindPort, DEFAULT_HUB_PHONE_FRP.bindPort, 1, 65535),
+      provider: {
+        name: typeof phoneFrpSource.provider?.name === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(phoneFrpSource.provider.name.trim())
+          ? phoneFrpSource.provider.name.trim()
+          : DEFAULT_HUB_PHONE_FRP.provider.name,
+        secretKey: phoneFrpSource.provider?.secretKey ? expandEnv(String(phoneFrpSource.provider.secretKey)) : null
       }
     },
     nodes: (raw.nodes ?? []).map(normalizeStaticNode),

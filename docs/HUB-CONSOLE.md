@@ -1,4 +1,4 @@
-# Hub Web 控制台（0.8）
+# Hub Web 控制台（0.8 起，0.10 加手机证书）
 
 > 适用：dsh-link **hub 进程**（`dshlink hub serve`）。节点（8787）和网关（8788）没有这个页面。
 > 相关：[HUB-TOPOLOGY-DESIGN.md](HUB-TOPOLOGY-DESIGN.md)（拓扑设计）、[GATEWAY.md](GATEWAY.md)（节点网关）、[OPERATIONS.md](OPERATIONS.md)（常驻与巡检）。
@@ -11,6 +11,7 @@
 - 看一眼**状态监控**：节点在线数、待投递队列、运行时长、STCP/FRP 是否启用；
 - 查看并处理**缓存区**（hub outbox）：立即重投、单条重投、丢弃；
 - 管理**其他 hub 设置**：重试间隔、消息 TTL、每目标队列上限、准入策略与文件上限等（写回 hub 配置文件，多数立即生效）。
+- （0.10）签发 / 吊销**每设备 mTLS 手机证书**与一次性引导码，并查看 phone gateway / phone frps 状态（§3.6）。
 
 实现是零依赖的单个 HTML 文件（`src/hubui.mjs`），由 hub 进程在 `/ui` 直接吐出；页面本身不含任何秘密，所有数据都通过同源 `/api/v1/hub/*` 拉取，每个请求都要求 **admin** 令牌——hub 从不像节点那样信任回环地址。
 
@@ -35,7 +36,8 @@ http://<hub 地址>:<hub 端口>/          # 302 -> /ui（方便记地址）
 | 状态卡 | 在线节点 x/y、网络中节点数、待投递队列、运行时长、STCP/FRP 开关 | 只读 |
 | 节点 | 名称、状态（active/pending/offline）、版本、visitor 端口、最近心跳、角色/错误 | 批准 pending 节点、移除节点（带确认） |
 | 接入令牌 | 标签、角色、绑定节点、过期时间、最大次数、已用次数 | 生成 enroll/admin/device/peer 令牌（明文只显示一次，可复制）、吊销 |
-| 手机接入 | 标签、有效期、最近一次生成的连接串（可复制/下载） | 生成手机连接串（device 令牌 + 可选内嵌 STCP 隧道与证书） |
+| 手机证书（0.10） | phone gateway 地址/CA 指纹/注入令牌状态、phone frps 状态、手机证书表、引导码表 | 生成一次性 `dshlink2:` 引导码（可下载）、吊销手机证书 / 作废引导码 |
+| 手机接入（旧版 dshlink1） | 标签、有效期、最近一次生成的连接串（可复制/下载） | 生成旧版连接串（device 令牌 + 可选内嵌 STCP 隧道与证书） |
 | 缓存区（outbox） | 每条待下发消息 id、时间、方向、目标、主题、投递状态/错误 | 「只看待投递」过滤、立即重投整队、单条重投、丢弃（标记 dropped，不物理删除） |
 | 运行中会话 | 各节点聚合的 Session 运行状态（不返回正文） | 只读 |
 | 设置 | 当前 hub 配置（脱敏，无 frp secretKey） | 修改常用项并保存；未知键/越界会被拒绝 |
@@ -74,6 +76,34 @@ APK 本身不含任何密钥；吊销用令牌列表里的“吊销”或 `dshli
 
 > 安全：连接串等同于密码（含 device 令牌，启用 FRP 时还含隧道 secret 与客户端证书私钥）。不要贴到公开
 > 群/issue；每部手机单独一份，丢失即吊销。
+
+## 3.6 手机证书（0.10）
+
+0.10 起手机接入推荐用**每设备 mTLS 证书**（设计见 [PHONE-SECURITY.md](PHONE-SECURITY.md)）：控制台这张卡管理 hub phone CA
+签发的手机证书和一次性引导码，不再下发共享的 frp 凭据。前提是 hub 上先执行过：
+
+```powershell
+dshlink hub phone setup --no-tunnel                 # 局域网/VPN：手机直连网关
+# 或走独立 phone-frps：
+dshlink hub phone setup --phone-frp-server <host> --phone-frp-port 16443 --phone-frp-token <token> \
+  --phone-frp-cert client.crt --phone-frp-key client.key --phone-frp-ca ca.crt
+dshlink hub serve
+```
+
+卡片内容：
+
+- **状态行**：网关是否监听、HTTPS 地址（默认 `https://127.0.0.1:8791`）、CA 指纹前缀、网关进程是否已配置注入令牌；
+- **三张统计卡**：有效/已登记手机证书数、phone-frps 是否运行、有效引导码数；
+- **生成证书引导码**：标签、有效期（小时）、最多可用次数、可选的“手机可访问的 https 网关地址”、是否使用 phone-frps 隧道。
+  生成的是 `dshlink2:...` 文本，**只含 CA 公钥 + 一次性 secret + 隧道 visitor**，不含 hub 令牌、CA 私钥或其他手机证书；
+- **已登记的手机**：设备 ID、状态、证书指纹前缀、登记时间、最后使用时间，可逐部“吊销”（下一次 TLS 握手即拒绝）；
+- **引导码**：一次性、有 TTL，可提前“作废”。
+
+![手机证书卡片](images/hub-phone10.png)
+
+无隧道时必须填一个手机能访问的 https 地址（网关 server 证书 SAN 固定为 `127.0.0.1/localhost`，所以通常要
+`adb reverse`、端口转发或内网 DNS 指向网关）；跨网络请启用 phone-frps，App 会使用引导码里的 visitor 配置。
+手机 App 需要 **0.6.0+**。旧的“手机接入（旧版 dshlink1）”卡保留用于兼容 0.9 的连接串。
 
 ## 4. 设置项（`PATCH /api/v1/hub/settings` 白名单）
 
@@ -114,6 +144,11 @@ APK 本身不含任何密钥；吊销用令牌列表里的“吊销”或 `dshli
 | POST | `/api/v1/hub/outbox/:id/retry` | 单条重投 → `{id,delivery}` |
 | DELETE | `/api/v1/hub/outbox/:id` | 丢弃单条 → `delivery.state='dropped'` |
 | GET | `/api/v1/hub/sessions/running` | 聚合运行中会话（admin/device） |
+| GET | `/api/v1/hub/phone/status` | 手机网关/隧道/设备/引导码状态（只读，admin） |
+| GET | `/api/v1/hub/phones` | 已登记手机证书列表（admin） |
+| POST | `/api/v1/hub/phones/:id/revoke` | 吊销一部手机（admin，按 id/deviceId/指纹） |
+| POST | `/api/v1/hub/phone/bootstrap` | 生成一次性 `dshlink2:` 引导码：`{label,ttlHours,maxUses,tunnel,url?}` → `201 {code,summary,...}`（需先 phone setup） |
+| DELETE | `/api/v1/hub/phone/bootstrap/:id` | 作废引导码（admin） |
 | GET | `/api/v1/hub/status` / `/nodes` / `/outbox` / `/api/v1/audit` | 与 CLI 共用的只读视图 |
 
 示例（不经过页面也能做同样的事）：
@@ -153,6 +188,12 @@ curl -s -X PATCH "$HUB/api/v1/hub/settings" \
 登录页渲染与版本号、登录、4 张状态卡、令牌列表（admin 行、无秘密）、设置表单、生成 enroll 令牌（明文一次、`maxUses=2`）、用页面令牌 enroll 假节点、造一条 pending outbox、outbox 表可见、改 `retrySeconds` 保存并落库、控制台重投（`state=pending` 且带 `cannot reach hub->…` 错误）、控制台丢弃（`state=dropped`，确认框文案断言）、审计面板出现 `hub_token_created`、吊销令牌（确认框 + 列表消失）、截图、退出登录清除 localStorage、**零 JS 异常 / 零 console error / 零 4xx-5xx 资源请求**。
 
 回归测试：`test/hub.test.mjs` 的 `hub: web console serves the UI and its admin APIs` 覆盖页面/CSP/鉴权/令牌/设置/outbox 接口；全量见 README 的测试计数。
+
+2026-11-06 用同样的无头 Edge + CDP 对临时 hub（`UI-PHONE10-HUB`，hub 端口 18793、phone gateway 18794）跑了 15 项手机证书卡断言，
+全部通过：卡片渲染、网关状态（运行中 + `https://127.0.0.1:18794` + CA 指纹 + 注入令牌已配置）、三张统计卡、空设备/引导码表、
+生成无隧道 `dshlink2:` 引导码（入口/CA/无隧道/过期/引导码 ID 文案）、引导码入表、确认框作废后状态变为“已吊销”、截图、
+**零 JS 异常 / 零 console error**、页面不含 `pbs_` 或私钥。截图即上面的 `images/hub-phone10.png`。
+服务端侧另有 `test/hub.test.mjs` 的 phone control-plane 断言（无 CA 时 503、device 角色 403、状态为空）。
 
 ## 8. 排障
 

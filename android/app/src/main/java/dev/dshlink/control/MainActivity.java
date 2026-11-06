@@ -31,6 +31,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -71,6 +72,8 @@ public class MainActivity extends Activity {
     private TextView warningView;
     private TextView emptyView;
     private TextView profileView;
+    private Button resetCertButton;
+    private Button clearProfileButton;
     private ListView listView;
     private WorkspaceAdapter adapter;
     private ArrayAdapter<String> nodeAdapter;
@@ -98,6 +101,8 @@ public class MainActivity extends Activity {
         warningView = findViewById(R.id.warning);
         emptyView = findViewById(R.id.empty);
         profileView = findViewById(R.id.profile_info);
+        resetCertButton = findViewById(R.id.reset_cert_button);
+        clearProfileButton = findViewById(R.id.clear_profile_button);
         listView = findViewById(R.id.workspace_list);
         adapter = new WorkspaceAdapter(this);
         listView.setAdapter(adapter);
@@ -130,6 +135,7 @@ public class MainActivity extends Activity {
         tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         tunnelCheck.setChecked(prefs.getBoolean(KEY_TUNNEL, false));
         urlInput.setEnabled(!tunnelCheck.isChecked());
+        applySecurityModeUi();
         updateProfileUi();
         tunnelCheck.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
@@ -158,6 +164,18 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View view) {
                 pickProfileFile();
+            }
+        });
+        resetCertButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showResetCertDialog();
+            }
+        });
+        clearProfileButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                confirmClearProfile();
             }
         });
 
@@ -190,26 +208,41 @@ public class MainActivity extends Activity {
             }
         });
 
+        boolean handledLaunch = handleLaunchIntent(getIntent());
         String savedUrl = prefs.getString(KEY_URL, "");
-        if (!savedUrl.isEmpty() || prefs.getBoolean(KEY_TUNNEL, false)) connect();
+        boolean certMode = PhoneIdentity.certMode(this);
+        boolean hasSomethingToConnect = !savedUrl.isEmpty() || prefs.getBoolean(KEY_TUNNEL, false);
+        if (!handledLaunch && hasSomethingToConnect
+                && (!certMode || PhoneIdentity.hasCertificate(this)
+                    || PhoneIdentity.hasBootstrap(this))) {
+            connect();
+        }
     }
 
     private void connect() {
         final boolean useTunnel = tunnelCheck.isChecked();
         final String typedUrl = ApiClient.normalize(urlInput.getText().toString());
-        final String token = tokenInput.getText().toString().trim();
+        final boolean certMode = PhoneIdentity.certMode(this);
+        // dshlink2（每设备证书）不需要 device token：mTLS 客户端证书本身就是凭据。
+        final String token = certMode ? "" : tokenInput.getText().toString().trim();
         if (!useTunnel && typedUrl.isEmpty()) {
             Ui.toast(this, "请填写中心服务器或节点地址");
             return;
         }
+        if (certMode && !typedUrl.startsWith("https://")) {
+            Ui.toast(this, "证书模式要求 https:// 入口地址，请重新导入 dshlink2 连接串");
+            return;
+        }
         SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
         editor.putString(KEY_URL, typedUrl);
-        editor.putString(KEY_TOKEN, token);
+        if (!certMode) editor.putString(KEY_TOKEN, token);
         editor.putBoolean(KEY_TUNNEL, useTunnel);
         editor.apply();
 
         NodeState.reset();
+        NodeState.securityMode = certMode ? PhoneIdentity.MODE_CERT : PhoneIdentity.MODE_TOKEN;
         NodeState.token = token;
+        NodeState.baseUrl = typedUrl;
         hubMode = false;
         networkNodes.clear();
         nodeAdapter.clear();
@@ -218,7 +251,13 @@ public class MainActivity extends Activity {
         warningView.setVisibility(View.GONE);
         summaryView.setText("");
         setBusy(true);
-        status(useTunnel ? "正在启动内置 frpc 并连接中转端口…" : "正在连接 " + typedUrl + " …");
+        if (certMode) {
+            status(PhoneEnrollment.enrolled(this)
+                    ? "正在用每设备证书建立 mTLS 连接…"
+                    : "正在用一次性引导码申请设备证书（只发送公钥）…");
+        } else {
+            status(useTunnel ? "正在启动内置 frpc 并连接中转端口…" : "正在连接 " + typedUrl + " …");
+        }
 
         io.execute(new Runnable() {
             @Override
@@ -227,17 +266,45 @@ public class MainActivity extends Activity {
                     String url = typedUrl;
                     if (useTunnel) {
                         TunnelManager.start(getApplicationContext());
-                        url = TunnelManager.localUrl(getApplicationContext());
+                        if (!certMode) url = TunnelManager.localUrl(getApplicationContext());
                     } else {
                         TunnelManager.stop();
                     }
-                    final ApiClient client = new ApiClient(url, token);
+                    ApiClient client;
+                    if (certMode) {
+                        // 一次性引导：只在本机还没有证书时发生，成功后会立即清掉 bootstrap secret。
+                        PhoneEnrollment.enrollIfNeeded(getApplicationContext(), url);
+                        client = new ApiClient(url, "",
+                                PhoneIdentity.mutualTlsContext(getApplicationContext()));
+                        // 服务器确认它看到了这张证书；顺带刷新本机保存的指纹/到期时间。
+                        refreshCertificateMeta(client.get("/api/v1/phone/me"));
+                    } else {
+                        client = new ApiClient(url, token);
+                    }
                     final JSONObject info = client.get("/api/v1/info");
                     if (NodeState.detectHub(info)) {
                         startHub(client, url, token, info);
                     } else {
                         startNode(client, url, token, info);
                     }
+                } catch (final GeneralSecurityException certErr) {
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            setBusy(false);
+                            status("设备证书准备失败");
+                            updateProfileUi();
+                            String message = certErr.getMessage() == null
+                                    ? "无法建立 mTLS 连接" : certErr.getMessage();
+                            new AlertDialog.Builder(MainActivity.this)
+                                    .setTitle("设备证书准备失败")
+                                    .setMessage(message + "\n\n请点“重置设备证书”后重新导入管理员签发的"
+                                            + " dshlink2 引导码；若仍然失败，请确认手机系统时间正确，"
+                                            + "并联系管理员确认 hub 的 CA 没有更换。")
+                                    .setPositiveButton("知道了", null)
+                                    .show();
+                        }
+                    });
                 } catch (final IOException tunnelErr) {
                     main.post(new Runnable() {
                         @Override
@@ -265,6 +332,7 @@ public class MainActivity extends Activity {
                         public void run() {
                             setBusy(false);
                             status("连接失败");
+                            updateProfileUi();
                             Ui.showError(MainActivity.this, err);
                         }
                     });
@@ -294,6 +362,7 @@ public class MainActivity extends Activity {
         main.post(new Runnable() {
             @Override
             public void run() {
+                applySecurityState();
                 hubMode = false;
                 NodeState.baseUrl = url;
                 NodeState.token = token;
@@ -306,6 +375,7 @@ public class MainActivity extends Activity {
                 applyNodeNetwork(discovered);
                 applyInfo();
                 applyWorkspaces(workspaces);
+                updateProfileUi();
                 setBusy(false);
             }
         });
@@ -348,6 +418,7 @@ public class MainActivity extends Activity {
         main.post(new Runnable() {
             @Override
             public void run() {
+                applySecurityState();
                 hubMode = true;
                 NodeState.baseUrl = url;
                 NodeState.token = token;
@@ -390,6 +461,7 @@ public class MainActivity extends Activity {
                         status("已连接中心服务器 · 没有可读取的节点");
                     }
                 }
+                updateProfileUi();
                 setBusy(false);
             }
         });
@@ -650,6 +722,7 @@ public class MainActivity extends Activity {
         } else {
             summary.append(" · 该节点未提供网络扫描（需 0.7+）");
         }
+        appendSecuritySummary(summary);
         summaryView.setText(summary.toString());
 
         canSend = NodeState.canSend();
@@ -680,6 +753,7 @@ public class MainActivity extends Activity {
             summary.append(" · ").append(total).append(" 个节点（中心服务器未提供 /network/nodes）");
         }
         if (NodeState.selectedNode != null) summary.append(" · 当前 ").append(NodeState.nodeLabel());
+        appendSecuritySummary(summary);
         summaryView.setText(summary.toString());
 
         canSend = NodeState.canSend();
@@ -748,7 +822,8 @@ public class MainActivity extends Activity {
     /** Asks for a connection string / profile and also offers the system file picker. */
     private void openImportDialog() {
         final EditText input = new EditText(this);
-        input.setHint("粘贴 dshlink1: 开头的连接串，或打开 .json/.dshlink 文件后粘贴其中的内容");
+        input.setHint("粘贴 dshlink2:（每设备证书）或 dshlink1:（device token）开头的连接串，"
+                + "或打开管理员给你的 .json/.dshlink 文件后粘贴其中的内容");
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         input.setMinLines(5);
@@ -761,8 +836,10 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
         new AlertDialog.Builder(this)
                 .setTitle("导入连接串/配置文件")
-                .setMessage("连接串和配置文件由 hub 管理员生成，包含你专用的入口地址、device token"
-                        + "（可能还有 STCP 隧道凭据）。导入后只保存在本机 App 私有目录。")
+                .setMessage("连接串和配置文件由 hub 管理员生成。dshlink2: 是 0.6.0 的每设备证书模式"
+                        + "（一次性引导码，首次连接自动换取证书，只发送公钥）；dshlink1: 是旧的"
+                        + " device token 模式。两者都可能包含专用的 STCP 隧道凭据。"
+                        + "导入后只保存在本机 App 私有目录。")
                 .setView(box)
                 .setPositiveButton("导入", new DialogInterface.OnClickListener() {
                     @Override
@@ -799,7 +876,12 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != REQUEST_OPEN_PROFILE || resultCode != RESULT_OK) return;
         if (data == null || data.getData() == null) return;
-        final Uri uri = data.getData();
+        Uri uri = data.getData();
+        importUri(uri, "文件 " + displayName(uri));
+    }
+
+    /** Reads a profile/document Uri off the UI thread and hands the text to importText. */
+    private void importUri(final Uri uri, final String source) {
         status("正在读取连接配置文件…");
         io.execute(new Runnable() {
             @Override
@@ -808,18 +890,17 @@ public class MainActivity extends Activity {
                 try {
                     text = readTextUri(uri);
                 } catch (final IOException err) {
+                    final String message = err.getMessage() == null ? "未知错误" : err.getMessage();
                     main.post(new Runnable() {
                         @Override
                         public void run() {
                             status("导入失败");
-                            showImportError("无法读取所选文件："
-                                    + (err.getMessage() == null ? "未知错误" : err.getMessage()));
+                            showImportError("无法读取所选文件：" + message);
                         }
                     });
                     return;
                 }
                 final String content = text;
-                final String source = "文件 " + displayName(uri);
                 main.post(new Runnable() {
                     @Override
                     public void run() {
@@ -828,6 +909,23 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    /** Handles "share text to app" / "open file with app" imports; true when something was imported. */
+    private boolean handleLaunchIntent(Intent intent) {
+        if (intent == null) return false;
+        String action = intent.getAction();
+        if (Intent.ACTION_SEND.equals(action)) {
+            String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+            if (text == null || text.trim().isEmpty()) return false;
+            importText(text, "分享的连接串");
+            return true;
+        }
+        if (Intent.ACTION_VIEW.equals(action) && intent.getData() != null) {
+            importUri(intent.getData(), "外部打开的文件");
+            return true;
+        }
+        return false;
     }
 
     /** Parses the pasted/loaded profile off the UI thread, then applies and connects. */
@@ -864,9 +962,10 @@ public class MainActivity extends Activity {
     private void applyProfile(ConnectProfile profile, String source) {
         // A new profile may point at a different frpc visitor; restart the tunnel on connect.
         TunnelManager.stop();
+        final boolean certMode = profile.isCertMode();
         SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
         editor.putString(KEY_URL, profile.url);
-        editor.putString(KEY_TOKEN, profile.token);
+        editor.putString(KEY_TOKEN, profile.token == null ? "" : profile.token);
         editor.putBoolean(KEY_TUNNEL, profile.hasTunnel);
         editor.putString(KEY_PROFILE_LABEL, profile.label);
         editor.putString(KEY_PROFILE_ENTRY_KIND, profile.entryKind);
@@ -875,13 +974,43 @@ public class MainActivity extends Activity {
         editor.putBoolean(KEY_PROFILE_HAS_TUNNEL, profile.hasTunnel);
         editor.apply();
 
+        String securityNote;
+        if (certMode) {
+            // Compare before overwriting the pinned CA: re-importing the same hub+code must not
+            // throw away a working certificate (and burn another bootstrap attempt).
+            String storedCa = PhoneIdentity.caFingerprint(this);
+            String storedBootstrap = PhoneIdentity.bootstrapId(this);
+            boolean sameProfile = PhoneIdentity.sameFingerprint(profile.caFingerprint, storedCa)
+                    && profile.bootstrapId.equals(storedBootstrap)
+                    && PhoneIdentity.hasCertificate(this);
+            PhoneIdentity.setSecureMode(this, PhoneIdentity.MODE_CERT);
+            PhoneIdentity.setDeviceLabel(this, profile.label);
+            PhoneIdentity.setCa(this, profile.caPem, profile.caFingerprint);
+            if (!sameProfile) {
+                // 新 hub 或新引导码：旧证书不再适用，连设备身份一起重置。
+                // 服务端会拒绝已吊销的设备再次引导（phone_revoked），所以重新引导必须换新的
+                // deviceId —— 这也是“被吊销后管理员重新签发引导码”能够恢复的方式。
+                PhoneIdentity.resetCertificate(this, true);
+                PhoneIdentity.setBootstrap(this, profile.bootstrapId, profile.bootstrapSecret,
+                        profile.bootstrapExpiresAt);
+            }
+            securityNote = sameProfile
+                    ? "本机已有该 hub 的设备证书，将直接复用（不重复兑换引导码）。"
+                    : "首次连接会自动用一次性引导码兑换每设备证书，并且只发送公钥。";
+        } else {
+            PhoneIdentity.setSecureMode(this, PhoneIdentity.MODE_TOKEN);
+            PhoneIdentity.clearBootstrapSecret(this);
+            securityNote = "使用 device token（Bearer）连接；dshlink1: 旧路径保持可用。";
+        }
+
         urlInput.setText(profile.url);
         urlInput.setEnabled(!profile.hasTunnel);
-        tokenInput.setText(profile.token);
+        tokenInput.setText(certMode ? "" : profile.token);
         tunnelCheck.setChecked(profile.hasTunnel);
+        applySecurityModeUi();
         updateProfileUi();
 
-        String message = profile.summary() + "\n来源：" + source;
+        String message = profile.summary() + "\n来源：" + source + "\n\n" + securityNote;
         if (profile.expired()) {
             message += "\n\n注意：该连接配置已过期，连接可能被拒绝；请让 hub 管理员重新生成。";
         }
@@ -893,33 +1022,63 @@ public class MainActivity extends Activity {
         connect();
     }
 
-    /** Shows which connection profile is stored (hidden until one is imported). */
+    /** Shows which connection profile is stored plus the active security mode (token vs certificate). */
     private void updateProfileUi() {
         if (profileView == null) return;
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String label = prefs.getString(KEY_PROFILE_LABEL, "");
-        if (label.isEmpty()) {
+        boolean certMode = PhoneIdentity.certMode(this);
+        boolean hasCertificate = PhoneIdentity.hasCertificate(this);
+        boolean hasProfile = !label.isEmpty() || certMode;
+        if (!hasProfile) {
             profileView.setVisibility(View.GONE);
-            return;
+        } else {
+            String entryName = prefs.getString(KEY_PROFILE_ENTRY_NAME, "");
+            String entryKind = prefs.getString(KEY_PROFILE_ENTRY_KIND, "hub");
+            String expiresAt = prefs.getString(KEY_PROFILE_EXPIRES_AT, "");
+            boolean hasTunnel = prefs.getBoolean(KEY_PROFILE_HAS_TUNNEL, false);
+            StringBuilder text = new StringBuilder("已导入：")
+                    .append(label.isEmpty() ? "（未命名）" : label)
+                    .append(" · ").append("node".equals(entryKind) ? "节点" : "中心服务器");
+            if (!entryName.isEmpty()) text.append(" ").append(entryName);
+            if (!expiresAt.isEmpty()) text.append(" · 到期 ").append(ConnectProfile.formatExpires(expiresAt));
+            text.append(" · ").append(hasTunnel ? "含内置隧道" : "无隧道（直连）");
+            if (certMode) {
+                text.append("\n安全模式：每设备证书（mTLS） · CA ")
+                        .append(shortFingerprint(PhoneIdentity.caFingerprint(this)));
+                text.append("\n设备证书：");
+                if (hasCertificate) {
+                    text.append(shortFingerprint(PhoneIdentity.certFingerprint(this)));
+                    String validTo = PhoneIdentity.certValidTo(this);
+                    if (!validTo.isEmpty()) {
+                        text.append(" · 到期 ").append(ConnectProfile.formatExpires(validTo));
+                    }
+                    text.append(" · 私钥 ").append(PhoneIdentity.keyStorageLabel(this));
+                } else {
+                    text.append("尚未引导（首次连接自动兑换引导码） · 私钥 ")
+                            .append(PhoneIdentity.keyStorageLabel(this));
+                }
+            } else {
+                text.append("\n安全模式：设备 token（Bearer）");
+                if (hasCertificate) text.append(" · 本机另有设备证书（重新导入 dshlink2 可切回）");
+            }
+            profileView.setText(text.toString());
+            profileView.setVisibility(View.VISIBLE);
         }
-        String entryName = prefs.getString(KEY_PROFILE_ENTRY_NAME, "");
-        String entryKind = prefs.getString(KEY_PROFILE_ENTRY_KIND, "hub");
-        String expiresAt = prefs.getString(KEY_PROFILE_EXPIRES_AT, "");
-        boolean hasTunnel = prefs.getBoolean(KEY_PROFILE_HAS_TUNNEL, false);
-        StringBuilder text = new StringBuilder("已导入：").append(label)
-                .append(" · ").append("node".equals(entryKind) ? "节点" : "中心服务器");
-        if (!entryName.isEmpty()) text.append(" ").append(entryName);
-        if (!expiresAt.isEmpty()) text.append(" · 到期 ").append(ConnectProfile.formatExpires(expiresAt));
-        text.append(" · ").append(hasTunnel ? "含内置隧道" : "无隧道（直连）");
-        profileView.setText(text.toString());
-        profileView.setVisibility(View.VISIBLE);
+        if (resetCertButton != null) {
+            resetCertButton.setVisibility(hasProfile || hasCertificate ? View.VISIBLE : View.GONE);
+        }
+        if (clearProfileButton != null) {
+            clearProfileButton.setVisibility(hasProfile ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void showImportError(String message) {
         new AlertDialog.Builder(this)
                 .setTitle("导入失败")
-                .setMessage(message + "\n\n请向 hub 管理员索取新的连接串/配置文件："
-                        + "连接串以 dshlink1: 开头，文件导入支持 .json/.txt/.dshlink 内容。")
+                .setMessage(message + "\n\n请向 hub 管理员索取新的连接串/配置文件：0.6.0 的每设备证书"
+                        + "连接串以 dshlink2: 开头，旧的 device token 连接串以 dshlink1: 开头；"
+                        + "文件导入支持 .json/.txt/.dshlink 内容。")
                 .setPositiveButton("知道了", null)
                 .show();
     }
@@ -959,6 +1118,147 @@ public class MainActivity extends Activity {
         return name == null ? uri.toString() : name;
     }
 
+    /** Copies cert-mode identity state (fingerprint/validity/CA) into NodeState for the summary. */
+    private void applySecurityState() {
+        boolean certMode = PhoneIdentity.certMode(getApplicationContext());
+        NodeState.securityMode = certMode ? PhoneIdentity.MODE_CERT : PhoneIdentity.MODE_TOKEN;
+        if (certMode) {
+            NodeState.deviceFingerprint = PhoneIdentity.certFingerprint(getApplicationContext());
+            NodeState.deviceValidTo = PhoneIdentity.certValidTo(getApplicationContext());
+            NodeState.caFingerprint = PhoneIdentity.caFingerprint(getApplicationContext());
+        }
+    }
+
+    /** Token input is meaningless in certificate mode: lock it and explain why. */
+    private void applySecurityModeUi() {
+        boolean certMode = PhoneIdentity.certMode(this);
+        tokenInput.setEnabled(!certMode);
+        if (certMode) {
+            tokenInput.setText("");
+            tokenInput.setHint("dshlink2 使用每设备证书（mTLS），不需要 token");
+        } else {
+            tokenInput.setHint("device token（hub 必填；节点可留空）");
+        }
+    }
+
+    private void appendSecuritySummary(StringBuilder summary) {
+        if (!NodeState.certMode()) return;
+        summary.append(" · 每设备证书 mTLS");
+        String fingerprint = NodeState.deviceFingerprint;
+        if (fingerprint != null && !fingerprint.isEmpty()) {
+            summary.append("（").append(shortFingerprint(fingerprint)).append("）");
+        }
+    }
+
+    /** Last 12 hex digits of a SHA-256 fingerprint, enough to compare on screen. */
+    private static String shortFingerprint(String value) {
+        String normalized = PhoneIdentity.normalizeFingerprint(value);
+        if (normalized.isEmpty()) return "未知";
+        if (normalized.length() <= 12) return normalized;
+        return "…" + normalized.substring(normalized.length() - 12);
+    }
+
+    /** Reads /api/v1/phone/me and refreshes the locally cached certificate metadata. */
+    private void refreshCertificateMeta(JSONObject me) {
+        JSONObject device = me == null ? null : me.optJSONObject("device");
+        if (device != null) {
+            String fingerprint = Ui.text(device, "fingerprint");
+            String validTo = Ui.text(device, "validTo");
+            if (validTo.isEmpty()) validTo = Ui.text(device, "expiresAt");
+            String certPem = PhoneIdentity.certPem(getApplicationContext());
+            if (!fingerprint.isEmpty() && !certPem.isEmpty()) {
+                PhoneIdentity.setCertificate(getApplicationContext(), certPem, fingerprint, validTo);
+            }
+        }
+        JSONObject ca = me == null ? null : me.optJSONObject("ca");
+        if (ca != null) {
+            String caFingerprint = Ui.text(ca, "fingerprint");
+            if (!caFingerprint.isEmpty()
+                    && !PhoneIdentity.sameFingerprint(caFingerprint,
+                        PhoneIdentity.caFingerprint(getApplicationContext()))) {
+                // The server's CA does not match the imported profile: absolutely worth knowing.
+                status("警告：服务器 CA 指纹与导入的连接串不一致");
+            }
+        }
+        applySecurityState();
+    }
+
+    /** 0.6.0 "reset device certificate": keep identity, rotate identity, or import a new code. */
+    private void showResetCertDialog() {
+        boolean certMode = PhoneIdentity.certMode(this);
+        final String[] items = certMode
+                ? new String[]{
+                    "重置设备证书（保留设备身份，用新引导码重新兑换）",
+                    "重置证书并更换设备身份（清空 deviceId）",
+                    "导入新的 dshlink2 引导码"}
+                : new String[]{
+                    "清除本机保存的设备证书与密钥",
+                    "导入新的 dshlink2 引导码"};
+        new AlertDialog.Builder(this)
+                .setTitle("重置设备证书")
+                .setMessage("每设备证书模式下，证书就是登录凭据。重置后本机需要用 hub 管理员新签发的"
+                        + " dshlink2 引导码重新兑换；旧证书在 hub 上仍显示为已注册，直到管理员吊销。")
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (which == 0) {
+                            PhoneIdentity.resetCertificate(MainActivity.this, false);
+                            updateProfileUi();
+                            status("已重置设备证书；请导入管理员签发的 dshlink2 引导码重新兑换");
+                            Ui.toast(MainActivity.this, "设备证书已重置，需要用新的引导码重新兑换");
+                        } else if (items.length == 3 && which == 1) {
+                            PhoneIdentity.resetCertificate(MainActivity.this, true);
+                            updateProfileUi();
+                            status("已重置设备证书并更换设备身份；请导入新的 dshlink2 引导码");
+                            Ui.toast(MainActivity.this, "证书与设备身份已重置");
+                        } else {
+                            openImportDialog();
+                        }
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void confirmClearProfile() {
+        new AlertDialog.Builder(this)
+                .setTitle("清除导入配置")
+                .setMessage("将清除本机保存的连接串信息、设备证书与隧道配置（设备身份 deviceId 会保留）。"
+                        + "之后可用 hub 管理员给的新连接串重新导入。")
+                .setPositiveButton("清除", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        clearImportedProfile();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void clearImportedProfile() {
+        TunnelManager.stop();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .remove(KEY_URL).remove(KEY_TOKEN).remove(KEY_TUNNEL)
+                .remove(KEY_PROFILE_LABEL).remove(KEY_PROFILE_ENTRY_KIND)
+                .remove(KEY_PROFILE_ENTRY_NAME).remove(KEY_PROFILE_EXPIRES_AT)
+                .remove(KEY_PROFILE_HAS_TUNNEL)
+                .apply();
+        PhoneIdentity.clearProfileSecurity(getApplicationContext());
+        NodeState.reset();
+        nodeAdapter.clear();
+        adapter.setItems(null);
+        urlInput.setText("http://127.0.0.1:8787");
+        urlInput.setEnabled(true);
+        tokenInput.setText("");
+        tunnelCheck.setChecked(false);
+        emptyView.setText("导入连接串后连接中心服务器");
+        summaryView.setText("");
+        warningView.setVisibility(View.GONE);
+        applySecurityModeUi();
+        updateProfileUi();
+        status("已清除导入配置；请向 hub 管理员索取新的连接串");
+    }
+
     private void status(String text) {
         statusView.setText(text);
     }
@@ -967,6 +1267,13 @@ public class MainActivity extends Activity {
         connectButton.setEnabled(!value);
         refreshButton.setEnabled(!value && NodeState.client != null);
         nodeSpinner.setEnabled(!value && !networkNodes.isEmpty());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleLaunchIntent(intent);
     }
 
     @Override

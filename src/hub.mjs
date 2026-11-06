@@ -18,6 +18,7 @@ import { verifyHubToken, createHubToken, saveHubConfig, hubPublicInfo } from './
 import { HubTunnelManager } from './hubfrp.mjs';
 import { hubUiHtml } from './hubui.mjs';
 import { PHONE_TUNNEL_BIND_PORT, buildHubPhoneInvite } from './phone.mjs';
+import { buildPhoneBootstrap, summarizePhoneBootstrap } from './phonebootstrap.mjs';
 
 const ALL_ROLES = ['admin', 'peer', 'device'];
 const DSH_ROLES = ['admin', 'peer', 'device'];
@@ -76,7 +77,7 @@ function nodeView(record, cfg) {
   };
 }
 
-export function createHub({ cfg, store, logger, tunnel = null, clientFactory = null, saveConfig = null } = {}) {
+export function createHub({ cfg, store, logger, tunnel = null, clientFactory = null, saveConfig = null, phone = null } = {}) {
   const log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   const routes = [];
   const authFailures = new Map();
@@ -1064,6 +1065,83 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     });
   }, { roles: ['admin'] });
 
+  // --------------------------------------------------------- phone control plane ---
+  function phoneView(record) {
+    return {
+      id: record.id,
+      label: record.label,
+      deviceId: record.deviceId ?? null,
+      fingerprint: record.fingerprint,
+      status: record.status ?? 'active',
+      createdAt: record.createdAt ?? null,
+      lastSeenAt: record.lastSeenAt ?? null,
+      expiresAt: record.expiresAt ?? null,
+      revokedAt: record.revokedAt ?? null,
+      platform: record.platform ?? null,
+      appVersion: record.appVersion ?? null
+    };
+  }
+
+  add('GET', API_PREFIX + '/hub/phone/status', async (ctx) => {
+    const [gateway, tunnelStatus, phones, bootstraps] = await Promise.all([
+      phone?.gateway ? phone.gateway.status() : Promise.resolve({ enabled: false, listening: false, reason: 'phone gateway disabled' }),
+      phone?.tunnel ? phone.tunnel.status() : Promise.resolve({ enabled: false, running: false, reason: 'phone frp disabled' }),
+      store.listPhones(),
+      store.listPhoneBootstraps(50)
+    ]);
+    sendJson(ctx.res, 200, {
+      gateway,
+      tunnel: tunnelStatus,
+      devices: phones.map(phoneView),
+      bootstraps: bootstraps.map((b) => ({
+        id: b.id, label: b.label, status: b.status, createdAt: b.createdAt,
+        expiresAt: b.expiresAt, uses: b.uses ?? 0, maxUses: b.maxUses ?? 1
+      }))
+    });
+  }, { roles: ['admin'] });
+
+  add('GET', API_PREFIX + '/hub/phones', async (ctx) => {
+    const phones = await store.listPhones();
+    sendJson(ctx.res, 200, { count: phones.length, devices: phones.map(phoneView) });
+  }, { roles: ['admin'] });
+
+  add('POST', API_PREFIX + '/hub/phones/:id/revoke', async (ctx) => {
+    const revoked = await store.revokePhone(ctx.params.id, 'revoked from the hub console');
+    if (!revoked) throw notFound('no phone ' + ctx.params.id);
+    await audit({ event: 'hub_phone_revoked', phoneId: revoked.id, fingerprint: revoked.fingerprint, by: ctx.auth.token?.label ?? null, ip: ctx.auth.ip });
+    sendJson(ctx.res, 200, { device: phoneView(revoked) });
+  }, { roles: ['admin'] });
+
+  add('POST', API_PREFIX + '/hub/phone/bootstrap', async (ctx) => {
+    if (!phone?.ca) throw new LinkError(503, 'phone_ca_unavailable', 'the phone CA is not initialized; run "dshlink hub phone setup"');
+    const body = await readJson(ctx.req, 64 * 1024);
+    const ttlRaw = body.ttlHours;
+    const ttlHours = ttlRaw === undefined || ttlRaw === null || ttlRaw === ''
+      ? Number(cfg.phoneGateway?.bootstrapTtlHours ?? 2)
+      : intSetting(ttlRaw, 'ttlHours', 1, 24 * 30);
+    const maxRaw = body.maxUses;
+    const maxUses = maxRaw === undefined || maxRaw === null || maxRaw === '' ? 1 : intSetting(maxRaw, 'maxUses', 1, 100);
+    const created = await buildPhoneBootstrap(cfg, phone.ca, store, {
+      label: String(body.label ?? '').trim().slice(0, 64) || 'phone',
+      ttlHours,
+      maxUses,
+      bindPort: body.bindPort === undefined || body.bindPort === null || body.bindPort === '' ? null : intSetting(body.bindPort, 'bindPort', 1, 65_535),
+      tunnel: body.tunnel !== false,
+      url: body.url ? String(body.url) : null,
+      note: body.note ? String(body.note) : null
+    });
+    if (saveConfig) await saveConfig(cfg);
+    await audit({ event: 'hub_phone_bootstrap_created', bootstrapId: created.bootstrapId, label: created.summary.label, tunnel: created.tunnel, expiresAt: created.expiresAt, by: ctx.auth.token?.label ?? null, ip: ctx.auth.ip });
+    sendJson(ctx.res, 201, { code: created.code, summary: created.summary, bootstrapId: created.bootstrapId, expiresAt: created.expiresAt, tunnel: created.tunnel });
+  }, { roles: ['admin'] });
+
+  add('DELETE', API_PREFIX + '/hub/phone/bootstrap/:id', async (ctx) => {
+    const revoked = await store.revokePhoneBootstrap(ctx.params.id);
+    if (!revoked) throw notFound('no phone bootstrap ' + ctx.params.id);
+    await audit({ event: 'hub_phone_bootstrap_revoked', bootstrapId: revoked.id, by: ctx.auth.token?.label ?? null });
+    sendJson(ctx.res, 200, { revoked: revoked.id });
+  }, { roles: ['admin'] });
+
   add('POST', API_PREFIX + '/hub/flush', async (ctx) => {
     const result = await flushPending({ force: true });
     await audit({ event: 'hub_flush', ...result, by: ctx.auth.token?.label ?? null });
@@ -1147,6 +1225,23 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
         log.warn('dsh-link hub: frp did not start: ' + (err?.message ?? String(err)));
       }
     }
+    if (phone?.tunnel) {
+      try {
+        const synced = await phone.tunnel.sync();
+        if (synced.running) log.info('dsh-link hub: phone frpc running (pid ' + synced.pid + ')');
+        else if (cfg.phoneFrp?.enabled) log.warn('dsh-link hub: phone frpc did not start: ' + (synced.reason ?? 'unknown'));
+      } catch (err) {
+        log.warn('dsh-link hub: phone frpc did not start: ' + (err?.message ?? String(err)));
+      }
+    }
+    if (phone?.gateway) {
+      try {
+        const listening = await phone.gateway.listen();
+        log.info('dsh-link hub: phone gateway on ' + listening.url);
+      } catch (err) {
+        log.warn('dsh-link hub: phone gateway did not start: ' + (err?.message ?? String(err)));
+      }
+    }
     httpServer = http.createServer((req, res) => { void handle(req, res); });
     await new Promise((resolve, reject) => {
       httpServer.once('error', reject);
@@ -1162,6 +1257,8 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
 
   async function close() {
     if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
+    if (phone?.gateway) { try { await phone.gateway.close(); } catch (err) { log.warn('phone gateway stop failed:', err?.message ?? String(err)); } }
+    if (phone?.tunnel) { try { await phone.tunnel.stop(); } catch (err) { log.warn('phone frp stop failed:', err?.message ?? String(err)); } }
     if (frp) { try { await frp.stop(); } catch (err) { log.warn('hub frp stop failed:', err?.message ?? String(err)); } }
     if (httpServer) {
       await new Promise((resolve) => httpServer.close(() => resolve()));
@@ -1175,6 +1272,12 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     return {
       hub: hubPublicInfo(cfg),
       frp: frp ? await frp.status(nodes) : { enabled: false, running: false, reason: 'disabled' },
+      phone: phone
+        ? {
+            gateway: phone.gateway ? await phone.gateway.status() : { enabled: false, listening: false, reason: 'disabled' },
+            tunnel: phone.tunnel ? await phone.tunnel.status() : { enabled: false, running: false, reason: 'disabled' }
+          }
+        : { enabled: false, gateway: null, tunnel: null },
       counts,
       nodes,
       enrollment: cfg.enrollment,
@@ -1189,6 +1292,7 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     store,
     log,
     frp,
+    phone,
     listen,
     close,
     handle,

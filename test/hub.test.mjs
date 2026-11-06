@@ -696,8 +696,13 @@ test('hub: web console serves the UI and its admin APIs', async () => {
     // A data-URI favicon keeps browsers from requesting /favicon.ico (a 404 shows up as a console error).
     assert.match(page.text, /<link rel="icon" href="data:image\/svg\+xml/);
     // Phone onboarding card: label + TTL + optional phone-reachable URL (required when FRP is off).
-    assert.match(page.text, /<h2>手机接入<\/h2>/);
+    assert.match(page.text, /<h2>手机接入（旧版 dshlink1）<\/h2>/);
     assert.match(page.text, /id="phUrl"/);
+    // Phone certificate card (0.10): per-device mTLS bootstraps and revocation live here too.
+    assert.match(page.text, /<h2>手机证书（0.10）<\/h2>/);
+    assert.match(page.text, /id="pvBtn"/);
+    assert.match(page.text, /id="pvDevices"/);
+    assert.match(page.text, /id="pvBootstraps"/);
     assert.doesNotMatch(page.text, /tok_/, 'the page must not embed tokens');
 
     const redirect = await fetch(hub.url + '/', { redirect: 'manual' });
@@ -710,6 +715,21 @@ test('hub: web console serves the UI and its admin APIs', async () => {
     const asDevice = await httpJson(hub.url + '/api/v1/hub/tokens', { token: hub.deviceToken });
     assert.equal(asDevice.status, 403);
     assert.equal(asDevice.json.error.code, 'role_forbidden');
+
+    // Phone certificate control plane: status is admin-only, and without a CA the mint fails clearly.
+    const phoneStatus = await httpJson(hub.url + '/api/v1/hub/phone/status', { token: hub.adminToken });
+    assert.equal(phoneStatus.status, 200);
+    assert.equal(phoneStatus.json.gateway.enabled, false);
+    assert.deepEqual(phoneStatus.json.devices, []);
+    assert.deepEqual(phoneStatus.json.bootstraps, []);
+    const phoneStatusAsDevice = await httpJson(hub.url + '/api/v1/hub/phone/status', { token: hub.deviceToken });
+    assert.equal(phoneStatusAsDevice.status, 403);
+    const noCa = await httpJson(hub.url + '/api/v1/hub/phone/bootstrap', {
+      method: 'POST', token: hub.adminToken,
+      body: { label: 'no-ca', tunnel: false, url: 'https://127.0.0.1:8791' }
+    });
+    assert.equal(noCa.status, 503);
+    assert.equal(noCa.json.error.code, 'phone_ca_unavailable');
 
     // Token listing: metadata only, never the secret or its hash.
     const listed = await httpJson(hub.url + '/api/v1/hub/tokens', { token: hub.adminToken });

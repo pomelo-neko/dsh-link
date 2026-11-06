@@ -33,6 +33,12 @@ files, queue messages while the other side is offline, and appear inside DSH as 
   the Android APK (plus optional frpc), and one **phone connect code** onboards a phone to a hub:
   the code carries its own `device` token and, with FRP, the STCP tunnel and certificates. Nothing
   secret is baked into the APK.
+- **A certificate per phone (0.10).** Phone access moves from a shared hub token and shared tunnel
+  credentials to a one-time `dshlink2:` bootstrap: the code pins the hub's phone CA and a one-use
+  secret, the app generates its own key pair, and the hub signs a client certificate. A loopback
+  mutual-TLS gateway (8791) injects the hub token; a separate **phone-frps** tenant carries the
+  tunnel; revoking one phone is a per-certificate operation. Nothing secret is shared between
+  phones. See [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md).
 
 ---
 
@@ -209,7 +215,7 @@ binding, and the sender's bridge routes the answer into that Session. Everything
 command is executed, the fields only pick *where* a prompt goes. Policy, fallbacks, wire format and
 troubleshooting: [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md).
 
-## Control DSH from a phone (0.6, hub entry 0.8)
+## Control DSH from a phone (0.6, hub entry 0.8, per-device mTLS 0.10)
 
 The Android app in [`android/`](android/) is a **controller**, not a node: it connects to one
 existing dsh-link node, lists that node's DSH workspaces and sessions, streams a transcript while
@@ -220,6 +226,14 @@ network, can switch to any directly-connected node and browse/control it through
 labels subagent Sessions, and folds tool-call rows into expandable groups. Since app 0.4.0 the URL
 may also point at a **hub**: the app detects `role:"hub"`, lists the enrolled nodes in the same
 picker and relays every read/prompt to the selected node with `peer=<node>` (see the hub section).
+
+Since **0.10** the preferred way to hand a phone to someone is a **`dshlink2:` bootstrap profile**
+(app 0.6.0+): the hub mints a one-use code for one phone, the app generates a key pair locally and
+receives a client certificate, and every request after that is mutual TLS against the hub's loopback
+phone gateway (8791). The phone never receives the hub's token, and revoking one phone does not
+touch any other phone or the tunnel. The older 0.9 `dshlink1:` path (hub `device` token plus the
+shared STCP credentials in the code) still works for already-provisioned devices. Security model,
+commands and threat model: [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md).
 
 ```powershell
 # on the node: allow the phone to read the view and prompt conversations
@@ -296,8 +310,24 @@ node bin\dshlink.mjs hub invite --phone --label alice --out alice-phone.txt
 # or: hub console -> 手机接入 -> generate / copy / download
 ```
 
-The recipient installs the APK (`apk/` in the bundle) and imports the code; it already carries the
-hub URL, a fresh `device` token and — when the hub has FRP enabled — the STCP visitor config and
+For a phone that should have its **own certificate** (0.10, recommended), mint a `dshlink2:`
+bootstrap instead; the code only pins the hub CA and a one-use secret:
+
+```powershell
+# on the hub: enable the phone gateway + CA once, then mint one code per phone
+node bin\dshlink.mjs hub phone setup [--phone-frp-server ... --phone-frp-token ...]
+node bin\dshlink.mjs hub phone bootstrap --label alice --ttl-hours 2 --out alice.txt
+node bin\dshlink.mjs hub phone devices      # revoke with: hub phone revoke <deviceId|fingerprint>
+```
+
+The app generates its key pair, gets a client certificate from the hub's phone CA, and talks mutual
+TLS to the loopback phone gateway; the hub token stays on the hub. The phone-frps tenant is separate
+from the node/hub frps (own token, certificates and STCP provider), so a leaked phone code cannot be
+turned into node-network access. Full design and threat model:
+[`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md).
+
+The recipient can still install the APK (`apk/` in the bundle) and import a legacy `dshlink1:` code;
+it already carries the hub URL, a fresh `device` token and — when the hub has FRP enabled — the STCP visitor config and
 client certificate. Codes expire (default 2 h), every phone gets its own token, and revoking that
 token cuts the phone off. The APK itself contains no secrets and no relay credentials; it can also
 reach a hub over a LAN/VPN without a tunnel (`--no-tunnel --url http://<hub>:8790`).
@@ -397,6 +427,7 @@ scheduled task (at logon, plus a periodic top-up) to survive reboots.
 | Capability channel (0.3) | off | `capabilities.enabled` + method allow-list; action methods are never allowed by default, per-peer overrides exist, every call is audited |
 | Directed targets (0.4) | bridge: on, any peer | The bridge's `targets.{enabled,peers,allow,deny}` policy decides which peer may address which local Session; set `enabled: false` or narrow `peers`/`allow` to lock it down |
 | Hub topology (0.8) | off | `hub.enabled`; nodes join with a one-time enroll token (2 h / 1 use by default), everything goes through the hub, and the hub never trusts localhost — all hub APIs need a token (admin/enroll/device/peer roles) |
+| Phone access (0.10) | off | `phoneGateway.enabled`; the gateway binds loopback only and demands a per-phone client certificate signed by the hub's phone CA. The only certificate-less route is `POST /api/v1/phone/bootstrap`, gated by a one-use secret. The hub token never reaches the phone; phones see only `/info`, `/network/*` and `/dsh/*` through the gateway |
 
 **0.5 closed the loopback bypass.** A tunnel that terminates on loopback no longer turns into an
 unauthenticated admin path: `trustLocalhost` defaults to `false`, and the bridge control plane
@@ -424,6 +455,7 @@ dsh-link/
 │   ├── network.mjs         # network discovery: peers and enrolled nodes (0.7/0.8)
 │   ├── gateway.mjs         # loopback token gateway for phones/relay (0.7)
 │   ├── hub*.mjs            # hub process, config, durable store, FRP, node link, web console (0.8)
+│   ├── phone*.mjs          # phone CA, mutual-TLS gateway, one-time bootstrap, phone-frps tenant (0.10)
 │   └── pairing.mjs         # pairing codes + DSH install (MCP entry / skill / bridge)
 ├── integrations/
 │   ├── dsh-link-bridge/    # DSH Host plugin: wake a conversation on unread messages (0.3: topics + archive; 0.4: directed sessions)
@@ -433,7 +465,7 @@ dsh-link/
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
 ├── android/                # Android controller app (Java, no Gradle dependencies) + build-apk.ps1
-├── test/                   # 28 test files / 228 checks + CLI smoke script
+├── test/                   # 30 test files / 234 checks + CLI smoke script
 ├── docs/                   # architecture, design, protocol, DSH access, directed conversations, hub, FRP, operations, troubleshooting, mobile
 └── examples/               # sanitised config samples
 ```
@@ -441,7 +473,7 @@ dsh-link/
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 228 checks (frp/MCP suites skip if absent), ~15 s
+node test/run.mjs                                                        # 234 checks (frp/MCP suites skip if absent), ~19 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
@@ -504,6 +536,7 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/HUB-TOPOLOGY-DESIGN.md`](docs/HUB-TOPOLOGY-DESIGN.md) | 0.8 hub topology: architecture, data flows, hub API, enrollment, FRP, security, decisions |
 | [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md) | The hub web console at `/ui`: enroll tokens, node approval, queue, settings, phone invites, admin APIs |
 | [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) | 0.9 distribution: build a portable bundle, deploy a hub for others, hand out the APK, upgrade/rollback, security, checklist |
+| [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md) | 0.10 phone access: per-device client certificates, one-time `dshlink2:` bootstrap, mutual-TLS gateway, separate phone-frps tenant, revocation, threat model |
 | [`docs/GATEWAY.md`](docs/GATEWAY.md) | The 8788 loopback token gateway used by the phone relay path |
 | [`docs/FRP.md`](docs/FRP.md) | Public `frps` deployment, STCP provider/visitor, TLS, verification |
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |

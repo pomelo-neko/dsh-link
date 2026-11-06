@@ -31,6 +31,14 @@ final class NodeState {
     static String token = "";
     /** True when the gateway is a hub; detected from GET /api/v1/info. */
     static boolean hubMode;
+    /** 0.6.0 安全模式："token"（dshlink1:）或 "cert"（dshlink2: 每设备证书 mTLS）。 */
+    static String securityMode = "token";
+    /** 证书模式下服务器签发的设备证书指纹（大写、冒号分隔）。 */
+    static String deviceFingerprint = "";
+    /** 证书模式下设备证书到期时间（ISO 8601）。 */
+    static String deviceValidTo = "";
+    /** 证书模式下导入的 hub CA 指纹，用于连接后核对服务器身份。 */
+    static String caFingerprint = "";
 
     private NodeState() {
     }
@@ -45,6 +53,14 @@ final class NodeState {
         baseUrl = "";
         token = "";
         hubMode = false;
+        securityMode = "token";
+        deviceFingerprint = "";
+        deviceValidTo = "";
+        caFingerprint = "";
+    }
+
+    static boolean certMode() {
+        return "cert".equals(securityMode);
     }
 
     static boolean isHub() {

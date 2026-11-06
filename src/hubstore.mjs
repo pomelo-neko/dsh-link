@@ -5,8 +5,12 @@
 // mutable hub state live in separate JSON files written atomically.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { nowIso } from './util.mjs';
+import { newId, nowIso, sha256Hex } from './util.mjs';
 import { MessageStore } from './store.mjs';
+
+export function fingerprintKey(value) {
+  return String(value ?? '').toLowerCase().replace(/[^0-9a-f]/g, '');
+}
 
 export class HubStore {
   constructor(dataDir) {
@@ -14,11 +18,15 @@ export class HubStore {
     this.paths = {
       nodes: path.join(dataDir, 'nodes.json'),
       state: path.join(dataDir, 'hub-state.json'),
-      audit: path.join(dataDir, 'audit.jsonl')
+      audit: path.join(dataDir, 'audit.jsonl'),
+      phones: path.join(dataDir, 'phones.json'),
+      phoneBootstraps: path.join(dataDir, 'phone-bootstrap.json')
     };
     this.mailbox = new MessageStore(dataDir);
     this._nodes = null;
     this._state = null;
+    this._phones = null;
+    this._phonesSig = null;
   }
 
   async init() {
@@ -41,6 +49,19 @@ export class HubStore {
     const tmp = `${file}.${process.pid}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(value, null, 2) + '\n', 'utf8');
     await fs.rename(tmp, file);
+  }
+
+  // A running hub must see changes another process (the CLI or the console) wrote to the same
+  // data directory. Tokens already reload per request (see src/hub.mjs); the phone registry is
+  // cached, so track the file signature and drop the cache when phones.json changed underneath.
+  async _fileSignature(file) {
+    try {
+      const stat = await fs.stat(file);
+      return `${stat.mtimeMs}:${stat.size}`;
+    } catch (err) {
+      if (err.code === 'ENOENT') return 'missing';
+      throw err;
+    }
   }
 
   // ------------------------------------------------------------------ nodes ---
@@ -142,6 +163,150 @@ export class HubStore {
   async runningCache() {
     const state = await this.loadState();
     return state.sessionsRunning;
+  }
+
+  // ---------------------------------------------------------------- phones ---
+  // B2/B4: phones are named by the SHA-256 fingerprint of the client certificate the phone CA
+  // issued. The private key never leaves the phone; the hub only keeps the fingerprint.
+  async loadPhones() {
+    const sig = await this._fileSignature(this.paths.phones);
+    if (this._phones && sig === this._phonesSig) return this._phones;
+    const raw = await this._readJson(this.paths.phones, { phones: [] });
+    const phones = Array.isArray(raw?.phones) ? raw.phones.filter((p) => p && typeof p.id === 'string') : [];
+    this._phones = new Map(phones.map((p) => [p.id, p]));
+    this._phonesSig = sig;
+    return this._phones;
+  }
+
+  async listPhones() {
+    const phones = await this.loadPhones();
+    return [...phones.values()].sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
+  }
+
+  async getPhone(idOrFingerprint) {
+    const phones = await this.loadPhones();
+    const key = String(idOrFingerprint ?? '').trim();
+    if (!key) return null;
+    if (phones.has(key)) return phones.get(key);
+    for (const phone of phones.values()) if (phone.deviceId === key) return phone;
+    const fp = fingerprintKey(key);
+    if (!fp) return null;
+    for (const phone of phones.values()) {
+      if (fingerprintKey(phone.fingerprint) === fp) return phone;
+    }
+    return null;
+  }
+
+  async getPhoneByFingerprint(fingerprint) {
+    return this.getPhone(fingerprint);
+  }
+
+  async countPhones({ activeOnly = false } = {}) {
+    const phones = await this.listPhones();
+    return activeOnly ? phones.filter((p) => p.status !== 'revoked').length : phones.length;
+  }
+
+  async upsertPhone(record) {
+    const phones = await this.loadPhones();
+    const id = String(record?.id ?? '').trim();
+    if (!id) throw new Error('a phone id is required');
+    const previous = phones.get(id) ?? null;
+    const next = { ...(previous ?? {}), ...record, id, updatedAt: nowIso() };
+    phones.set(id, next);
+    await this._savePhones(phones);
+    return next;
+  }
+
+  async revokePhone(idOrFingerprint, reason = 'revoked from the hub') {
+    const phones = await this.loadPhones();
+    const phone = await this.getPhone(idOrFingerprint);
+    if (!phone) return null;
+    const next = { ...phone, status: 'revoked', revokedAt: nowIso(), revokeReason: String(reason ?? '').slice(0, 300) };
+    phones.set(phone.id, next);
+    await this._savePhones(phones);
+    return next;
+  }
+
+  async recordPhoneSeen(idOrFingerprint) {
+    const phones = await this.loadPhones();
+    const phone = await this.getPhone(idOrFingerprint);
+    if (!phone) return null;
+    const next = { ...phone, lastSeenAt: nowIso() };
+    phones.set(phone.id, next);
+    await this._savePhones(phones);
+    return next;
+  }
+
+  async _savePhones(phones) {
+    await this._writeJson(this.paths.phones, { version: 1, phones: [...phones.values()] });
+    this._phonesSig = await this._fileSignature(this.paths.phones);
+  }
+
+  // One-time bootstrap secrets. Only the SHA-256 hash is stored; the plaintext travels in the
+  // dshlink2: code and is discarded once the phone has exchanged it for a certificate.
+  async loadPhoneBootstraps() {
+    const raw = await this._readJson(this.paths.phoneBootstraps, { bootstraps: [] });
+    return Array.isArray(raw?.bootstraps) ? raw.bootstraps.filter((b) => b && typeof b.id === 'string') : [];
+  }
+
+  async listPhoneBootstraps(limit = 50) {
+    const bootstraps = await this.loadPhoneBootstraps();
+    return bootstraps
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
+      .slice(0, Math.max(1, Math.min(500, Number(limit) || 50)));
+  }
+
+  async createPhoneBootstrap({ label = '', secret, expiresAt = null, maxUses = 1, note = null } = {}) {
+    const plaintext = String(secret ?? '').trim();
+    if (!plaintext) throw new Error('a bootstrap secret is required');
+    const bootstraps = await this.loadPhoneBootstraps();
+    const entry = {
+      id: newId('pb'),
+      label: String(label ?? '').slice(0, 120),
+      hash: sha256Hex(plaintext),
+      note: note ? String(note).slice(0, 300) : null,
+      createdAt: nowIso(),
+      expiresAt,
+      maxUses: Math.max(1, Math.min(1000, Number(maxUses) || 1)),
+      uses: 0,
+      usedAt: null,
+      status: 'active'
+    };
+    bootstraps.push(entry);
+    await this._savePhoneBootstraps(bootstraps);
+    return entry;
+  }
+
+  async consumePhoneBootstrap(id, secret, now = Date.now()) {
+    const bootstraps = await this.loadPhoneBootstraps();
+    const entry = bootstraps.find((b) => b.id === String(id ?? '').trim());
+    if (!entry) return { ok: false, reason: 'unknown bootstrap token' };
+    if (entry.status !== 'active') return { ok: false, reason: 'bootstrap token already used' };
+    if (entry.expiresAt && Date.parse(entry.expiresAt) <= now) {
+      entry.status = 'expired';
+      await this._savePhoneBootstraps(bootstraps);
+      return { ok: false, reason: 'bootstrap token expired' };
+    }
+    if (entry.hash !== sha256Hex(String(secret ?? ''))) return { ok: false, reason: 'bad bootstrap secret' };
+    entry.uses = Number(entry.uses ?? 0) + 1;
+    entry.usedAt = nowIso();
+    if (entry.uses >= Number(entry.maxUses ?? 1)) entry.status = 'used';
+    await this._savePhoneBootstraps(bootstraps);
+    return { ok: true, entry };
+  }
+
+  async revokePhoneBootstrap(id) {
+    const bootstraps = await this.loadPhoneBootstraps();
+    const entry = bootstraps.find((b) => b.id === String(id ?? '').trim());
+    if (!entry) return null;
+    entry.status = 'revoked';
+    entry.revokedAt = nowIso();
+    await this._savePhoneBootstraps(bootstraps);
+    return entry;
+  }
+
+  async _savePhoneBootstraps(bootstraps) {
+    await this._writeJson(this.paths.phoneBootstraps, { version: 1, bootstraps });
   }
 
   // ---------------------------------------------------------------- outbox ---

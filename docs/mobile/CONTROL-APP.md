@@ -1,7 +1,15 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.5.0** (shipped with the dsh-link 0.9.0 tree; the app is versioned
-independently from the node). v0.5.0 makes the APK **safe to hand out**: a phone joins with a
+Status: **implemented, v0.6.0** (shipped with the dsh-link 0.10.0 tree; the app is versioned
+independently from the node). v0.6.0 adds the **`dshlink2:` per-device mTLS path**: the connect code
+carries the phone gateway CA and a one-time bootstrap secret instead of a device token; the app
+generates a keypair locally (AndroidKeyStore, with a software-key fallback), exchanges only its public
+key for a server-signed client certificate, clears the bootstrap secret, and from then on talks
+mTLS only. The certificate is revoked per phone by the hub, without rotating anything else. The old
+`dshlink1:` token path still works. The 0.6.0 path was verified end-to-end on an API 36 emulator
+against a local 0.10 hub (bootstrap → certificate → mTLS → revocation → recovery with a fresh
+deviceId, plus the legacy token mode); evidence: `android/README.md` §7 and
+`android/dist/selftest-0.6.0/`. v0.5.0 made the APK **safe to hand out**: a phone joins with a
 `dshlink1:` connect code that carries the entry URL, its own `device` token and (when the hub has
 FRP) the rendered STCP visitor profile + client certificate, so no tunnel template or credential is
 baked into the APK. v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 made the
@@ -411,12 +419,24 @@ out of scope for this repo.
   not expose 8787 itself to the internet or to the relay.
 - **Token storage**: `SharedPreferences` (app-private, not encrypted at rest). Use a short
   `--ttl-days`, revoke with `dshlink token rm --id <id>` if the phone is lost.
+- **Per-device certificates (0.6.0, `dshlink2:`)**: the CA is pinned from the imported code (its
+  SHA-256 fingerprint is checked before use), the client certificate is signed by the hub and its
+  private key stays on the phone — AndroidKeyStore when available, otherwise a software PKCS#8 file
+  in the app-private directory (the UI and `android/README.md` flag the weaker case). No device
+  token is stored or sent in this mode. The bootstrap secret is single-use and cleared after the
+  first successful exchange; revoking the phone on the hub takes effect on its next request. The
+  code still contains the phone-side STCP visitor `secretKey` when a tunnel is enabled, and the
+  hub's CA private key stays on the hub.
 - **Capability scope**: the node's `capabilities.methods` (and optional per-peer `peers` policy)
   is the real limit on what a phone can do; the token role only gates the HTTP surface.
 - **No message plane**: the app cannot read or send dsh-link messages, so a stolen phone does not
   expose the peer network or the bridge control plane.
 - **No background presence**: the node cannot tell whether the app is running; there is no
-  heartbeat or device management endpoint (B-phase item).
+  heartbeat or device management endpoint.
+- **Phone certificates (0.6.0)**: revoked certificates are rejected per request, but the app has no
+  in-UI list of its own certificate history, no renewal reminder beyond the displayed expiry date,
+  and only one profile is kept; switching phones means importing a fresh bootstrap code. The
+  gateway also has no per-device rate limiting (the underlying hub limits still apply).
 
 ## 6. Known gaps / next steps (B phase)
 

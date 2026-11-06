@@ -5,7 +5,7 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 模式），把入口背后的 DSH 工作区/会话/transcript 显示在手机上，并通过能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.5.0`，minSdk 26，targetSdk 36
+- 包名：`dev.dshlink.control`，版本 `0.6.0`，minSdk 26，targetSdk 36
 - 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX、无第三方依赖**
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
 - 0.3.0：连接后可选择该节点网络里**直连**的其他节点并远程读写/发消息；标注子智能体会话；
@@ -17,6 +17,10 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
   拿到 `dshlink1:` 连接串/配置文件，在 App 里“导入连接串/配置文件”或“从文件导入”，App 把
   自己的隧道 profile 写进私有目录后连接。新增 `-Release` 签名构建、`assets/tunnel/` 改为可选、
   构建产物附带 SHA-256 清单（见 §3）
+- 0.6.0：**一次性引导 + 每设备 mTLS 证书**（`dshlink2:` 连接串）。手机本地生成密钥对、只发
+  公钥，用一次性引导码换取只属于这台手机的客户端证书，之后所有请求走 mutual TLS、不再携带
+  device token；连接串里的自签 CA 是唯一信任锚。0.5.0 的 `dshlink1:` token 路径完全保留，
+  导入时按前缀分流，主界面显示当前安全模式（见 §1.3）。
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -133,7 +137,60 @@ code 是 `dshlink1:` + `base64url(gzip(JSON))`，里面包含：
 > 兼容：内部部署仍可把 `assets/tunnel/` 打进 APK（构建脚本检测到 4 个文件齐全时会警告
 > “this APK will contain tunnel credentials”）。带凭据的 APK 只能内部使用、不要分发；
 > 没有 `assets/tunnel/` 时构建出的是通用 APK，运行时若勾选了隧道却还没导入配置，App 会
-> 提示“尚未导入隧道配置，请向 hub 管理员获取连接串/配置文件并导入”。
+> 提示“尚未导入隧道配置，请向 hub 管理员获取连接串/配置文件并导入”。0.6.0 起
+> `dshlink1:` 与 `dshlink2:` 两种连接串都接受（见 §1.3）。
+
+### 1.3 一次性引导 + 每设备 mTLS 证书（dshlink2，0.6.0）
+
+0.6.0 的主推入口是 **`dshlink2:` 连接串**：手机不再携带长期 device token，而是在第一次连接
+时用一枚**一次性引导码**换取**只属于这台手机的客户端证书**，之后所有请求走 mutual TLS，
+`Authorization` 头不再需要。连接串即使被转发给别人也无法使用：引导码只能用一次、只接受公钥，
+且证书与手机本地的私钥绑定。
+
+hub 侧（0.10+，需先 `dshlink hub phone setup` 启用手机网关）：
+
+```powershell
+# 生成一份 dshlink2 引导码（默认 2h 有效、只能用一次；--no-tunnel 表示手机直连 gateway）
+dshlink hub phone bootstrap --data-dir <hub数据目录> --label pixel-9 --ttl-hours 2 `
+  --no-tunnel --url https://<hub>:8791 --out phone.dshlink2
+# 查看 / 吊销手机设备
+dshlink hub phone devices
+dshlink hub phone revoke <deviceId|指纹>
+```
+
+code 是 `dshlink2:` + `base64url(gzip(JSON))`，包含 `entry.url`（必须 https）、
+`gateway.caPem`/`caFingerprint`（hub 自签 CA，App 把它当作**唯一信任锚**，并校验证书链、
+主机名与 serverAuth 用途）、一次性 `bootstrap.{id,secret,expiresAt}`、可选的
+`tunnel.{frpc,files,bindPort}`（结构与 0.5.0 完全相同）与 label/到期时间。
+**兑换成功后 App 立即从存储里删除引导码 secret**，code 本身也不再可复用。
+
+手机上的流程（导入方式与 1.2 相同：粘贴 / 从文件导入 / 其他 App 用 `text/plain` 分享进来）：
+
+1. 导入后 App 显示摘要，自动生成/复用设备身份（首次生成随机 UUID 并持久化，证书
+   `CN=<deviceId>`）与私钥（默认 **AndroidKeyStore 不可导出**），只把 **SPKI 公钥**
+   POST 到 `https://…/api/v1/phone/bootstrap`；
+2. 服务端用连接串里的 CA 校验并发证，返回 `certPem` + `fingerprint` + `validTo`
+   （默认 365 天）；App 保存证书、删除 bootstrap secret，然后用 mTLS 连接；
+3. 之后每次连接：`GET /api/v1/phone/me`（刷新证书指纹/到期）→ `GET /api/v1/info` →
+   与 0.4.0 相同的 hub/节点模式；请求**不带 device token**，客户端证书就是凭据；
+4. 主界面显示“安全模式：每设备证书（mTLS） · CA <指纹>；设备证书 <指纹> · 到期 … ·
+   私钥 AndroidKeyStore（不可导出）”，token 输入框禁用并提示 dshlink2 不需要 token。
+
+**重置与吊销**：主界面新增“重置设备证书”（清证书保留设备身份 / 连 deviceId 一起换 /
+导入新的 dshlink2 引导码）与“清除导入配置”。服务端吊销后 App 下次请求收到
+`403 phone_revoked` 会**自动删除本机证书**并弹窗提示重新向管理员索取引导码；重新导入新的
+引导码会自动换一个新 deviceId（服务端拒绝已吊销设备重新引导，所以这一步是恢复所必需的）。
+
+**兼容**：`dshlink1:`（device token + 可选隧道，0.5.0 路径）完全保留；导入时按前缀分流，
+主界面显示当前安全模式，重新导入另一类 code 即可切换（token 模式下已保存的证书会保留，
+切回 dshlink2 时可复用）。
+
+**私钥与 CA 存储**：私钥默认由 AndroidKeyStore 生成（EC P-256、`PURPOSE_SIGN`，并授权
+`DIGEST_NONE/SHA256/SHA384/SHA512` —— Android 16/Conscrypt 的 TLS 1.3 客户端证书签名使用
+`NONEwithECDSA`，只授权 SHA 摘要会导致握手失败）；Keystore 不可用时回退为软件 EC P-256
+私钥（PKCS#8，存 `files/phone/`，应用私有但可被 root/备份提取），主界面会显示
+“私钥 软件密钥（可导出）”作为风险提示。CA 与设备证书 PEM 存在 `SharedPreferences`
+（应用私有、未加密）。
 
 ## 2. 节点侧准备
 
@@ -274,7 +331,9 @@ Invoke-WebRequest http://127.0.0.1:18788/healthz   # 无 token 应是 401（网�
 
 > 安全警告：导入的 code 里包含 frps auth token、mTLS 客户端证书/私钥、STCP `secretKey` 和
 > hub device token。它们等价于“能连到网关的凭据”，但**不携带节点 API 权限**：网关仍要求
-> device token，且拒绝 `/mcp`、`/api/v1/bridge/*`。这些内容明文存在 App 私有目录
+> device token，且拒绝 `/mcp`、`/api/v1/bridge/*`。注意每次生成的连接串只换 device token，
+> 内嵌的 frp mTLS 证书/私钥与 STCP secretKey 是部署级的（所有连接串相同，当前证书有效期至
+> 2027-07-18）；吊销 device token 不会吊销隧道凭据，换证后需要重新导入新连接串。这些内容明文存在 App 私有目录
 > （`files/tunnel/` 与 `SharedPreferences`，未加密），手机丢失/换手请让管理员
 > `dshlink hub token rm --id <tokenId>` 吊销；code 泄露时还要轮换 frps token、重签 mTLS
 > 证书、更换 STCP secretKey。内部构建（`assets/tunnel/` 存在）的 APK 仍包含凭据，
@@ -326,15 +385,15 @@ aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 产物：
 
 ```text
-android/dist/dshlink-control-0.5.0-debug.apk     # debug 签名（默认）
-android/dist/dshlink-control-0.5.0.apk           # -Release 签名（见 3.3）
+android/dist/dshlink-control-0.6.0-debug.apk     # debug 签名（默认）
+android/dist/dshlink-control-0.6.0.apk           # -Release 签名（见 3.3）
 android/dist/SHA256SUMS                          # 每次构建后对 dist/*.apk 全量重写
 ```
 
-`build-apk.ps1` 默认 `-VersionName "0.5.0" -VersionCode 6`（与 `ApiClient.APP_VERSION` 一致，
+`build-apk.ps1` 默认 `-VersionName "0.6.0" -VersionCode 7`（与 `ApiClient.APP_VERSION` 一致，
 发版时两处一起改）。
 
-APK 内容（0.5.0 通用构建）：
+APK 内容（0.6.0 通用构建）：
 
 - `lib/x86_64/libfrpc.so`、`lib/arm64-v8a/libfrpc.so`：模拟器/真机可执行的 frpc。源码是
   frp v0.71.0 的 Linux 二进制（x86_64 来自本机 frp-stcp-base，arm64 来自
@@ -365,7 +424,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
   -KeyAlias dshlink -KeyPassword <密码>
 ```
 
-- 输出 `android/dist/dshlink-control-0.5.0.apk`（release 不带 `-debug` 后缀）；
+- 输出 `android/dist/dshlink-control-0.6.0.apk`（release 不带 `-debug` 后缀）；
 - `-KeyPassword` 省略时用 `-KeystorePassword`；`-KeyAlias` 省略时用 keystore 里的别名；
 - 结尾会 `apksigner verify --print-certs`，打印 size / SHA-256，并把 `dist/*.apk` 的 SHA-256
   全量重写到 `dist/SHA256SUMS`（格式 `<大写 SHA-256>  <文件名>`）；把 APK 和校验值一起发给用户；
@@ -375,16 +434,17 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
 ### 3.4 安装
 
 ```powershell
-D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.5.0-debug.apk
+D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6.0-debug.apk
 ```
 
 或者把（`-Release` 或 debug）APK 传到手机点击安装（需允许“安装未知来源应用”）。
 
 ## 4. 使用
 
-**（0.5.0 起，推荐）先导入连接串/配置文件**：点“导入连接串/配置文件”粘贴 `dshlink1:…`，
-或点“从文件导入”选 `.txt/.json/.dshlink` 文件；导入成功后 App 自动填好入口地址、token、
-隧道勾选并连接（见 1.2）。下面是手工填写的等价流程。
+**（0.6.0 起，推荐）先导入连接串/配置文件**：点“导入连接串/配置文件”粘贴 `dshlink2:…`
+或 `dshlink1:…`，或点“从文件导入”选 `.txt/.json/.dshlink` 文件，也可以从聊天工具里直接
+“分享/用其他应用打开”给 App（`text/plain`）；导入成功后 App 自动填写并连接（见 1.2/1.3）。
+下面是手工填写的等价流程。
 
 1. 打开 App，填入口地址 + token，点“连接”。入口可以是：
    - **中心服务器（0.4.0，推荐）**：`http://<hub>:8790` + hub device token（2.2b）；不在同一
@@ -457,6 +517,13 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   泄露或手机丢失时用 `dshlink hub token rm --id <tokenId>` 吊销 device token，必要时轮换 frps
   token / 重签 mTLS / 更换 STCP secretKey。内部构建（本地 `assets/tunnel/` 四件套齐全）的 APK
   仍含凭据，**只可内部使用，不要分发**。
+- **每设备证书（0.6.0，dshlink2）**：连接串里的 hub 自签 CA 是**唯一信任锚**——App 只信任
+  这张 CA 签出的链（校验链、主机名与 serverAuth 用途），其他任何 CA/自签证书一律握手失败；
+  设备私钥优先在 AndroidKeyStore 里生成（不可导出），Keystore 不可用时才回退软件密钥
+  （`files/phone/`，可被 root/备份提取，界面会标注“私钥 软件密钥（可导出）”）；一次性引导码
+  兑换成功后 App 立即删除 secret，只保留证书；hub 侧可用 `dshlink hub phone revoke` 吊销设备
+  （App 收到 `403 phone_revoked` 会自动删本地证书）。手机丢失时应**吊销设备**并让管理员
+  重新签发引导码，不要只依赖证书的 365 天到期。
 - **token**：device token 存在 App 的 `SharedPreferences`（应用私有，但未加密）；手机丢失
   请在节点上 `token rm --id` 吊销。token 可以只给 30 天有效期。
 - **hub token 与节点 token 是两套**：连 hub 时 App 只携带 hub 的 device token，由 hub 代转；
@@ -475,7 +542,8 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 - **节点侧**：如果手机走内置 STCP，节点发布的是指向 **8788 网关**的 `dshlink-phone` provider；
   8787 本身只应由本机 CLI/bridge 使用，不要映射到公网。STCP 只保证“没有 secretKey 连不上”，
   不替代 token；网关已经强制 token，但 device token 仍应设有效期并定期轮换。
-- 这是 **debug APK**，没有代码混淆、没有证书固定；不要从不明来源安装二次打包的 APK。
+- 这是 **debug APK**，没有代码混淆；dshlink2 模式会对连接串里的 CA 做固定（pinning），
+  dshlink1 token 模式不做证书固定。不要从不明来源安装二次打包的 APK。
 
 ## 6. 已知限制
 
@@ -488,6 +556,18 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   多环境 profile 存储；换环境重新导入即可，旧配置不保留。
 - **导入内容未加密**：code 解码后的 token、`frpc.toml`、证书以明文存于 `SharedPreferences` 与
   `files/tunnel/`（应用私有目录），依赖 Android 沙箱保护；手机丢失请吊销 token 并轮换隧道凭据。
+  dshlink2 的设备证书（公钥材料）与 CA 存在 `SharedPreferences`，私钥默认在 AndroidKeyStore
+  （不可导出），回退软件密钥时才落盘到 `files/phone/`。
+- **设备证书有效期 365 天**：到期后服务端拒绝 mTLS，需要重新导入管理员签发的 dshlink2 引导码
+  （主界面会显示证书到期时间）；hub 侧吊销后同样必须重新引导。
+- **重装/换机**：deviceId 与私钥都在 App 数据里，卸载或“清除数据”后会生成新的 deviceId
+  （旧记录留在 hub 设备列表里，可吊销/清理）；重新导入引导码会按新设备注册。
+- **dshlink2 的隧道**：0.6.0 已支持 dshlink2 的 `tunnel` 字段（结构同 dshlink1，手机侧照旧用
+  内置 frpc + visitor）；但本版只在“无隧道直连 + adb reverse”路径上做了模拟器端到端验证，
+  真实 STCP 公网隧道 + 每设备证书的组合尚未实测。
+- **服务端热加载（0.10.0 实测）**：`hub serve` 启动后，用 CLI 在另一个进程里
+  `dshlink hub phone revoke` / 新建 token 不会热加载，需要重启 hub（或从 hub Web 控制台操作）
+  才生效；这是 hub 侧行为，App 会如实显示服务端返回的结果。
 - **到期时间仅提示**：`expiresAt` 只用于展示和警告（过期仍可导入/连接，是否拒绝由 hub/节点的
   token 校验决定）；真正吊销要走 `dshlink hub token rm --id <tokenId>`。
 - **hub 模式**：只能看到 hub 登记表里的节点；节点离线时只显示状态、不能读取/发送；hub 未提供
@@ -659,5 +739,44 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     client.crt，请重新导入连接串/配置文件”。
   - 截图与测试工件仅本地留存（`android/.tmp/`，含真实主机名/token，不入库）。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.5.0，与节点/CLI 独立演进（当前仓库/节点
-> 0.8.1，hub 0.9.0；hub 直连 + 导入连接串是 0.5.0 App 的主推入口）。
+- 0.6.0 一次性引导 + 每设备 mTLS 冒烟（2026-11-06，Android 16 / API 36.1 x86_64 模拟器
+  `emulator-5554`；本地 e2e hub 0.10.0：`hub serve` 监听 `127.0.0.1:8795`，手机网关
+  `https://127.0.0.1:8796`（自签 CA），`adb reverse tcp:8796/8795`；未触碰 8787/8790）：
+  - **APK（通用构建）**：`dshlink-control-0.6.0-debug.apk` 12,010,326 bytes，SHA-256
+    `AF3DD876385F9084C08B35FD94DFB00C6ACB7D7F71F95F10D65019A976C34CE5`；
+    `aapt2 dump badging` → versionCode 7 / versionName 0.6.0 / minSdk 26 / targetSdk 36 /
+    native-code arm64-v8a x86_64；`jar tf` 无 `assets/tunnel/*`（`tunnel credentials: none
+    (distribution build)`）；`apksigner verify` 通过（debug 证书）。
+  - **dshlink2 导入**：用 `adb shell am start -a android.intent.action.SEND -t text/plain
+    --es android.intent.extra.TEXT <code> -n dev.dshlink.control/.MainActivity` 从“分享”路径导入
+    （同时覆盖冷启动与前台 `onNewIntent`）；摘要显示标签/入口/地址/CA 指纹/引导码到期/无隧道/
+    来源，主界面出现“安全模式：每设备证书（mTLS） · CA …”与“设备证书：… · 到期 … ·
+    私钥 AndroidKeyStore（不可导出）”，token 输入框禁用。
+  - **一次性引导 + mTLS**：logcat `开始一次性引导：deviceId=274574db-… entry=https://127.0.0.1:8796`
+    → `引导成功：设备证书 0E:9C:41:63:…，到期 2027-11-06T14:52:44.000Z`；hub 日志
+    `phone gateway: enrolled e2e-final (ph_01m6rnj1z599f386427e1a) fingerprint 0E:9C:…`；
+    `GET /api/v1/phone/me` + `/api/v1/info` 成功（状态“已连接中心服务器 · 还没有登记节点”，
+    summary“中心服务器 e2e-hub · dsh-link-hub 0.10.0 · 0 个节点 · 0 在线 · 每设备证书 mTLS”）。
+    `shared_prefs/dshlink.xml` 里 `profile.secureMode=cert`、`phone.keyStorage=keystore`、
+    `phone.bootstrapId` 保留、**`phone.bootstrapSecret` 不存在**（兑换成功后即清除）。
+  - **吊销**：CLI `dshlink hub phone revoke 274574db-…`（需先停 hub，因为运行中的 `hub serve`
+    不热加载 CLI 吊销，见 §6）→ App 连接收到 `403 phone_revoked` → 弹窗“本机设备证书已被
+    hub 管理员吊销…本机证书已自动清除”；prefs 中 certPem/certFingerprint/certValidTo/
+    keyStorage 被删除、deviceId 保留。
+  - **恢复**：吊销后导入新引导码 → `设备证书已清除（alsoDeviceIdentity=true）` → 新 deviceId
+    `a089181d-…` → 新证书 `4E:C3:52:AE:…`（hub 记录 `ph_01m6rnm7ym47c016348d95`，
+    appVersion 0.6.0、status active、lastSeenAt 更新）→ 界面恢复“已连接中心服务器”。
+  - **旧路径兼容**：导入 `dshlink1:`（device token + 无隧道）→“安全模式：设备 token（Bearer）”，
+    连 hub `127.0.0.1:8795` 成功、工作区/会话正常。
+  - **Keystore 关键修复**：Android 16/Conscrypt 的 TLS 1.3 客户端证书签名走 `NONEwithECDSA`
+    （raw digest）；若 AndroidKeyStore EC 密钥只授权 SHA256/384/512，keymaster 报
+    `INCOMPATIBLE_DIGEST`，表层是 `SSLHandshakeException: Read error…`。0.6.0 生成密钥时
+    额外授权 `DIGEST_NONE`，并对已存在旧密钥做 `NONEwithECDSA` 探测、失败则重建（重建后需重新
+    引导）。另修 2 分钟时钟偏差容忍（证书 notBefore 略超前不再误报）。
+  - 截图与自测记录：`android/dist/selftest-0.6.0/`（`01-connected-mtls.png`、
+    `02-revoked-dialog.png`、`03-recovered-new-device.png`、`04-legacy-token-mode.png`、
+    `selftest-0.6.0.md`）。
+  - 未验证：真机 arm64、dshlink2 + 真实公网 STCP 隧道、强制 TLS 1.2、证书自然过期场景。
+
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.0（versionCode 7），与节点/CLI 独立演进
+> （当前仓库/节点 0.10.0，hub 0.10.0；hub 直连 + 0.6.0 的 dshlink2 每设备证书是主推入口）。

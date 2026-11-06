@@ -1,4 +1,4 @@
-# 分发与部署（0.9）
+# 分发与部署（0.9 起；0.10 手机接入升级）
 
 这份文档面向**把 dsh-link 交给别人用**的场景，而不是只在一台机器上自用。它回答三件事：
 
@@ -16,7 +16,7 @@
 | 发行物 | 路径 | 说明 |
 |---|---|---|
 | 通用发行包 | `dist/dsh-link-<version>-portable.zip` / `.tar.gz` | 节点 + hub + CLI + 文档 + 示例 + （可选）APK；零 npm 依赖 |
-| 手机控制端 APK | 包内 `apk/dshlink-control-<version>-debug.apk` | 0.5.0 起**不含任何密钥/证书/隧道配置**，连接串在手机端导入 |
+| 手机控制端 APK | 包内 `apk/dshlink-control-<version>-debug.apk` | 0.5.0 起**不含任何密钥/证书/隧道配置**；0.6.0 起支持 `dshlink2:` 每设备证书引导（0.10 推荐） |
 | 完整性清单 | 包内 `SHA256SUMS.txt`、`dist/SHA256SUMS.txt` | 逐个文件校验；下载后先验再装 |
 
 发行包**不含** frps 服务端，也不含任何真实 token。`vendor/frp/` 里只有 frp **客户端**（`frpc`），
@@ -99,6 +99,8 @@ node test/run.mjs
 ```
 
 - hub **只监听 127.0.0.1:8790**，公网入口是 frps 上的 STCP provider（加密、需 secretKey）；
+- 手机侧另有 0.10 的 phone gateway（默认回环 `127.0.0.1:8791`，mutual TLS）与可选的独立
+  **phone-frps** 租户；它和节点网络使用的 frps 不是同一套凭据（见 [PHONE-SECURITY.md](PHONE-SECURITY.md)）；
 - 所有 HTTP 请求都要 token（hub 从不信任回环来源），admin token 只显示一次；
 - 节点第一次 enroll 需要能**直接访问** hub 一次（局域网/VPN/临时端口转发），之后自动改走 STCP 回环端口。
 
@@ -209,7 +211,46 @@ frpc 凭据，连接串在手机上导入后写入应用私有目录。正式对
 （见 [android/README.md](../android/README.md)），不要用 debug 签名包。
 细节与权限说明见 [mobile/CONTROL-APP.md](mobile/CONTROL-APP.md)。
 
-### 4.2 生成连接串（每部手机一份）
+### 4.2 推荐：每设备证书 + 一次性引导（0.10+）
+
+0.10 起新手机应使用 `dshlink2:` 引导，而不是把 hub 的共享隧道凭据放进连接串。核心区别：
+连接串只 pin hub 的 phone CA 公钥与一条**一次性** bootstrap secret；手机本地生成密钥对，向
+回环 phone gateway（默认 8791，mutual TLS）换取自己的客户端证书，之后每次请求都用证书。
+hub 令牌只存在于网关配置里，手机拿不到；吊销一部手机按证书指纹立即生效。
+
+hub 侧准备（只需一次）：
+
+```powershell
+# 建立 phone CA + mutual-TLS 网关（不建独立隧道时；手机需能经端口转发访问 8791）
+node bin\dshlink.mjs hub phone setup --no-tunnel
+node bin\dshlink.mjs hub serve
+
+# 或配置独立的 phone-frps 租户（公网手机推荐；它有独立的 token/证书/provider）
+node bin\dshlink.mjs hub phone setup --phone-frp-server <phone-frps-host> --phone-frp-port 7000 --phone-frp-token <phone-frps-token> --phone-frp-cert C:\certs\client.crt --phone-frp-key C:\certs\client.key --phone-frp-ca C:\certs\ca.crt --frpc-path C:\dshlink\vendor\frp\windows-amd64\frpc.exe
+node bin\dshlink.mjs hub serve
+```
+
+每部手机一条码（默认 2 小时 / 1 次）：
+
+```powershell
+node bin\dshlink.mjs hub phone bootstrap --label phone-alice --ttl-hours 2 --out .\phone-alice.txt
+# 无隧道时必须给手机能访问的 https URL（当前网关 server 证书 SAN 固定 127.0.0.1/localhost，
+# 所以跨网络请用 phone-frps，LAN 用 adb reverse/port-forward）：
+node bin\dshlink.mjs hub phone bootstrap --label bob --no-tunnel --url https://127.0.0.1:8791 --out .\bob.txt
+```
+
+手机 App 0.6.0+ 导入 `dshlink2:` 后自动生成密钥对并换证书；状态/吊销：
+
+```powershell
+node bin\dshlink.mjs hub phone devices
+node bin\dshlink.mjs hub phone revoke phone-alice   # deviceId 或证书指纹
+node bin\dshlink.mjs hub phone status
+```
+
+安全边界、信任链、威胁模型与轮换步骤见 [PHONE-SECURITY.md](PHONE-SECURITY.md)。旧的
+`dshlink1:` 路径（下一节）继续可用，但只建议用于已配置设备。
+
+### 4.3 旧路径：dshlink1 连接串（0.9，兼容保留）
 
 在 hub 上：
 
@@ -230,7 +271,7 @@ node bin\dshlink.mjs hub token list
 node bin\dshlink.mjs hub token rm --id <token-id>
 ```
 
-### 4.3 手机端安装与导入
+### 4.4 手机端安装与导入
 
 1. 把 APK 传到手机（QQ/网盘/USB 均可），在文件管理器里点击安装，允许“安装未知来源应用”；
 2. 打开 App（dsh-link 控制端）；
@@ -241,7 +282,7 @@ node bin\dshlink.mjs hub token rm --id <token-id>
 连接串里的 token 有有效期（默认 2 小时，可在生成时调整），过期后重新生成一份；吊销旧 token 即可
 让丢失的手机失去访问。
 
-### 4.4 没有 FRP 的纯局域网用法
+### 4.5 没有 FRP 的纯局域网用法
 
 - 生成时加 `--no-tunnel --url http://<hub 局域网 IP>:8790`；
 - 手机与 hub 在同一网段（或同一 VPN，如 WireGuard/Tailscale）即可直连；
@@ -270,8 +311,18 @@ adb install -r dshlink-control-<new>-debug.apk
 
 ## 6. 安全边界（分发时必须知道）
 
-- **连接串 = 凭据**：内含 device token；启用 FRP 时还内含 STCP secretKey 与客户端证书私钥。
-  不要贴到公开群、issue、日志里；泄露后立刻 `hub token rm` 吊销并在 hub 侧重建 provider。
+- **优先使用 0.10 的 `dshlink2:` 路径**：每部手机一张由 hub phone CA 签发的客户端证书，私钥在手机内；
+  连接串只含 CA 公钥 + 一次性 secret（可过期、限次、单独吊销），不含 hub token/CA 私钥。
+  手机经 mutual-TLS 网关只能访问 `/info`、`/network/*`、`/dsh/*`，管理面不可达。
+- **旧 `dshlink1:` 连接串 = 共享凭据**（兼容路径）：内含 device token；启用 FRP 时还内含 STCP
+  secretKey 与客户端证书私钥。不要贴到公开群、issue、日志里；泄露后立刻 `hub token rm` 吊销，
+  若要阻断隧道层还需轮换 frps/phone-frps 凭据并重发所有码。
+- **证书/隧道凭据是部署级、每次生成都一样**：每次生成连接串只会新签一个 device token（唯一、可单独吊销、
+  按 ttlHours 过期）；内嵌的 mTLS 客户端证书/私钥（当前部署 CN=frp-client）与 STCP `secretKey` 直接读自
+  hub 的 `frp.certFile/keyFile/trustedCaFile` 与 `frp.provider`，同一 hub 的所有连接串内嵌同一套字节。
+  因此吊销 device token 只关闭 API 权限，**不会**吊销连接串里的隧道凭据；证书到期/轮换或更换 provider
+  secretKey 后，旧连接串会全部连接失败，需要重新生成并导入。当前 frp client 证书有效期至
+  **2027-07-18**（以 `frp.certFile` 实际证书为准），到期前要换证并重发所有在用连接串。
 - **APK 不含秘密**：0.5.0 起 APK 里没有 frpc 配置/证书/token。
   正式分发用 release keystore 签名，并在下载页给出 SHA-256。
 - **hub 不做 TLS**：公网访问一律经 frps STCP（自带加密），或放在 HTTPS 反代后面；不要把 8790
@@ -292,6 +343,6 @@ adb install -r dshlink-control-<new>-debug.apk
 - [ ] APK 版本/versionCode 已递增，且构建自干净工作区
 - [ ] `dist/dsh-link-<ver>-portable.zip` 与 `.tar.gz` 都生成，`dist/SHA256SUMS.txt` 更新
 - [ ] 随机抽一台**干净机器**解压，按 `README-FIRST.md` 走一遍 init/serve/hub init/console 登录
-- [ ] 手机上用**新生成的**连接串导入并连接成功，发一条消息、在 DSH 侧看到
+- [ ] 手机上用**新生成的**连接串导入并连接成功，发一条消息、在 DSH 侧看到（0.10 优先用 `dshlink2:`，并验证 `hub phone devices` 能看到该设备、`revoke` 后立即 403）
 - [ ] 首页/控制台的截图与文档引用没有过期（0.5.0 起 App 界面无“内置模板”字样）
 - [ ] 发布说明（CHANGELOG）与下载页的 SHA-256 正确

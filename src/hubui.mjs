@@ -127,7 +127,33 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   </section>
 
   <section class="card">
-    <div class="card-head"><h2>手机接入</h2><span class="muted">为一部手机生成一次性连接串：内含 device 令牌；hub 已启用 FRP 时还会内嵌 STCP 隧道与证书。APK 本身不含任何密钥。</span></div>
+    <div class="card-head"><h2>手机证书（0.10）</h2><span class="muted">每部手机一张由 hub phone CA 签发的客户端证书；连接串只含 CA 公钥与一次性 secret，不含 hub 令牌或 CA 私钥。需要先在 hub 上运行 dshlink hub phone setup。</span></div>
+    <div class="muted" id="phoneV2Hint">加载中…</div>
+    <div class="stats" id="phoneV2Stats" style="margin-top:8px"></div>
+    <div class="row wrap" style="margin-top:10px">
+      <input id="pvLabel" placeholder="标签（例如 alice 的手机）" class="short">
+      <input id="pvTtl" type="number" min="1" value="2" title="引导码有效小时数" class="tiny">
+      <span class="muted">小时有效</span>
+      <input id="pvMax" type="number" min="1" value="1" title="最多可被使用次数" class="tiny">
+      <span class="muted">次</span>
+      <input id="pvUrl" placeholder="手机可访问的 https 网关地址（无隧道时必填，如 https://127.0.0.1:8791）" class="short" style="min-width:300px">
+      <label class="muted"><input id="pvTunnel" type="checkbox" checked> 使用 phone-frps 隧道</label>
+      <button id="pvBtn" class="btn primary" type="button">生成证书引导码</button>
+    </div>
+    <div id="pvOut" class="minted hidden">
+      <div class="muted" id="pvMeta"></div>
+      <textarea id="pvCode" readonly rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px"></textarea>
+      <div class="row"><button id="pvCopy" class="btn" type="button">复制引导码</button><button id="pvDownload" class="btn" type="button">下载引导文件</button></div>
+      <div class="muted">手机 App 0.6.0+ 导入 dshlink2: 引导码 → 自动生成密钥对并换取客户端证书。引导码只能用一次。</div>
+    </div>
+    <div class="card-head" style="margin-top:12px"><h3 style="margin:0;font-size:14px">已登记的手机</h3><span class="muted" id="pvDeviceHint"></span></div>
+    <div id="pvDevices" class="table-wrap"></div>
+    <div class="card-head" style="margin-top:12px"><h3 style="margin:0;font-size:14px">引导码</h3><span class="muted">一次性，过期或用完后失效</span></div>
+    <div id="pvBootstraps" class="table-wrap"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>手机接入（旧版 dshlink1）</h2><span class="muted">为一部手机生成一次性连接串：内含 device 令牌；hub 已启用 FRP 时还会内嵌 STCP 隧道与证书。APK 本身不含任何密钥。</span></div>
     <div class="row wrap">
       <input id="phLabel" placeholder="标签（例如 我的手机）" class="short">
       <input id="phTtl" type="number" min="0" value="2" title="有效小时数，0 表示不过期" class="tiny">
@@ -177,9 +203,9 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   'use strict';
   var TOKEN_KEY = 'dshlink-hub-token';
   var state = {
-    token: '', timer: null, signedIn: false, settingsDirty: false, mintedToken: '', phoneCode: '',
+    token: '', timer: null, signedIn: false, settingsDirty: false, mintedToken: '', phoneCode: '', phoneCodeV2: '',
     status: null, nodes: [], tokens: [], outbox: [], hub: null, settings: null,
-    consoleUrl: '', running: null
+    consoleUrl: '', running: null, phone: null
   };
 
   function $(id) { return document.getElementById(id); }
@@ -259,7 +285,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   }
   var CHIPS = {
     online: ['在线', 'ok'], active: ['已启用', 'ok'], pending: ['待批准', 'warn'],
-    offline: ['离线', 'off'], disabled: ['已停用', 'off'], delivered: ['已送达', 'ok'],
+    offline: ['离线', 'off'], disabled: ['已停用', 'off'], delivered: ['已送达', 'ok'], revoked: ['已吊销', 'off'], used: ['已使用', 'off'],
     dropped: ['已丢弃', 'off'], unknown: ['未知', 'warn'], ok: ['正常', 'ok']
   };
   function chip(status) {
@@ -347,7 +373,8 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
       request('/api/v1/hub/tokens'),
       request('/api/v1/hub/config'),
       request('/api/v1/hub/outbox?limit=100' + pending),
-      request('/api/v1/hub/sessions/running').catch(function () { return null; })
+      request('/api/v1/hub/sessions/running').catch(function () { return null; }),
+      request('/api/v1/hub/phone/status').catch(function () { return null; })
     ]).then(function (results) {
       state.status = results[0] || {};
       state.nodes = (results[1] && results[1].nodes) || [];
@@ -357,6 +384,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
       state.consoleUrl = (results[3] && results[3].console && results[3].console.url) || '';
       state.outbox = (results[4] && results[4].messages) || [];
       state.running = results[5] || null;
+      state.phone = results[6] || null;
       state.signedIn = true;
       show('login', false);
       show('app', true);
@@ -398,6 +426,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     renderTokens(state.tokens);
     renderOutbox(state.outbox);
     renderRunning(state.running);
+    renderPhone(state.phone);
     if (!state.settingsDirty) renderSettings(state.settings);
   }
 
@@ -488,6 +517,75 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
       '暂无可展示的运行中会话（节点需要在 DSH host 上运行 dsh-link-bridge）。');
   }
 
+  function renderPhone(phone) {
+    phone = phone || {};
+    var gateway = phone.gateway || {};
+    var tunnel = phone.tunnel || {};
+    var devices = phone.devices || [];
+    var bootstraps = phone.bootstraps || [];
+    var activeDevices = 0;
+    for (var i = 0; i < devices.length; i += 1) if (devices[i].status === 'active') activeDevices += 1;
+    var activeBootstraps = 0;
+    for (var j = 0; j < bootstraps.length; j += 1) if (bootstraps[j].status === 'active') activeBootstraps += 1;
+    var gatewayUrl = gateway.url || (gateway.port ? 'https://' + (gateway.bind || '127.0.0.1') + ':' + gateway.port : '');
+    var hint = '未启用：在 hub 上运行 dshlink hub phone setup，然后重启 hub serve。';
+    if (gateway.enabled) {
+      hint = '网关 ' + (gateway.listening ? '运行中' : '未监听') + (gatewayUrl ? ' · ' + gatewayUrl : '') +
+        (gateway.caFingerprint ? ' · CA ' + shortFingerprint(gateway.caFingerprint) : '') +
+        ' · 注入令牌' + (gateway.hubTokenSet ? '已配置' : '未配置');
+      if (gateway.reason) hint += ' · ' + gateway.reason;
+    } else if (gateway.reason) {
+      hint = '未启用：' + gateway.reason + '（运行 dshlink hub phone setup 后重启 hub serve）';
+    }
+    $('phoneV2Hint').textContent = hint;
+    var tunnelText = tunnel.enabled ? (tunnel.running ? '运行中' : '未运行') : '未启用';
+    $('phoneV2Stats').innerHTML = [
+      statCard(String(activeDevices) + ' / ' + String(devices.length), '手机证书', '有效 / 已登记'),
+      statCard(tunnelText, 'phone-frps', '独立隧道租户'),
+      statCard(String(activeBootstraps), '有效引导码', '一次性、有 TTL')
+    ].join('');
+    $('pvDeviceHint').textContent = gateway.enabled ? '吊销后该手机下一次 TLS 握手即被拒绝' : '先启用手机网关';
+    var rows = [];
+    for (var d = 0; d < devices.length; d += 1) {
+      var item = devices[d];
+      var actions = item.status === 'revoked'
+        ? '<span class="muted">已吊销</span>'
+        : '<button class="btn small danger" data-action="revoke-phone" data-id="' + esc(item.id) + '" data-name="' + esc(item.deviceId || item.label || '') + '">吊销</button>';
+      rows.push([
+        esc(item.label || '—'),
+        '<code>' + esc(item.deviceId || item.id) + '</code>',
+        chip(item.status),
+        '<code>' + esc(shortFingerprint(item.fingerprint)) + '</code>',
+        fmtTime(item.createdAt),
+        item.lastSeenAt ? fmtTime(item.lastSeenAt) : '—',
+        actions
+      ]);
+    }
+    $('pvDevices').innerHTML = table(['标签', '设备', '状态', '证书指纹', '登记时间', '最后使用', '操作'], rows,
+      '还没有手机登记。生成一个引导码，在手机 App 0.6.0+ 导入即可自动换取证书。');
+    var bootstrapRows = [];
+    for (var b = 0; b < bootstraps.length; b += 1) {
+      var boot = bootstraps[b];
+      var bootActions = boot.status === 'active'
+        ? '<button class="btn small danger" data-action="revoke-bootstrap" data-id="' + esc(boot.id) + '">作废</button>'
+        : '<span class="muted">—</span>';
+      bootstrapRows.push([
+        '<code>' + esc(boot.id) + '</code>',
+        esc(boot.label || '—'),
+        chip(boot.status),
+        String(boot.uses === undefined ? 0 : boot.uses) + ' / ' + String(boot.maxUses === undefined ? 1 : boot.maxUses),
+        boot.expiresAt ? fmtTime(boot.expiresAt) : '—',
+        bootActions
+      ]);
+    }
+    $('pvBootstraps').innerHTML = table(['ID', '标签', '状态', '已用 / 上限', '过期时间', '操作'], bootstrapRows,
+      '还没有引导码。每个引导码只能用一次，过期即失效。');
+  }
+
+  function shortFingerprint(value) {
+    var text = String(value || '');
+    return text.length > 23 ? text.slice(0, 23) + '…' : text;
+  }
   function renderSettings(settings) {
     var form = $('settingsForm');
     if (!settings) { form.innerHTML = '<p class="muted">设置不可用（需要 admin 令牌）。</p>'; return; }
@@ -602,6 +700,71 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
     toast('已下载连接文件');
   }
+  function generatePhoneV2() {
+    var label = $('pvLabel').value.trim() || 'phone';
+    var ttl = Number($('pvTtl').value);
+    var maxUses = Number($('pvMax').value);
+    var url = ($('pvUrl').value || '').trim();
+    var tunnel = $('pvTunnel').checked;
+    request('/api/v1/hub/phone/bootstrap', {
+      method: 'POST',
+      body: {
+        label: label,
+        ttlHours: isNaN(ttl) || ttl <= 0 ? 2 : ttl,
+        maxUses: isNaN(maxUses) || maxUses <= 0 ? 1 : maxUses,
+        tunnel: tunnel,
+        url: url || null
+      }
+    }).then(function (result) {
+      state.phoneCodeV2 = result.code;
+      $('pvCode').value = result.code;
+      var summary = result.summary || {};
+      $('pvMeta').textContent = '入口 ' + (summary.entry && summary.entry.url ? summary.entry.url : '—') +
+        ' · CA ' + shortFingerprint(summary.caFingerprint) +
+        ' · ' + (summary.hasTunnel ? '内嵌 phone-frps 隧道（本地端口 ' + summary.tunnelBindPort + '）' : '无隧道，手机需能直连该 https 地址') +
+        ' · ' + (result.expiresAt ? fmtTime(result.expiresAt) + ' 过期' : '不过期') +
+        ' · 引导码 ' + (result.bootstrapId || '');
+      show('pvOut', true);
+      toast('证书引导码已生成，只显示这一次');
+      return load(true);
+    }).catch(function (err) { toast(err.message || String(err), true); });
+  }
+  function copyPhoneV2() {
+    var text = state.phoneCodeV2 || '';
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制引导码'); }, function () { fallbackCopy(text); });
+    } else fallbackCopy(text);
+  }
+  function downloadPhoneV2() {
+    var code = state.phoneCodeV2 || '';
+    if (!code) return;
+    var blob = new Blob([code + '\n'], { type: 'text/plain' });
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'dshlink-phone-bootstrap.txt';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+    toast('已下载引导文件');
+  }
+  function revokePhoneDevice(id, name) {
+    if (!id) return;
+    if (!confirm('吊销手机 ' + (name || id) + ' 的证书？它下一次握手就会被拒绝，需要重新生成引导码。')) return;
+    request('/api/v1/hub/phones/' + encodeURIComponent(id) + '/revoke', { method: 'POST' }).then(function () {
+      toast('已吊销手机证书');
+      return load(true);
+    }).catch(function (err) { toast(err.message || String(err), true); });
+  }
+  function revokeBootstrap(id) {
+    if (!id) return;
+    if (!confirm('作废该引导码？尚未使用的手机将无法再凭它换取证书。')) return;
+    request('/api/v1/hub/phone/bootstrap/' + encodeURIComponent(id), { method: 'DELETE' }).then(function () {
+      toast('引导码已作废');
+      return load(true);
+    }).catch(function (err) { toast(err.message || String(err), true); });
+  }
   function flushQueue() {
     request('/api/v1/hub/flush', { method: 'POST' }).then(function (result) {
       toast('已重投 ' + result.attempted + ' 条：成功 ' + result.delivered + '，失败 ' + result.failed + '，跳过 ' + result.skipped);
@@ -695,6 +858,8 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     else if (action === 'revoke-token') { if (confirm('吊销该令牌？使用它的客户端将立即失去权限。')) revokeToken(id); }
     else if (action === 'retry-msg') retryMessage(id);
     else if (action === 'drop-msg') { if (confirm('丢弃这条消息？hub 缓存区中的记录会被标记为已丢弃。')) dropMessage(id); }
+    else if (action === 'revoke-phone') revokePhoneDevice(id, name);
+    else if (action === 'revoke-bootstrap') revokeBootstrap(id);
   }
 
   function init() {
@@ -712,6 +877,9 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     $('phoneBtn').addEventListener('click', generatePhone);
     $('phoneCopy').addEventListener('click', copyPhone);
     $('phoneDownload').addEventListener('click', downloadPhone);
+    $('pvBtn').addEventListener('click', generatePhoneV2);
+    $('pvCopy').addEventListener('click', copyPhoneV2);
+    $('pvDownload').addEventListener('click', downloadPhoneV2);
     $('flushBtn').addEventListener('click', flushQueue);
     $('saveSettingsBtn').addEventListener('click', saveSettings);
     $('auditBtn').addEventListener('click', loadAudit);

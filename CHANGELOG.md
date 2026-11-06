@@ -9,6 +9,78 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-06
+
+"Trust one phone, not the whole tunnel": the phone control surface no longer shares the
+machine-to-machine tunnel credentials. Every phone gets its own client certificate from a local
+CA, the hub checks it on every request, and the phone network lives on a separate frps tenant.
+
+### Added
+
+- **B2 — a phone gateway with mutual TLS.** A loopback-only HTTPS listener (`phoneGateway`,
+  default `https://127.0.0.1:8791`) terminates TLS on behalf of the hub and proxies only the
+  mobile control surface (`/api/v1/info`, `/api/v1/network/*`, `/api/v1/dsh/*`,
+  `/api/v1/phone/me`). It verifies a per-phone client certificate on every request and only then
+  injects the hub's local device token; the token never reaches the phone and admin/hub routes
+  stay unreachable. Revoking one phone is a registry update checked per request, not a
+  deployment-wide credential rotation.
+- **A hub-owned phone CA.** `hub phone setup` creates `phone-ca/` under the hub data directory
+  (CA + gateway server certificate, OpenSSL; `phoneGateway.opensslPath`/`DSHLINK_OPENSSL`).
+  `POST /api/v1/phone/bootstrap` issues a client certificate for a phone-generated public key —
+  the private key never leaves the phone. Device certificates default to 365 days, the CA to
+  10 years, the gateway certificate to 825 days.
+- **A one-time `dshlink2:` bootstrap profile.** The connect code pins the gateway CA, carries a
+  single-use `pbs_` bootstrap secret and (when configured) the phone-side visitor config for the
+  phone frps. First contact is authenticated by the pinned CA, not by a certificate delivered
+  over the connection it is meant to protect; from then on the phone uses mTLS.
+- **B4 — a dedicated phone frps tenant.** `phoneFrp` renders its own `phone-frpc.toml` (server,
+  auth token, mTLS files, STCP provider + `allowUsers`) and manages a detached frpc. The phone
+  visitor only reaches the phone gateway; the node/hub frps credentials are not embedded in
+  phone codes, so a leaked code is contained to the phone tenant and still needs the one-time
+  secret (or a registered certificate) to control anything.
+- **Phone control plane.** CLI: `hub phone setup` (enable gateway, create CA, mint the local
+  device token, optionally configure the phone frps), `hub phone bootstrap --label …`,
+  `hub phone devices`, `hub phone revoke <deviceId|fingerprint>`, `hub phone status`.
+  Admin APIs: `GET /api/v1/hub/phone/status`, `GET /api/v1/hub/phones`,
+  `POST /api/v1/hub/phones/:id/revoke`, `POST /api/v1/hub/phone/bootstrap`,
+  `DELETE /api/v1/hub/phone/bootstrap/:id`. `hub serve` starts the gateway and phone frpc.
+- **Hub console phone card (0.10).** `/ui` now shows the phone gateway (HTTPS address, CA
+  fingerprint, injected token, phone frps state), the registered phone certificates and the
+  one-time bootstraps, and can mint or revoke both. Screenshot and walkthrough:
+  `docs/HUB-CONSOLE.md` §3.6 / `docs/images/hub-phone10.png`.
+- **Android control app 0.6.0** (`dshlink2:`): generates its keypair locally, enrolls once,
+  stores the issued certificate, then talks mTLS only (no device token on the phone). The old
+  `dshlink1:` token path remains available for existing installs.
+- **`docs/PHONE-SECURITY.md`**: threat model, bootstrap trust chain, setup commands, revocation
+  and rotation runbook, limitations. New tests: `test/phone-security.test.mjs` (CA/bootstrap/
+  gateway/control plane) and `test/cli-phone.test.mjs`.
+
+### Changed
+
+- New phone onboarding should use the `dshlink2:` / mTLS path; `dshlink hub invite --phone`
+  and the `dshlink1:` profile remain supported for old phones but are no longer the recommended
+  deployment.
+- `phoneGateway.bind` is forced to a loopback address: phones reach the gateway through the
+  local STCP visitor, never by exposing the mTLS listener directly.
+
+### Security
+
+- A leaked phone code no longer exposes the hub's frp token, mTLS client key or node-network
+  STCP provider. It only contains the pinned CA, a single-use bootstrap secret and the phone
+  tenant's visitor credentials.
+- Revoked or unknown certificates are refused with `phone_revoked` / `phone_unknown`; a
+  bootstrap code is consumed once and rate-limited, and `allowNewDevices`/`maxDevices` cap
+  enrollment.
+
+### Fixed
+
+- **Phone registry changes made by the CLI apply to a running hub immediately.** The hub cached
+  `phones.json` for its lifetime, so `dshlink hub phone revoke` (or a re-enrollment written by
+  another process) was invisible to a running `hub serve` until a restart — the gateway kept
+  accepting a revoked certificate. `HubStore` now tracks the file signature and reloads the
+  registry when it changed on disk (the same "generated tokens work at once" behaviour added for
+  `auth.tokens` in 0.9).
+
 ## [0.9.1] — 2026-11-05
 
 ### Fixed
@@ -636,7 +708,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.0
 [0.9.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.1
 [0.9.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.0
 [0.8.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.8.1

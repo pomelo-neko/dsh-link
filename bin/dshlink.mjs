@@ -11,7 +11,7 @@ import { GATEWAY_POLICY_SUMMARY, createGateway } from '../src/gateway.mjs';
 import {
   createInboundToken, defaultDataDir, defaultNodeName, loadConfig, normalizeRoot, saveConfig, sealTokens, slugName
 } from '../src/config.mjs';
-import { DSHLINK_VERSION, LinkError, flagBool, flagList, flagString, formatBytes, parseArgs, randomToken } from '../src/util.mjs';
+import { DSHLINK_VERSION, LinkError, flagBool, flagList, flagString, formatBytes, parseArgs, randomToken, sha256Hex } from '../src/util.mjs';
 import { TunnelManager, allocateVisitorPort, findFrpc, frpConfigToml, parseFrpcTomlSummary } from '../src/tunnel.mjs';
 import { applyDshInstall, buildInvite, decodeInvite, defaultDshHome, peerEntryFromInvite, planDshInstall, upsertPeer } from '../src/pairing.mjs';
 import { runDoctor } from '../src/doctor.mjs';
@@ -26,6 +26,10 @@ import { HubStore } from '../src/hubstore.mjs';
 import { HubTunnelManager } from '../src/hubfrp.mjs';
 import { createHubLink } from '../src/hublink.mjs';
 import { PHONE_TUNNEL_BIND_PORT, buildHubPhoneInvite } from '../src/phone.mjs';
+import { openPhoneCA } from '../src/phoneca.mjs';
+import { createPhoneGateway } from '../src/phonegateway.mjs';
+import { PhoneTunnelManager } from '../src/phonefrp.mjs';
+import { PHONE_BOOTSTRAP_DEFAULT_BIND_PORT, buildPhoneBootstrap } from '../src/phonebootstrap.mjs';
 
 const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek Harness 互相通信 / talk between DSH machines
 
@@ -72,6 +76,13 @@ const HELP = `dsh-link ${DSHLINK_VERSION} — 让多台计算机上的 DeepSeek 
               hub nodes | token list | outbox --pending | flush | revoke <node>
               hub invite --phone [--ttl-hours 2] [--label L] [--no-tunnel] [--url U] [--out F]
                                                       生成手机连接串（device token + 内嵌 STCP 隧道）
+              hub phone setup [--phone-frp-server H --phone-frp-port P --phone-frp-token T]
+                              [--phone-frp-cert F --phone-frp-key F --phone-frp-ca F --frpc-path P]
+                                                      启用手机 mTLS 网关 + 独立 phone-frps 隧道（生成 CA/hub token/provider）
+              hub phone bootstrap [--label L] [--ttl-hours 2] [--max-uses 1] [--no-tunnel] [--url U] [--out F]
+                                                      生成一次性 dshlink2: 引导码（手机凭它换自己的证书）
+              hub phone devices | status              列出手机设备 / 网关与隧道状态
+              hub phone revoke <deviceId|fingerprint> 立即吊销一部手机
   install-dsh 把 MCP 配置和技能装进 DSH_HOME                   --profile web --url --write（默认只预览）
               token 认证: --token <admin token> [--bridge-token <bridge token>]
               自动唤醒桥（收到消息自动开对话）:              --bridge --bridge-workspace <目录> [--bridge-session <id>]
@@ -343,6 +354,233 @@ async function loadHubCtx(args) {
   return { cfg, store };
 }
 
+function hubPhoneGatewayUrl(cfg) {
+  return 'https://' + cfg.phoneGateway.bind + ':' + cfg.phoneGateway.port;
+}
+
+/** Build the phone-facing stack used by "hub serve": CA + mTLS gateway + phone-frps tunnel. */
+async function createHubPhoneStack({ cfg, store, logger }) {
+  const gatewayEnabled = cfg.phoneGateway?.enabled === true;
+  const tunnelEnabled = cfg.phoneFrp?.enabled === true;
+  if (!gatewayEnabled && !tunnelEnabled) return null;
+  let ca = null;
+  let gateway = null;
+  if (gatewayEnabled) {
+    if (!cfg.phoneGateway.hubToken) {
+      throw new LinkError(2, 'phone_gateway_not_configured', 'phoneGateway.hubToken is missing; run: dshlink hub phone setup');
+    }
+    ca = await openPhoneCA({ dir: cfg.phoneGateway.caDir, opensslPath: cfg.phoneGateway.opensslPath ?? null, log: logger });
+    gateway = createPhoneGateway({ cfg, ca, store, logger });
+  }
+  const tunnel = tunnelEnabled ? new PhoneTunnelManager(cfg, { log: logger }) : null;
+  return { ca, gateway, tunnel };
+}
+
+function phoneDeviceRows(devices) {
+  return devices.map((d) => ({
+    id: d.id,
+    label: d.label,
+    device: d.deviceId ?? '',
+    status: d.status ?? 'active',
+    created: d.createdAt ?? '',
+    seen: d.lastSeenAt ?? '',
+    fingerprint: (d.fingerprint ?? '').slice(0, 23)
+  }));
+}
+
+async function cmdHubPhone(args, { cfg, store, logger, asJson }) {
+  const action = args._[1] ?? 'status';
+  const phone = cfg.phoneGateway ?? {};
+  const tunnelCfg = cfg.phoneFrp ?? {};
+
+  if (action === 'setup') {
+    phone.enabled = true;
+    phone.bind = flagString(args.bind) ?? phone.bind ?? '127.0.0.1';
+    phone.port = Number(flagString(args.port) ?? phone.port ?? 8791);
+    const openssl = flagString(args.openssl) ?? phone.opensslPath;
+    if (openssl) phone.opensslPath = path.resolve(openssl);
+    phone.caDir = path.resolve(flagString(args['ca-dir']) ?? phone.caDir ?? path.join(cfg.dataDir, 'phone-ca'));
+
+    // One long-lived device-role token for the gateway; the phone never sees it.
+    let createdToken = null;
+    if (flagBool(args['reset-hub-token']) && phone.hubToken) {
+      const hash = sha256Hex(phone.hubToken);
+      cfg.auth.tokens = (cfg.auth.tokens ?? []).filter((t) => t.hash !== hash && t.token !== phone.hubToken);
+      phone.hubToken = null;
+    }
+    if (!phone.hubToken) {
+      const token = createHubToken(cfg, 'phone-gateway', { role: 'device' });
+      phone.hubToken = token.token;
+      createdToken = token;
+    }
+
+    const frpServer = flagString(args['phone-frp-server']);
+    if (frpServer) {
+      tunnelCfg.enabled = true;
+      tunnelCfg.serverAddr = frpServer;
+      const frpPort = flagString(args['phone-frp-port']);
+      if (frpPort) tunnelCfg.serverPort = Number(frpPort);
+      const frpToken = flagString(args['phone-frp-token']);
+      if (frpToken) tunnelCfg.token = frpToken;
+      const frpUser = flagString(args['phone-frp-user']);
+      if (frpUser) tunnelCfg.user = frpUser;
+      const cert = flagString(args['phone-frp-cert']);
+      if (cert) tunnelCfg.certFile = path.resolve(cert);
+      const key = flagString(args['phone-frp-key']);
+      if (key) tunnelCfg.keyFile = path.resolve(key);
+      const caFile = flagString(args['phone-frp-ca']);
+      if (caFile) tunnelCfg.trustedCaFile = path.resolve(caFile);
+      const provider = flagString(args['phone-frp-provider']);
+      if (provider) tunnelCfg.provider.name = provider;
+      const bindPort = flagString(args['phone-frp-bind-port']);
+      if (bindPort) tunnelCfg.bindPort = Number(bindPort);
+    }
+    if (flagBool(args['no-tunnel'])) tunnelCfg.enabled = false;
+    const frpcPath = flagString(args['frpc-path']);
+    if (frpcPath) {
+      cfg.phoneFrp.frpcPath = path.resolve(frpcPath);
+      if (!cfg.frp.frpcPath) cfg.frp.frpcPath = cfg.phoneFrp.frpcPath;
+    }
+    if (tunnelCfg.enabled && !tunnelCfg.serverAddr) {
+      throw new LinkError(2, 'phone_frp_not_configured', 'phone-frps needs --phone-frp-server <host> (or keep the tunnel off with --no-tunnel)');
+    }
+    if (tunnelCfg.enabled && !tunnelCfg.provider.secretKey) tunnelCfg.provider.secretKey = randomToken(24);
+
+    const ca = await openPhoneCA({ dir: phone.caDir, opensslPath: phone.opensslPath ?? null, log: logger });
+    await saveHubConfig(cfg);
+    const tunnel = new PhoneTunnelManager(cfg, { log: logger });
+    const tunnelStatus = await tunnel.status();
+    const lines = [
+      'phone access configured for hub "' + cfg.name + '"',
+      '  config       : ' + cfg.configPath,
+      '  CA           : ' + phone.caDir,
+      '  CA sha256    : ' + ca.caFingerprint(),
+      '  gateway      : ' + hubPhoneGatewayUrl(cfg) + ' (HTTPS, mutual TLS)',
+      '  device token : ' + (createdToken ? createdToken.token + '   (shown once; id ' + createdToken.id + ')' : '(already configured; use --reset-hub-token to rotate)'),
+      '  phone-frps   : ' + (tunnelStatus.enabled
+        ? tunnelStatus.serverAddr + ':' + tunnelStatus.serverPort + ' (provider ' + tunnelStatus.provider?.name + ', secretKey ' + (tunnelStatus.provider?.secretKeySet ? 'set' : 'missing') + ', visitor bind 127.0.0.1:' + tunnelStatus.bindPort + ')'
+        : 'off (phones must reach the gateway over LAN/VPN)'),
+      '',
+      'next:',
+      '  dshlink hub serve',
+      '  dshlink hub phone bootstrap --label pixel-9 --ttl-hours 2 --out phone-code.txt',
+      '  import that dshlink2: code in the Android app (0.6.0+)'
+    ];
+    out({
+      gateway: { enabled: true, url: hubPhoneGatewayUrl(cfg), caDir: phone.caDir, caFingerprint: ca.caFingerprint() },
+      hubToken: createdToken ? { id: createdToken.id, token: createdToken.token } : null,
+      phoneFrp: tunnelStatus,
+      config: cfg.configPath
+    }, asJson, lines.join('\n'));
+    return;
+  }
+
+  if (action === 'bootstrap') {
+    if (!phone.enabled) throw new LinkError(2, 'phone_gateway_disabled', 'the phone gateway is off; run: dshlink hub phone setup');
+    const ca = await openPhoneCA({ dir: phone.caDir, opensslPath: phone.opensslPath ?? null, log: logger });
+    const created = await buildPhoneBootstrap(cfg, ca, store, {
+      label: flagString(args.label) ?? 'phone',
+      ttlHours: Number(flagString(args['ttl-hours']) ?? 2),
+      maxUses: Number(flagString(args['max-uses']) ?? 1),
+      bindPort: Number(flagString(args['bind-port']) ?? tunnelCfg.bindPort ?? PHONE_BOOTSTRAP_DEFAULT_BIND_PORT),
+      tunnel: !flagBool(args['no-tunnel']),
+      url: flagString(args.url) ?? null,
+      note: flagString(args.note) ?? null
+    });
+    await saveHubConfig(cfg);
+    const outFile = flagString(args.out);
+    let saved = null;
+    if (outFile) {
+      saved = path.resolve(outFile);
+      await fs.mkdir(path.dirname(saved), { recursive: true });
+      await fs.writeFile(saved, created.code + '\n', 'utf8');
+    }
+    const summary = created.summary;
+    const lines = [
+      'one-time phone bootstrap code for hub "' + summary.entry.name + '"',
+      '  label      : ' + summary.label,
+      '  entry      : ' + summary.entry.url + ' (mTLS phone gateway)',
+      '  tunnel     : ' + (created.tunnel ? 'embedded phone-frps STCP (visitor bind 127.0.0.1:' + summary.tunnelBindPort + ')' : 'none'),
+      '  expires    : ' + summary.expiresAt,
+      '  CA sha256  : ' + summary.caFingerprint,
+      saved ? '  file       : ' + saved : null,
+      '',
+      'The phone generates its own key pair and exchanges this one-time code for a client certificate.',
+      'The code does not contain the hub token, the CA private key, or any other phone certificate.',
+      '',
+      'code:',
+      created.code
+    ].filter((line) => line !== null).join('\n');
+    out({ code: created.code, file: saved, summary, bootstrapId: created.bootstrapId, expiresAt: created.expiresAt, tunnel: created.tunnel }, asJson, lines);
+    return;
+  }
+
+  if (action === 'devices') {
+    const devices = await store.listPhones();
+    const rows = phoneDeviceRows(devices);
+    out({ count: devices.length, devices }, asJson, table(rows, [
+      { header: 'ID', key: 'id' }, { header: 'LABEL', key: 'label' }, { header: 'DEVICE', key: 'device' },
+      { header: 'STATUS', key: 'status' }, { header: 'CREATED', key: 'created' }, { header: 'LAST SEEN', key: 'seen' }, { header: 'FINGERPRINT', key: 'fingerprint' }
+    ]));
+    return;
+  }
+
+  if (action === 'revoke') {
+    const target = args._[2] ?? flagString(args.device) ?? flagString(args.id);
+    if (!target) throw new LinkError(2, 'missing_argument', 'hub phone revoke needs a device id or certificate fingerprint');
+    const revoked = await store.revokePhone(target, flagString(args.reason) ?? 'revoked from CLI');
+    if (!revoked) throw new LinkError(404, 'not_found', 'no such phone: ' + target);
+    await store.audit({ event: 'hub_phone_revoked', deviceId: revoked.deviceId, fingerprint: revoked.fingerprint, source: 'cli' });
+    out({ revoked: { id: revoked.id, deviceId: revoked.deviceId, fingerprint: revoked.fingerprint } }, asJson,
+      'revoked phone ' + (revoked.deviceId ?? revoked.id) + ' (' + (revoked.fingerprint ?? '').slice(0, 23) + '); the next TLS handshake is refused');
+    return;
+  }
+
+  if (action === 'status') {
+    let caFingerprint = null;
+    let caError = null;
+    if (phone.enabled) {
+      try {
+        const ca = await openPhoneCA({ dir: phone.caDir, opensslPath: phone.opensslPath ?? null, log: logger });
+        caFingerprint = ca.caFingerprint();
+      } catch (err) {
+        caError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const devices = await store.listPhones();
+    const bootstraps = await store.listPhoneBootstraps(20);
+    const tunnelStatus = await new PhoneTunnelManager(cfg, { log: logger }).status();
+    const value = {
+      gateway: {
+        enabled: phone.enabled === true,
+        bind: phone.bind,
+        port: phone.port,
+        url: phone.enabled ? hubPhoneGatewayUrl(cfg) : null,
+        caDir: phone.caDir,
+        caFingerprint,
+        caError,
+        hubTokenSet: Boolean(phone.hubToken),
+        allowNewDevices: phone.allowNewDevices !== false,
+        maxDevices: phone.maxDevices,
+        devices: { total: devices.length, active: devices.filter((d) => d.status === 'active').length },
+        bootstraps: { total: bootstraps.length, active: bootstraps.filter((b) => b.status === 'active').length }
+      },
+      phoneFrp: tunnelStatus
+    };
+    out(value, asJson, [
+      'phone gateway : ' + (value.gateway.enabled ? value.gateway.url + ' (mTLS, CA ' + (caFingerprint ?? 'unavailable: ' + caError) + ')' : 'off'),
+      '  devices     : ' + value.gateway.devices.active + ' active / ' + value.gateway.devices.total + ' total (max ' + value.gateway.maxDevices + ')',
+      '  bootstraps  : ' + value.gateway.bootstraps.active + ' active / ' + value.gateway.bootstraps.total + ' recent',
+      '  hub token   : ' + (value.gateway.hubTokenSet ? 'set' : 'missing'),
+      '  ca dir      : ' + (value.gateway.caDir ?? '-'),
+      'phone-frps    : ' + (tunnelStatus.enabled ? (tunnelStatus.running ? 'running pid ' + tunnelStatus.pid : 'enabled, not running') + ' ' + (tunnelStatus.serverAddr ?? '') : 'off')
+    ].join('\n'));
+    return;
+  }
+
+  throw new LinkError(2, 'unknown_subcommand', 'unknown: hub phone ' + action + ' (try: setup | bootstrap | devices | revoke | status)');
+}
+
 async function cmdHub(args) {
   const sub = args._[0] ?? 'status';
   const asJson = flagBool(args.json);
@@ -446,9 +684,16 @@ async function cmdHub(args) {
     return;
   }
 
+  if (sub === 'phone') {
+    const { cfg, store } = await loadHubCtx(args);
+    await cmdHubPhone(args, { cfg, store, logger, asJson });
+    return;
+  }
+
   if (sub === 'serve') {
     const { cfg, store } = await loadHubCtx(args);
-    const hub = createHub({ cfg, store, logger, saveConfig: async (next) => { await saveHubConfig(next); } });
+    const phone = await createHubPhoneStack({ cfg, store, logger });
+    const hub = createHub({ cfg, store, logger, phone, saveConfig: async (next) => { await saveHubConfig(next); } });
     const info = await hub.listen({ port: cfg.port, bind: cfg.bind });
     const nodes = await store.listNodes();
     console.log('dsh-link hub "' + cfg.name + '" listening on ' + info.url);
@@ -457,6 +702,14 @@ async function cmdHub(args) {
     console.log('  enrollment   : ' + (cfg.enrollment.enabled ? 'on (mode ' + cfg.enrollment.mode + ', autoApprove ' + cfg.enrollment.autoApprove + ', max ' + cfg.enrollment.maxNodes + ')' : 'off'));
     console.log('  files        : ' + (cfg.files.enabled ? 'on via hub proxy (max ' + formatBytes(cfg.files.maxBytes) + ')' : 'off'));
     console.log('  frp          : ' + (cfg.frp.enabled ? cfg.frp.serverAddr + ':' + (cfg.frp.serverPort ?? 7000) + ' (provider ' + cfg.frp.provider.name + ')' : 'off (static node URLs only)'));
+    if (phone?.gateway) {
+      const phoneStatus = await phone.gateway.status();
+      console.log('  phone gateway: https://' + phoneStatus.bind + ':' + phoneStatus.port + ' (mTLS, CA ' + phoneStatus.caFingerprint + ', ' + phoneStatus.devices.active + ' active phone(s))');
+    }
+    if (phone?.tunnel) {
+      const phoneTunnel = await phone.tunnel.status();
+      console.log('  phone-frps   : ' + (phoneTunnel.enabled ? phoneTunnel.serverAddr + ':' + phoneTunnel.serverPort + ' (provider ' + phoneTunnel.provider?.name + ')' : 'off'));
+    }
     console.log('  config       : ' + cfg.configPath);
     const shutdown = async (signal) => {
       console.log('\nreceived ' + signal + ', shutting down');
@@ -528,6 +781,9 @@ async function cmdHub(args) {
       '  outbox     ' + (status.counts?.outboxPending ?? 0) + ' pending',
       '  enrollment ' + (status.enrollment?.enabled ? 'on (autoApprove ' + status.enrollment.autoApprove + ')' : 'off'),
       '  frp        ' + (status.frp?.enabled ? (status.frp.running ? 'running pid ' + status.frp.pid : 'not running (' + (status.frp.reason ?? 'unknown') + ')') : 'off'),
+      '  phone      ' + (status.phone?.gateway?.enabled
+        ? 'gateway https://' + status.phone.gateway.bind + ':' + status.phone.gateway.port + ' (' + (status.phone.gateway.devices?.active ?? 0) + ' active phone(s)); phone-frps ' + (status.phone.tunnel?.enabled ? (status.phone.tunnel.running ? 'running' : 'stopped') : 'off')
+        : 'off'),
       '  console    ' + (cfg.publicUrl ?? ('http://' + cfg.bind + ':' + cfg.port)).replace(/\/+$/, '') + '/ui',
       '  config     ' + cfg.configPath
     ].join('\n'));

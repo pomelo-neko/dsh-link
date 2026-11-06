@@ -10,6 +10,7 @@
 - **定向会话（0.4）**：消息可以点名对方机器上的具体 **Session**，回复自动带回发起会话；两端真实对话可以多轮交流，而不是全部落进桥的池会话。策略可控、可关闭。
 - **手机控制端（0.6）**：`android/` 里的 App 连到一台节点，用 `device` token 浏览该节点的 DSH 工作区/会话、前台增量看对话、通过 `sessions.prompt` 发消息。它是控制端，不是节点；0.4.0 起也可直连 **hub**。
 - **随手交给别人（0.9）**：一个便携发行包带 CLI、文档、集成与安卓 APK（可选 frpc）；手机用一条**连接串**接入 hub——连接串自带 `device` 令牌，启用 FRP 时还内嵌 STCP 隧道与证书，APK 内不含任何密钥。
+- **一部手机一张证书（0.10）**：手机接入不再共享 hub 令牌和隧道凭据，改用一次性 `dshlink2:` 引导：连接串只 pin hub 的 phone CA 公钥和一次性 secret，手机本地生成密钥对、由 hub 签发客户端证书；手机只连 hub 回环上的 mutual-TLS 网关（8791），网关再注入 hub 令牌，隧道走独立的 phone-frps 租户。吊销一部手机是按证书指纹的独立操作，手机之间不共享秘密。见 [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md)。
 - **hub 拓扑（0.8）**：一个独立的 `dshlink hub` 进程做中心，节点用一次性 enroll token 接入；消息/DSH 视图/能力调用/文件全部经 hub 中转，hub 带持久 outbox、心跳补发与去重，并自带 Web 控制台（`/ui`）。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 
@@ -148,12 +149,18 @@ dshlink bind --thread msg_<根消息> --session session-yyyy
 那条会话。字段只决定 prompt 投到哪，不执行任何命令。策略、回退、线格式与排障见
 [`docs/DIRECTED-SESSIONS.md`](docs/DIRECTED-SESSIONS.md)。
 
-### 手机控制端（0.6+，0.7 支持网络感知，0.8 支持 hub 入口）
+### 手机控制端（0.6+，0.7 网络感知，0.8 hub 入口，0.10 每设备证书）
 
 [`android/`](android/) 里的安卓 App 是**控制端而不是节点**：它连到一台已有的 dsh-link 节点，列出该节点
 看到的 DSH 工作区/会话，屏幕在前台时按 `sinceSeq` 增量拉取对话，并通过能力通道往指定会话发消息。
 没有后台服务，也不在 App 不运行时轮询。0.7 起 App 还会发现入口节点所在网络的节点，可切换到任一
 **直连**节点远程浏览/发消息，标注子智能体会话，并把连续的 tool-call 行折叠成可展开的一行。App 0.4.0 起 URL 还可以指向 **hub**：App 识别 `role:"hub"` 后用同一个节点下拉切换 hub 已登记的节点，所有读取与发消息都带 `peer=<node>` 由 hub 转发。
+
+0.10 起，把手机交给别人的推荐方式是 **`dshlink2:` 一次性引导**（App 0.6.0+）：hub 为一部手机
+签一条一次性码，手机本地生成密钥对并换取自己的客户端证书，之后所有请求都走 mutual TLS 连到
+hub 回环上的 phone gateway（8791）。手机拿不到 hub 令牌，吊销一部手机也不会影响其他手机或隧道。
+0.9 的 `dshlink1:`（hub `device` 令牌 + 码内共享 STCP 凭据）仍可用于已配置的设备。安全模型、
+命令与威胁模型见 [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md)。
 
 ```powershell
 # 节点侧：给手机铸造一个 device token（只能读 DSH 视图 + 调用被允许的能力方法）
@@ -295,6 +302,7 @@ DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启�
 | 能力通道（0.3） | 关闭 | `capabilities.enabled` + 方法白名单；**动作方法（新建/发消息/改名/归档）默认不放行**，可按 peer 覆盖；命令只走本机 loopback，远端一律由节点裁决；每次调用写审计 |
 | 定向投递（0.4） | 桥默认开启、任意对端 | 桥的 `targets.{enabled,peers,allow,deny}` 决定哪个对端能向哪条本机会话投递；可关闭或收紧 |
 | hub 拓扑（0.8） | 关闭 | `hub.enabled`；节点用一次性 enroll token（默认 2h / 1 次）接入，全部流量经 hub；hub 从不信任 localhost，所有 API 都要 token（admin/enroll/device/peer 角色） |
+| 手机接入（0.10） | 关闭 | `phoneGateway.enabled`；网关只绑回环，并要求由 hub phone CA 签发的每设备客户端证书；唯一免证书入口是 `POST /api/v1/phone/bootstrap`（一次性 secret 把关）。hub 令牌不下发手机；手机经网关只能访问 `/info`、`/network/*`、`/dsh/*` |
 
 > 打开 DSH 视图 = 让持有 token 的对端读到本机**全部工作区路径与全部对话内容**（对话里可能有凭据、
 > 隐私、内部代码）。只在你信任这些对端时打开；动作能力更进一步——`sessions.prompt` 等于让对方驱动
@@ -323,10 +331,11 @@ dsh-link/
 │   ├── network.mjs         # 网络发现：peer 图与 hub 已登记节点（0.7/0.8）
 │   ├── gateway.mjs         # 回环 token 网关（手机/中转路径，0.7）
 │   ├── hub*.mjs            # hub 进程、配置、持久队列、FRP、节点链路、Web 控制台（0.8）
+│   ├── phone*.mjs          # 手机 CA、mutual-TLS 网关、一次性引导、phone-frps 租户（0.10）
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
 ├── android/                # 安卓控制端 App（纯 Java，无 Gradle 依赖）+ 手动构建脚本
-├── test/                   # 228 项检查 / 28 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约）+ CLI 冒烟
+├── test/                   # 234 项检查 / 30 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约与 mTLS）+ CLI 冒烟
 ├── docs/                   # 架构、设计、协议、DSH 接入、定向会话、hub 设计与控制台、FRP 部署、运维手册、排障手册、手机端
 └── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递；0.8 hub 面板）
 ```
@@ -334,7 +343,7 @@ dsh-link/
 ## 8. 验证
 
 ```powershell
-node test/run.mjs                     # 228 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约、doctor
+node test/run.mjs                     # 234 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约与 mTLS、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 
@@ -368,7 +377,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13
 
 0.9 起，发行包和手机接入都不再依赖本机私有文件：包里有 APK，手机用一次性连接串接入。
 
-\`\`\`powershell
+```powershell
 # 默认自动打包 android/dist 下最新的 APK；-NoApk 不带 APK；-NoVendor 跳过 frpc
 powershell -ExecutionPolicy Bypass -File scripts\build-bundle.ps1
 # 产物（dist/）：
@@ -376,12 +385,12 @@ powershell -ExecutionPolicy Bypass -File scripts\build-bundle.ps1
 #   dsh-link-<版本>-portable.tar.gz   （Linux/WSL 友好，保留可执行位）
 #   SHA256SUMS.txt                    （两个包的 sha256）
 #   BUNDLE-INFO.json                  （在包内：文件数、frpc 清单、APK 版本与 sha256）
-\`\`\`
+```
 
-包内是**客户端 + hub**：\`bin/ src/ docs/ integrations/ examples/ test/\` + 入口文件
-（\`README-FIRST.md\` 三步上手、\`install.ps1\`、\`install.sh\`）+ \`vendor/frp/{windows-amd64,linux-amd64}/frpc\`
-（**只有 frpc，不含 frps**——frps 属于服务器侧）+ \`apk/dshlink-control-<版本>-debug.apk\`
-（APK 本身不含任何密钥；同目录 README 有安装与校验说明）+ \`BUNDLE-INFO.json\` / \`SHA256SUMS.txt\`。
+包内是**客户端 + hub**：`bin/ src/ docs/ integrations/ examples/ test/` + 入口文件
+（`README-FIRST.md` 三步上手、`install.ps1`、`install.sh`）+ `vendor/frp/{windows-amd64,linux-amd64}/frpc`
+（**只有 frpc，不含 frps**——frps 属于服务器侧）+ `apk/dshlink-control-<版本>-debug.apk`
+（APK 本身不含任何密钥；同目录 README 有安装与校验说明）+ `BUNDLE-INFO.json` / `SHA256SUMS.txt`。
 对方机器只需要 Node.js ≥ 20，解压后跑安装脚本即可：初始化、可选配置穿透、可选注册常驻服务、
 可选接入自己的 DSH（MCP 条目 + 技能），最后打印配对码。
 
@@ -414,3 +423,32 @@ node bin\dshlink.mjs hub invite --phone --label alice --out alice-phone.txt
 连接串自带 hub 地址与独立的 `device` 令牌；hub 启用 FRP 时还内嵌 STCP visitor 配置和客户端证书，
 手机不需要额外配置隧道。每部手机一个令牌，丢失后在控制台或 `hub token rm --id <id>` 吊销。
 APK 本身不含任何密钥/隧道凭据，可以公开分发；连接串等同密码，请私下发送。
+
+### 10.3 更安全的手机接入（0.10：每设备证书 + 独立 phone-frps）
+
+0.10 起推荐用 `dshlink2:` 一次性引导替代 `dshlink1:`。连接串不再包含 hub 的 frps token、
+mTLS 私钥或节点网络 STCP secret；它只 pin hub 的 phone CA 公钥和一条一次性 bootstrap secret，
+手机本地生成密钥对并换取自己的客户端证书。
+
+```powershell
+# hub 上：建立 phone CA + mutual-TLS 网关（可选同时配置独立的 phone-frps）
+node bin\dshlink.mjs hub phone setup --data-dir C:\dshlink-hub --no-tunnel
+# 公网手机推荐带独立 phone-frps（它有自己的 token/证书/provider，与节点网络隔离）：
+# node bin\dshlink.mjs hub phone setup --data-dir C:\dshlink-hub --phone-frp-server frps.example.com --phone-frp-port 7000 --phone-frp-token <token> --phone-frp-cert C:\certs\client.crt --phone-frp-key C:\certs\client.key --phone-frp-ca C:\certs\ca.crt
+node bin\dshlink.mjs hub serve --data-dir C:\dshlink-hub
+
+# 每部手机一条一次性码（默认 2 小时 / 1 次）
+node bin\dshlink.mjs hub phone bootstrap --data-dir C:\dshlink-hub --label alice --ttl-hours 2 --out alice.txt
+node bin\dshlink.mjs hub phone devices --data-dir C:\dshlink-hub
+node bin\dshlink.mjs hub phone revoke --data-dir C:\dshlink-hub alice
+```
+
+- 手机只访问 loopback 的 phone gateway（默认 8791），网关校验客户端证书后注入 hub 令牌；
+  手机永远拿不到 hub 令牌，也访问不到 `/api/v1/hub/*` 等管理路由。
+- 吊销按证书指纹即时生效，只影响那一部手机；CA 私钥只在 hub 的 `phone-ca/` 里。
+- phone-frps 是独立租户：自己的 auth token、mTLS 证书、STCP provider；即使手机码泄露，也不能
+  变成节点网络或 hub frps 的访问能力。
+- 无隧道时必须给 `--url`，且当前网关 server 证书 SAN 固定为 `127.0.0.1/localhost`，所以
+  应指向手机本机回环（adb reverse / port-forward）；跨网络手机请用 phone-frps 隧道。
+- 旧的 `hub invite --phone`（`dshlink1:`）继续可用，适合已配置设备；新手机建议一律走
+  `hub phone bootstrap`。完整安全模型、威胁模型与轮换见 [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md)。
