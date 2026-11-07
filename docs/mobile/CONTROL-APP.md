@@ -1,6 +1,6 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.6.2** (shipped with the dsh-link 0.11.0 tree; the app is versioned
+Status: **implemented, v0.7.0** (shipped with the dsh-link 0.11.1 tree; the app is versioned
 independently from the node). v0.6.0 adds the **`dshlink2:` per-device mTLS path**: the connect code
 carries the phone gateway CA and a one-time bootstrap secret instead of a device token; the app
 generates a keypair locally (AndroidKeyStore, with a software-key fallback), exchanges only its public
@@ -39,6 +39,25 @@ node's localhost-trust path. v0.4.0 adds the **hub entry**: when the URL points 
 (`role:"hub"`) the app treats it as a central server, lists its enrolled nodes in the same
 "控制节点" dropdown, and relays every DSH call to the selected node with `peer=<node>`; the node
 entry (0.7 single node) still works unchanged from the same APK.
+v0.7.0 redoes the phone UI around the two things a controller is for. The single scrolling page
+became three areas — **工作区** (default, the body of the app) / **连接** / **设置** — shown as a
+bottom tab bar on phones and as a left sidebar once the window is at least 600 dp wide
+(`layout-sw600dp`, which foldables in tablet mode hit), so the connect form can no longer push the
+workspace list or a conversation off screen. The workspace page keeps only status/summary/refresh,
+the optional node selector and the list; the connect page owns import (paste/file/QR scan), manual
+URL/token, the tunnel checkbox and the connect button; settings shows the imported profile or the
+live manual connection plus reset-certificate / clear-profile / clear-connection actions and the
+about box. Chat now follows the DSH / DeepSeek app: user turns are right-aligned light-blue bubbles,
+assistant turns stay full width, reasoning is collapsed behind a `思考 · 时间 · 预览` row, tool
+calls still fold in groups, and assistant text renders a built-in Markdown subset (headings,
+bold/italic/strike, inline and fenced code, ordered/unordered lists, quotes, tables with CJK-aware
+column widths, clickable links) instead of raw `**` or fence markers. Node identity for
+hub-enrolled nodes was fixed: a node that is itself enrolled in a hub answers
+`/api/v1/network/nodes` with the hub's view, so the selector now synthesizes the local node from
+`/api/v1/info` (plus its direct peers) instead of showing the hub as "本机". Transcript frame
+timestamps (`time`, epoch millis) are formatted, and intraword underscores (`PHONE_FRPS_OK`) are
+no longer eaten as emphasis.
+
 This document records what the app in [`android/`](../../android/) actually does, which node APIs
 it depends on, how it was verified, and what is deliberately left out. The research that led here —
 options A/B/C, effort estimates, the 0.5 security prerequisites and the mobile-sync design review —
@@ -439,6 +458,20 @@ template:
    (the emulator's virtual camera has no QR scene); extreme low-resolution or heavily distorted
    photos may still fail. The final APK was reinstalled and reconnected from the stored profile
    without spending another bootstrap code.
+
+6. **0.7.0 UI redo (2026-11-07, API 36 x86_64 emulator, real 0.11.0 node, device token)**:
+   bottom tabs switch 工作区/连接/设置; connect succeeds and auto-returns to 工作区; the status now
+   reads `已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送` (previously the hub name leaked into
+   the node label) with `网络 2 个节点 · 2 可达`; settings shows `当前连接：…` and the
+   clear-connection dialog actually clears storage, after which a manual URL+token reconnect works.
+   Conversation: a Markdown report renders headings, bullets, a table with aligned columns, fenced
+   code with a monospace background, inline code and blue underlined links; assistant header shows
+   `#273 · DSH · 15:13` (no more `null`); `PHONE_FRPS_OK` keeps all underscores; a reasoning row
+   expands to its text; a tool group toggles between `点击展开` and displaying both run_code bodies;
+   `加载更早` prepends the older batch (top row moved from #829 to #282). A steer message
+   `UI070 probe: reply exactly UI070_OK` sent from the phone was answered `UI070_OK` in the
+   transcript (33 → 37 rows). `adb shell wm size 1600x2560` produces the 600dp+ sidebar with the
+   same three entries. Local screenshots: `android/dist/selftest-0.7.0/` (git-ignored).
 
 The node test suite at this release: `node test/run.mjs` — see the root README for the current
 count (frp/MCP tests skip automatically when their binaries/SDK are missing).

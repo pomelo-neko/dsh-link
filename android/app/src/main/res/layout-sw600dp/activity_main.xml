@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:background="#FFFFFF">
+
+    <LinearLayout
+        android:id="@+id/tab_bar"
+        android:layout_width="196dp"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:background="#F3F6FA"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp"
+        android:paddingLeft="8dp"
+        android:paddingRight="8dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingLeft="10dp"
+            android:paddingBottom="12dp"
+            android:text="dsh-link 控制端"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#1E3A5F" />
+
+        <TextView
+            android:id="@+id/tab_workspaces"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:drawablePadding="0dp"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:text="工作区"
+            android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/tab_connect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:text="连接"
+            android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/tab_settings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:text="设置"
+            android:textSize="15sp" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="1dp"
+        android:layout_height="match_parent"
+        android:background="#E5E7EB" />
+
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1">
+
+        <include layout="@layout/page_workspaces" />
+        <include layout="@layout/page_connect" />
+        <include layout="@layout/page_settings" />
+    </FrameLayout>
+</LinearLayout>

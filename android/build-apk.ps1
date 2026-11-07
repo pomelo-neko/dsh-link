@@ -16,8 +16,8 @@
 # under android\native\lib are still required.
 param(
     [string]$Sdk = "D:\AndroidSdk",
-    [string]$VersionName = "0.6.2",
-    [int]$VersionCode = 9,
+    [string]$VersionName = "0.7.0",
+    [int]$VersionCode = 10,
     [switch]$Release,
     [string]$Keystore = "",
     [string]$KeystorePassword = "",
@@ -134,7 +134,12 @@ if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 Write-Host "[4/6] d8"
 New-Item -ItemType Directory -Force -Path "$Obj\dex" | Out-Null
 $dexInputs = @(Get-ChildItem -Path $Classes -Recurse -Filter *.class | ForEach-Object { $_.FullName }) + @($ZxingJar)
-& "$BuildTools\d8.bat" --min-api 26 --lib $AndroidJar --output "$Obj\dex" $dexInputs
+# d8.bat runs through cmd, whose 8 KiB command line overflows once the app has many classes
+# (0.7.0's Markdown/ChatMarkdown pushed it over). D8 expands @argfile, so keep the class list in a
+# file instead of on the command line.
+$dexList = Join-Path $Obj "dex-inputs.txt"
+$dexInputs | Set-Content -Path $dexList -Encoding ASCII
+& "$BuildTools\d8.bat" --min-api 26 --lib $AndroidJar --output "$Obj\dex" "@$dexList"
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 
 Write-Host "[5/6] package assets, classes.dex and frpc native libs into the APK"

@@ -3,197 +3,61 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="dsh-link 控制端"
-        android:textSize="22sp"
-        android:textStyle="bold"
-        android:textColor="#1E3A5F"
-        android:paddingBottom="4dp" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="连接一个 dsh-link 中心服务器（hub）或单个节点，浏览并控制它登记或直连的 DSH 工作区与会话。通用 APK 不含任何凭据：先导入 hub 管理员给你的连接串/配置文件。只在连接或刷新时传输数据。"
-        android:textSize="12sp"
-        android:textColor="#6B7280"
-        android:paddingBottom="8dp" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingBottom="4dp">
-
-        <Button
-            android:id="@+id/import_button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="2"
-            android:text="导入连接串/配置文件" />
-
-        <Button
-            android:id="@+id/import_file_button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="从文件导入" />
-    </LinearLayout>
-
-    <Button
-        android:id="@+id/scan_button"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="4dp"
-        android:text="扫描二维码（相机）" />
-
-    <EditText
-        android:id="@+id/url_input"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="中心服务器地址，例如 http://192.0.2.10:8790（也支持节点 8787）"
-        android:inputType="textUri"
-        android:singleLine="true" />
-
-    <EditText
-        android:id="@+id/token_input"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="device token（hub: dshlink hub token new --role device）"
-        android:inputType="textPassword"
-        android:singleLine="true" />
-
-    <CheckBox
-        android:id="@+id/tunnel_check"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="通过阿里云 STCP 中转（需先导入隧道配置；端口从 frpc.toml 读取）"
-        android:textSize="12sp" />
-
-    <TextView
-        android:id="@+id/profile_info"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="2dp"
-        android:textSize="11sp"
-        android:textColor="#6B7280"
-        android:visibility="gone" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingTop="4dp">
-
-        <Button
-            android:id="@+id/reset_cert_button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="重置设备证书"
-            android:visibility="gone" />
-
-        <Button
-            android:id="@+id/clear_profile_button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="清除导入配置"
-            android:visibility="gone" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingTop="8dp">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="控制节点："
-            android:textSize="13sp"
-            android:textColor="#374151" />
-
-        <Spinner
-            android:id="@+id/node_spinner"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:minHeight="40dp" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingTop="8dp">
-
-        <Button
-            android:id="@+id/connect_button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="连接" />
-
-        <Button
-            android:id="@+id/refresh_button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="刷新工作区" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="8dp"
-        android:textSize="13sp"
-        android:textColor="#374151" />
-
-    <TextView
-        android:id="@+id/summary"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="4dp"
-        android:textSize="12sp"
-        android:textColor="#6B7280" />
-
-    <TextView
-        android:id="@+id/warning"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:padding="10dp"
-        android:layout_marginTop="8dp"
-        android:background="#FFF3CD"
-        android:textColor="#7A4F00"
-        android:textSize="12sp"
-        android:visibility="gone" />
+    android:background="#FFFFFF">
 
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="8dp">
+        android:layout_weight="1">
 
-        <ListView
-            android:id="@+id/workspace_list"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:divider="#E5E7EB"
-            android:dividerHeight="1dp" />
+        <include layout="@layout/page_workspaces" />
+        <include layout="@layout/page_connect" />
+        <include layout="@layout/page_settings" />
+    </FrameLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#E5E7EB" />
+
+    <LinearLayout
+        android:id="@+id/tab_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="#FFFFFF">
 
         <TextView
-            android:id="@+id/empty"
-            android:layout_width="wrap_content"
+            android:id="@+id/tab_workspaces"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:text="连接后显示工作区"
-            android:textColor="#9CA3AF" />
-    </FrameLayout>
+            android:layout_weight="1"
+            android:gravity="center"
+            android:paddingTop="11dp"
+            android:paddingBottom="11dp"
+            android:text="工作区"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tab_connect"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:paddingTop="11dp"
+            android:paddingBottom="11dp"
+            android:text="连接"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tab_settings"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:paddingTop="11dp"
+            android:paddingBottom="11dp"
+            android:text="设置"
+            android:textSize="14sp" />
+    </LinearLayout>
 </LinearLayout>

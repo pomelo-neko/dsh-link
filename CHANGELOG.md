@@ -9,6 +9,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-11-07
+
+"Make it look like DSH": the Android control app now has a real three-area layout (workspaces /
+connect / settings, a left sidebar on wide screens), its conversation view matches the
+DSH/DeepSeek mobile look, and messages render Markdown instead of raw asterisks.
+
+### Added
+
+- **Android 0.7.0 UI rework.** Workspaces are the default body of the app; connecting is a
+  separate tab, and settings keeps the profile/certificate actions (reset certificate, clear
+  imported profile, clear connection). Wide windows (>=600dp, e.g. unfolded foldables and tablets)
+  get a left sidebar instead of bottom tabs. Conversations show user messages in a right-aligned
+  bubble, fold reasoning by default, keep the existing tool-call grouping, and render a Markdown
+  subset: headings, bold/italic/strikethrough, inline code, fenced code blocks, ordered/unordered
+  lists, quotes, tables with CJK-aware column widths, and clickable links (inline spans inside
+  table cells are rendered too). Evidence: android/dist/selftest-0.7.0/ (git-ignored) and
+  docs/mobile/screenshots/.
+- **Settings page connection management.** Shows the current connection/security mode and can
+  clear the saved URL/token/imported profile behind a confirmation dialog.
+- docs/mobile/CONTROL-APP.md and android/README.md updated for 0.7.0 (layout, Markdown subset,
+  verification record).
+
+### Fixed
+
+- Hub-enrolled nodes were labelled with the hub's own name: /api/v1/network/nodes returns the hub's
+  view (self = hub), so the app now synthesizes its own node from /api/v1/info and appends its
+  direct peers instead of trusting that list for identity.
+- Transcript message timestamps showed "null" because the app only read ts/createdAt; it now reads
+  the epoch-millisecond time field used by durable transcript frames.
+- Word-internal underscores (PHONE_FRPS_OK) were parsed as italic markers; they are literal now
+  (CommonMark).
+- Markdown table cells printed raw ** and inline-code markers; inline spans are rendered inside
+  cells and column widths use the rendered text.
+- The network summary's reachable counter counted the remote node list; it now counts the
+  synthesized node list it actually displays.
+
+### Changed
+
+- Android version 0.7.0 (versionCode 10); node/CLI 0.11.1. No protocol or server changes in this
+  release; the APK bundled in the portable bundle is updated.
+
 ## [0.11.0] — 2026-11-07
 
 "Point the camera at it": a 7 KB connect code is too long to copy by hand and too long for one
@@ -765,7 +806,9 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.11.1
+[0.11.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.11.0
 [0.10.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.1
 [0.10.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.0
 [0.9.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.1

@@ -57,6 +57,9 @@ public class SessionActivity extends Activity {
     private volatile boolean pollInFlight;
     private boolean canSend;
     private boolean sending;
+    private boolean stickToBottom = true;
+    private boolean newBelow;
+    private String originSuffix = "";
 
     private final Runnable pollTask = new Runnable() {
         @Override
@@ -85,6 +88,20 @@ public class SessionActivity extends Activity {
         adapter = new MessageAdapter(this);
         listView.setAdapter(adapter);
         listView.setEmptyView(findViewById(R.id.empty));
+        listView.setOnScrollListener(new android.widget.AbsListView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(android.widget.AbsListView view, int scrollState) {
+            }
+
+            @Override
+            public void onScroll(android.widget.AbsListView view, int firstVisibleItem,
+                                 int visibleItemCount, int totalItemCount) {
+                if (newBelow && isNearBottom()) {
+                    newBelow = false;
+                    updateStatus();
+                }
+            }
+        });
 
         canSend = NodeState.canSend();
         if (!canSend) {
@@ -157,13 +174,13 @@ public class SessionActivity extends Activity {
                             totalCount = result.optLong("total", loadedCount);
                             initialLoaded = true;
                             updateOlderButton();
-                            String origin = "";
                             if (NodeState.isHub()) {
-                                origin = " · " + NodeState.nodeLabel() + "（经 " + NodeState.hubName() + "）";
+                                originSuffix = " · " + NodeState.nodeLabel() + "（经 " + NodeState.hubName() + "）";
                             } else if (NodeState.isRemote()) {
-                                origin = " · " + NodeState.nodeLabel();
+                                originSuffix = " · " + NodeState.nodeLabel();
                             }
-                            statusView.setText("共 " + totalCount + " 条" + origin + " · 每 2.5 秒仅在前台刷新");
+                            stickToBottom = true;
+                            updateStatus();
                             scrollToBottom();
                             schedulePolling();
                         }
@@ -219,9 +236,16 @@ public class SessionActivity extends Activity {
                         public void run() {
                             lastSeq = Math.max(lastSeq, head);
                             if (fresh.length() > 0) {
+                                boolean follow = stickToBottom || isNearBottom();
                                 adapter.append(fresh);
                                 loadedCount += fresh.length();
-                                scrollToBottom();
+                                if (loadedCount > totalCount) totalCount = loadedCount;
+                                if (follow) {
+                                    scrollToBottom();
+                                } else {
+                                    newBelow = true;
+                                }
+                                updateStatus();
                             }
                             updateOlderButton();
                         }
@@ -242,6 +266,9 @@ public class SessionActivity extends Activity {
 
     private void loadOlder() {
         loadOlderButton.setEnabled(false);
+        final int firstVisible = listView.getFirstVisiblePosition();
+        View firstChild = listView.getChildAt(0);
+        final int topOffset = firstChild == null ? 0 : firstChild.getTop();
         io.execute(new Runnable() {
             @Override
             public void run() {
@@ -254,10 +281,13 @@ public class SessionActivity extends Activity {
                         public void run() {
                             JSONArray messages = result.optJSONArray("messages");
                             int count = messages == null ? 0 : messages.length();
+                            int rowsBefore = adapter.getCount();
                             adapter.prepend(messages);
                             rememberKeys(messages);
                             loadedCount += count;
                             totalCount = result.optLong("total", totalCount);
+                            int rowsAdded = adapter.getCount() - rowsBefore;
+                            listView.setSelectionFromTop(firstVisible + rowsAdded, topOffset);
                             updateOlderButton();
                             loadOlderButton.setEnabled(true);
                             if (count == 0) statusView.setText("没有更早的消息了");
@@ -373,6 +403,7 @@ public class SessionActivity extends Activity {
                 sending = false;
                 sendButton.setEnabled(true);
                 input.setText("");
+                stickToBottom = true;
                 statusView.setText("已提交 · 由 " + NodeState.nodeLabel() + " 处理，结果看上方消息");
                 main.postDelayed(new Runnable() {
                     @Override
@@ -394,6 +425,7 @@ public class SessionActivity extends Activity {
                 sendButton.setEnabled(true);
                 if (ok) {
                     input.setText("");
+                    stickToBottom = true;
                     statusView.setText("已发送");
                     main.postDelayed(new Runnable() {
                         @Override
@@ -442,6 +474,26 @@ public class SessionActivity extends Activity {
 
     private void scrollToBottom() {
         if (adapter.getCount() > 0) listView.setSelection(adapter.getCount() - 1);
+        stickToBottom = true;
+        if (newBelow) {
+            newBelow = false;
+            updateStatus();
+        }
+    }
+
+    private boolean isNearBottom() {
+        int count = adapter.getCount();
+        if (count == 0) return true;
+        int last = listView.getLastVisiblePosition();
+        return last < 0 || last >= count - 2;
+    }
+
+    private void updateStatus() {
+        if (!initialLoaded) return;
+        String text = "共 " + totalCount + " 条" + originSuffix;
+        if (newBelow) text += " · 下方有新消息";
+        text += " · 每 2.5 秒仅在前台刷新";
+        statusView.setText(text);
     }
 
     private static String enc(String value) {

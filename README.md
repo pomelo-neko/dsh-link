@@ -43,6 +43,10 @@ files, queue messages while the other side is offline, and appear inside DSH as 
   to copy by hand. The hub console now plays one as an animated set of QR frames, and the Android
   scanner (app 0.6.2+) rebuilds it from the camera or a handful of screenshots before running the
   same validation as a pasted code. See [`docs/QR-CONNECT.md`](docs/QR-CONNECT.md).
+- **A real app UI (0.11.1).** The Android controller grows a three-area layout (workspaces /
+  connect / settings, a left sidebar on wide screens), DSH/DeepSeek-style bubbles with folded
+  reasoning, and an in-app Markdown renderer (tables, fenced code, inline code, links). See
+  [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md).
 
 ---
 

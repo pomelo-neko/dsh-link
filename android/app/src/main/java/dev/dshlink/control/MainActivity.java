@@ -7,6 +7,7 @@ import android.content.ClipData;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -78,12 +79,24 @@ public class MainActivity extends Activity {
     private TextView profileView;
     private Button resetCertButton;
     private Button clearProfileButton;
+    private Button clearConnectionButton;
     private ListView listView;
     private WorkspaceAdapter adapter;
     private ArrayAdapter<String> nodeAdapter;
     private final List<JSONObject> networkNodes = new ArrayList<>();
     private final ExecutorService io = Executors.newFixedThreadPool(2);
     private final Handler main = new Handler(Looper.getMainLooper());
+    private TextView connectStatusView;
+    private TextView connectSummaryView;
+    private TextView aboutView;
+    private TextView tabWorkspaces;
+    private TextView tabConnect;
+    private TextView tabSettings;
+    private View pageWorkspaces;
+    private View pageConnect;
+    private View pageSettings;
+    private View nodeRow;
+    private int currentTab;
     private boolean hubMode;
     private boolean canSend;
     private boolean applyingNodes;
@@ -93,7 +106,17 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        Ui.applyEdgeToEdgePadding(this, false);
+        Ui.applyEdgeToEdgePadding(this, true);
+        pageWorkspaces = findViewById(R.id.page_workspaces);
+        pageConnect = findViewById(R.id.page_connect);
+        pageSettings = findViewById(R.id.page_settings);
+        tabWorkspaces = findViewById(R.id.tab_workspaces);
+        tabConnect = findViewById(R.id.tab_connect);
+        tabSettings = findViewById(R.id.tab_settings);
+        connectStatusView = findViewById(R.id.connect_status);
+        connectSummaryView = findViewById(R.id.connect_summary);
+        aboutView = findViewById(R.id.about_text);
+        setupTabs();
         urlInput = findViewById(R.id.url_input);
         tokenInput = findViewById(R.id.token_input);
         tunnelCheck = findViewById(R.id.tunnel_check);
@@ -107,10 +130,12 @@ public class MainActivity extends Activity {
         profileView = findViewById(R.id.profile_info);
         resetCertButton = findViewById(R.id.reset_cert_button);
         clearProfileButton = findViewById(R.id.clear_profile_button);
+        clearConnectionButton = findViewById(R.id.clear_connection_button);
         listView = findViewById(R.id.workspace_list);
         adapter = new WorkspaceAdapter(this);
         listView.setAdapter(adapter);
         listView.setEmptyView(emptyView);
+        nodeRow = findViewById(R.id.node_row);
 
         nodeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
                 new ArrayList<String>());
@@ -189,6 +214,12 @@ public class MainActivity extends Activity {
                 confirmClearProfile();
             }
         });
+        clearConnectionButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                confirmClearConnection();
+            }
+        });
 
         connectButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -258,9 +289,9 @@ public class MainActivity extends Activity {
         networkNodes.clear();
         nodeAdapter.clear();
         adapter.setItems(null);
-        emptyView.setText("连接后显示工作区");
+        emptyView.setText("还没有连接。\n先去“连接”页导入连接串或扫描二维码。");
         warningView.setVisibility(View.GONE);
-        summaryView.setText("");
+        setSummary("");
         setBusy(true);
         if (certMode) {
             status(PhoneEnrollment.enrolled(this)
@@ -524,21 +555,19 @@ public class MainActivity extends Activity {
         return -1;
     }
 
-    /** Node-mode network list: the gateway itself plus its direct peers. */
+    /**
+     * Node-mode control list: the gateway itself plus the peers it can reach directly. The remote
+     * /network/nodes answer is deliberately not used for the selector: a node that is enrolled in a
+     * hub reports the hub's whole network there (the hub is "self" from that node's uplink), so using
+     * it would label this node with the hub's name and offer nodes the gateway cannot route to.
+     */
     private void applyNodeNetwork(JSONObject network) {
         networkNodes.clear();
-        JSONArray nodes = network == null ? null : network.optJSONArray("nodes");
-        if (nodes != null) {
-            for (int i = 0; i < nodes.length(); i++) {
-                JSONObject node = nodes.optJSONObject(i);
-                if (node != null) networkNodes.add(node);
-            }
-        }
-        if (networkNodes.isEmpty() && NodeState.info != null) {
-            // Fallback for nodes older than 0.7: present the gateway itself as the only node.
+        if (NodeState.info != null) {
             JSONObject self = new JSONObject();
             try {
                 self.put("name", NodeState.info.optString("name", "本机节点"));
+                self.put("nodeId", NodeState.info.optString("nodeId", ""));
                 self.put("self", true);
                 self.put("reachable", true);
                 self.put("softwareVersion", NodeState.info.optString("softwareVersion",
@@ -548,6 +577,23 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             networkNodes.add(self);
+            // Direct peers of the gateway can be read via ?peer=<name>.
+            JSONArray peers = NodeState.info.optJSONArray("peers");
+            for (int i = 0; peers != null && i < peers.length(); i++) {
+                JSONObject peer = peers.optJSONObject(i);
+                if (peer == null) continue;
+                String name = peer.optString("name", "");
+                if (name.isEmpty()) continue;
+                JSONObject node = new JSONObject();
+                try {
+                    node.put("name", name);
+                    node.put("url", peer.optString("url", ""));
+                    node.put("reachable", true);
+                    node.put("via", new JSONArray());
+                } catch (Exception ignored) {
+                }
+                networkNodes.add(node);
+            }
         }
         nodeAdapter.clear();
         for (JSONObject node : networkNodes) nodeAdapter.add(nodeLabel(node));
@@ -559,6 +605,7 @@ public class MainActivity extends Activity {
         for (JSONObject node : networkNodes) NodeState.nodes.put(node);
         NodeState.selectedNode = networkNodes.isEmpty() ? null : networkNodes.get(0);
         NodeState.selectedPeer = "";
+        updateNodeRow();
     }
 
     /** Hub-mode spinner: every enrolled node with its online state. */
@@ -572,6 +619,7 @@ public class MainActivity extends Activity {
         applyingNodes = false;
         lastDirectIndex = Math.max(0, index);
         nodeSpinner.setEnabled(!networkNodes.isEmpty());
+        updateNodeRow();
     }
 
     private void selectNode(int position) {
@@ -726,15 +774,23 @@ public class MainActivity extends Activity {
                     .append(" · dsh-link ").append(NodeState.nodeVersion());
         }
         if (NodeState.network != null) {
-            int total = NodeState.network.optInt("count", networkNodes.size());
+            JSONArray discovered = NodeState.network.optJSONArray("nodes");
+            int total = NodeState.network.optInt("count", discovered == null ? networkNodes.size() : discovered.length());
             int reachable = 0;
-            for (JSONObject node : networkNodes) if (node.optBoolean("reachable", false)) reachable++;
+            if (discovered != null) {
+                for (int i = 0; i < discovered.length(); i++) {
+                    JSONObject node = discovered.optJSONObject(i);
+                    if (node != null && node.optBoolean("reachable", false)) reachable++;
+                }
+            } else {
+                for (JSONObject node : networkNodes) if (node.optBoolean("reachable", false)) reachable++;
+            }
             summary.append(" · 网络 ").append(total).append(" 个节点 · ").append(reachable).append(" 可达");
         } else {
             summary.append(" · 该节点未提供网络扫描（需 0.7+）");
         }
         appendSecuritySummary(summary);
-        summaryView.setText(summary.toString());
+        setSummary(summary.toString());
 
         canSend = NodeState.canSend();
         if (!NodeState.canView()) {
@@ -765,7 +821,7 @@ public class MainActivity extends Activity {
         }
         if (NodeState.selectedNode != null) summary.append(" · 当前 ").append(NodeState.nodeLabel());
         appendSecuritySummary(summary);
-        summaryView.setText(summary.toString());
+        setSummary(summary.toString());
 
         canSend = NodeState.canSend();
         if (networkNodes.isEmpty()) {
@@ -808,6 +864,7 @@ public class MainActivity extends Activity {
         }
         status("已连接 · " + count + " 个工作区 · " + NodeState.nodeLabel()
                 + (canSend ? " · 可发送" : " · 只读"));
+        selectTab(0);
     }
 
     private static String nodeLabel(JSONObject node) {
@@ -851,8 +908,8 @@ public class MainActivity extends Activity {
                         + "（一次性引导码，首次连接自动换取证书，只发送公钥）；dshlink1: 是旧的"
                         + " device token 模式。两者都可能包含专用的 STCP 隧道凭据。"
                         + "导入后只保存在本机 App 私有目录。\n\n"
-                        + "0.6.2 起也可以用主界面的“扫描二维码（相机）”直接扫管理员屏幕上的"
-                        + "动态二维码，或者用“从文件导入”一次多选 frame-01.png … 截图。")
+                        + "0.6.2 起也可以在“连接”页用“扫描二维码（相机）”直接扫管理员屏幕上的"
+                        + "动态二维码，或者用“文件”一次多选 frame-01.png … 截图。")
                 .setView(box)
                 .setPositiveButton("导入", new DialogInterface.OnClickListener() {
                     @Override
@@ -1234,8 +1291,16 @@ public class MainActivity extends Activity {
         boolean certMode = PhoneIdentity.certMode(this);
         boolean hasCertificate = PhoneIdentity.hasCertificate(this);
         boolean hasProfile = !label.isEmpty() || certMode;
+        String savedUrl = prefs.getString(KEY_URL, "");
         if (!hasProfile) {
-            profileView.setVisibility(View.GONE);
+            if (NodeState.client != null) {
+                // Manual token connection: still tell the user what this phone is currently bound to.
+                profileView.setText("当前连接：" + NodeState.baseUrl
+                        + "\n安全模式：设备 token（Bearer） · 未导入连接配置");
+                profileView.setVisibility(View.VISIBLE);
+            } else {
+                profileView.setVisibility(View.GONE);
+            }
         } else {
             String entryName = prefs.getString(KEY_PROFILE_ENTRY_NAME, "");
             String entryKind = prefs.getString(KEY_PROFILE_ENTRY_KIND, "hub");
@@ -1275,6 +1340,22 @@ public class MainActivity extends Activity {
         if (clearProfileButton != null) {
             clearProfileButton.setVisibility(hasProfile ? View.VISIBLE : View.GONE);
         }
+        if (clearConnectionButton != null) {
+            boolean saved = NodeState.client != null || (!savedUrl.isEmpty() && !hasProfile);
+            clearConnectionButton.setVisibility(saved ? View.VISIBLE : View.GONE);
+        }
+        if (aboutView != null) {
+            aboutView.setText("dsh-link 控制端 " + ApiClient.APP_VERSION + "（Android）"
+                    + "\n连接方式：" + (certMode ? "每设备证书（mTLS，dshlink2）" : "设备 token（dshlink1）")
+                    + "\n节点/hub 的版本见“工作区”页顶部摘要。");
+        }
+    }
+
+    /** The node selector only makes sense when there is more than one controllable node. */
+    private void updateNodeRow() {
+        if (nodeRow == null) return;
+        boolean show = hubMode ? !networkNodes.isEmpty() : networkNodes.size() > 1;
+        nodeRow.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
     private void showImportError(String message) {
@@ -1439,6 +1520,42 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void confirmClearConnection() {
+        new AlertDialog.Builder(this)
+                .setTitle("清除连接")
+                .setMessage("将清除已保存的节点地址与 device token，并断开当前连接。"
+                        + "导入的连接配置与设备证书不受影响（用上面的按钮单独清除）。")
+                .setPositiveButton("清除", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        clearSavedConnection();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void clearSavedConnection() {
+        TunnelManager.stop();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .remove(KEY_URL).remove(KEY_TOKEN).remove(KEY_TUNNEL)
+                .apply();
+        NodeState.reset();
+        nodeAdapter.clear();
+        adapter.setItems(null);
+        urlInput.setText("http://127.0.0.1:8787");
+        urlInput.setEnabled(true);
+        tokenInput.setText("");
+        tunnelCheck.setChecked(false);
+        emptyView.setText("还没有连接。\n先去“连接”页导入连接串或扫描二维码。");
+        setSummary("");
+        warningView.setVisibility(View.GONE);
+        applySecurityModeUi();
+        updateProfileUi();
+        updateNodeRow();
+        status("已清除连接；填入地址与令牌后可重新连接");
+    }
+
     private void clearImportedProfile() {
         TunnelManager.stop();
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
@@ -1455,16 +1572,75 @@ public class MainActivity extends Activity {
         urlInput.setEnabled(true);
         tokenInput.setText("");
         tunnelCheck.setChecked(false);
-        emptyView.setText("导入连接串后连接中心服务器");
-        summaryView.setText("");
+        emptyView.setText("还没有连接。\n先去“连接”页导入连接串或扫描二维码。");
+        setSummary("");
         warningView.setVisibility(View.GONE);
         applySecurityModeUi();
         updateProfileUi();
         status("已清除导入配置；请向 hub 管理员索取新的连接串");
     }
 
+    /** Workspaces page and connect page show the same status line; keep them in sync. */
     private void status(String text) {
         statusView.setText(text);
+        if (connectStatusView != null) connectStatusView.setText(text);
+    }
+
+    private void setSummary(String text) {
+        summaryView.setText(text);
+        if (connectSummaryView != null) connectSummaryView.setText(text);
+    }
+
+    /**
+     * Three top-level areas (workspaces is the app's main body). On phones they are a bottom tab
+     * bar; on tablets/foldables widened past 600dp the layout-sw600dp variant turns the same ids
+     * into a left sidebar, so no activity code depends on the form factor.
+     */
+    private void setupTabs() {
+        View.OnClickListener listener = new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                int id = view.getId();
+                if (id == R.id.tab_workspaces) {
+                    selectTab(0);
+                } else if (id == R.id.tab_connect) {
+                    selectTab(1);
+                } else if (id == R.id.tab_settings) {
+                    selectTab(2);
+                }
+            }
+        };
+        tabWorkspaces.setOnClickListener(listener);
+        tabConnect.setOnClickListener(listener);
+        tabSettings.setOnClickListener(listener);
+        selectTab(0);
+        updateNodeRow();
+    }
+
+    private void selectTab(int tab) {
+        currentTab = tab;
+        pageWorkspaces.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
+        pageConnect.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
+        pageSettings.setVisibility(tab == 2 ? View.VISIBLE : View.GONE);
+        applyTabStyle(tabWorkspaces, tab == 0);
+        applyTabStyle(tabConnect, tab == 1);
+        applyTabStyle(tabSettings, tab == 2);
+    }
+
+    private void applyTabStyle(TextView tab, boolean selected) {
+        if (tab == null) return;
+        tab.setTextColor(selected ? 0xFF1E3A5F : 0xFF6B7280);
+        tab.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
+        tab.setBackgroundColor(selected ? 0xFFE8F0FA : 0x00000000);
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (currentTab != 0) {
+            selectTab(0);
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void setBusy(boolean value) {

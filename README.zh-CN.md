@@ -12,6 +12,9 @@
 - **随手交给别人（0.9）**：一个便携发行包带 CLI、文档、集成与安卓 APK（可选 frpc）；手机用一条**连接串**接入 hub——连接串自带 `device` 令牌，启用 FRP 时还内嵌 STCP 隧道与证书，APK 内不含任何密钥。
 - **一部手机一张证书（0.10）**：手机接入不再共享 hub 令牌和隧道凭据，改用一次性 `dshlink2:` 引导：连接串只 pin hub 的 phone CA 公钥和一次性 secret，手机本地生成密钥对、由 hub 签发客户端证书；手机只连 hub 回环上的 mutual-TLS 网关（8791），网关再注入 hub 令牌，隧道走独立的 phone-frps 租户。吊销一部手机是按证书指纹的独立操作，手机之间不共享秘密。见 [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md)。
 - **扫描二维码连接（0.11）**：连接串约 7 KB，既超单张二维码上限也不适合手抄。hub 控制台可把它显示成一组循环播放的二维码帧，手机 App 0.6.2+ 用相机连扫或选几张截图拼回完整连接串，再走与粘贴完全相同的校验与导入流程。见 [`docs/QR-CONNECT.md`](docs/QR-CONNECT.md)。
+- **像模像样的手机界面（0.11.1）**：安卓控制端改为 工作区 / 连接 / 设置 三个功能区（宽屏为左侧栏），
+  对话采用 DSH / DeepSeek 手机端样式（用户右侧气泡、思考默认折叠），并内置 Markdown 渲染
+  （表格、围栏代码块、行内代码、可点击链接）。见 [`docs/mobile/CONTROL-APP.md`](docs/mobile/CONTROL-APP.md)。
 - **hub 拓扑（0.8）**：一个独立的 `dshlink hub` 进程做中心，节点用一次性 enroll token 接入；消息/DSH 视图/能力调用/文件全部经 hub 中转，hub 带持久 outbox、心跳补发与去重，并自带 Web 控制台（`/ui`）。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 

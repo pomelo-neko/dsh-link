@@ -16,7 +16,7 @@
 | 发行物 | 路径 | 说明 |
 |---|---|---|
 | 通用发行包 | `dist/dsh-link-<version>-portable.zip` / `.tar.gz` | 节点 + hub + CLI + 文档 + 示例 + （可选）APK；零 npm 依赖 |
-| 手机控制端 APK | 包内 `apk/dshlink-control-<version>-debug.apk` | 0.5.0 起**不含任何密钥/证书/隧道配置**；0.6.0 起支持 `dshlink2:` 每设备证书引导（0.10 推荐）；0.6.2 起可扫码导入（0.11，见 [QR-CONNECT.md](QR-CONNECT.md)） |
+| 手机控制端 APK | 包内 `apk/dshlink-control-<version>-debug.apk` | 0.5.0 起**不含任何密钥/证书/隧道配置**；0.6.0 起支持 `dshlink2:` 每设备证书引导（0.10 推荐）；0.6.2 起可扫码导入（0.11，见 [QR-CONNECT.md](QR-CONNECT.md)）；0.7.0 起界面分为工作区/连接/设置三个功能区并内置 Markdown 渲染 |
 | 完整性清单 | 包内 `SHA256SUMS.txt`、`dist/SHA256SUMS.txt` | 逐个文件校验；下载后先验再装 |
 
 发行包**不含** frps 服务端，也不含任何真实 token。`vendor/frp/` 里只有 frp **客户端**（`frpc`），
@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-bundle.ps1
 
 ```powershell
 # 指定某个 APK（发布时推荐，避免误带本地调试包）
-powershell -File scripts/build-bundle.ps1 -Apk android/dist/dshlink-control-0.5.0-debug.apk
+powershell -File scripts/build-bundle.ps1 -Apk android/dist/dshlink-control-0.7.0-debug.apk
 
 # 不打包 APK（只发节点/服务端）
 powershell -File scripts/build-bundle.ps1 -NoApk

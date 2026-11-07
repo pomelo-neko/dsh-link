@@ -5,7 +5,7 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 模式），把入口背后的 DSH 工作区/会话/transcript 显示在手机上，并通过能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.6.2`（versionCode 9），minSdk 26，targetSdk 36
+- 包名：`dev.dshlink.control`，版本 `0.7.0`（versionCode 10），minSdk 26，targetSdk 36
 - 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX**；唯一第三方库是 vendored 的
   ZXing core 3.5.3（Apache-2.0，仅用于解码二维码，见 §1.4 与 §3.1）
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
@@ -29,6 +29,10 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
   （帧文本 `dshlinkqr:<index>/<total>:<chunk>`，默认 chunk 900、最多 32 帧）；App 新增
   「扫描二维码（相机）」连续扫描，以及「从文件导入」一次多选多张二维码图片离屏拼装。
   拼齐后仍走既有 ConnectProfile 校验与导入/连接流程，不绕过任何校验（见 §1.4）。
+- 0.7.0：**界面重做**为 工作区 / 连接 / 设置 三个功能区（窄屏底部 tab，≥600dp 左侧栏），
+  工作区列表与对话回归应用主体；对话样式对齐 DSH / DeepSeek 手机端（用户右侧气泡、reasoning
+  默认折叠），并**内置 Markdown 渲染**（标题/列表/表格/围栏代码/行内代码/可点击链接）；修正
+  已 enroll 节点被显示成 hub 名的身份问题；设置页可查看当前连接并一键清除（见 §1.5）。
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -229,6 +233,27 @@ index 从 1 开始，chunk 默认 900 字符（可配 200..2400），最多 32 �
 - **凭据边界**：二维码内容 = 完整连接串 = 凭据。hub 控制台只对 admin 展示、默认 TTL 2 小时；
   拿到二维码的人在有效期内都能接入，扫完请尽快兑换（dshlink2 引导码一次性）。
 
+### 1.5 界面布局与 Markdown（0.7.0）
+
+0.7.0 把单页界面拆成三个功能区（窄屏为底部 tab；窗口宽度 ≥600dp 时 `res/layout-sw600dp/` 把同一组 id 排成左侧栏，折叠屏展开/平板会命中）：
+
+| 区域 | 内容 |
+|---|---|
+| 工作区（默认，主体） | 状态/摘要 + 刷新、控制节点下拉（可直控节点 >1 时）、工作区列表；空态提示去“连接”页 |
+| 连接 | 导入（粘贴/文件/扫描二维码）、手动 URL + token、STCP 中转勾选、连接按钮、连接状态 |
+| 设置 | 当前连接摘要或已导入的 profile、重置设备证书 / 清除导入配置 / 清除连接、关于与安全提示 |
+
+- 连接成功后自动切回“工作区”；切 tab 只改可见性，不重建列表或会话状态。
+- 对话样式对齐 DSH / DeepSeek 手机端：用户消息右侧浅蓝气泡，助手整宽；reasoning 默认折叠成
+  “思考 · 时间 · 预览”，工具调用/结果仍按组折叠（默认一行，点开看完整 JSON 与工具名）。
+- 内置 Markdown 渲染（`Markdown.java` 纯 Java 解析，`ChatMarkdown.java` 转 Spannable）：标题、粗体/斜体/删除线、
+  行内代码、围栏代码块、有序/无序列表、引用、表格（列宽按 CJK 宽度对齐）、`[text](url)` 可点击链接；
+  表格单元格内的行内标记同样渲染，不再显示裸 ** 号或反引号。
+- 节点身份修正：已 enroll 到 hub 的节点，`/api/v1/network/nodes` 返回的是 hub 视角（self 是 hub），App 改用
+  `/api/v1/info` 合成“本机”节点并追加直连 peer，避免把 hub 名当成被控节点名。
+- transcript 的 `time`（epoch 毫秒）用于消息时间；词内下划线（如 `PHONE_FRPS_OK`）按 CommonMark
+  当作字面量，不再被误解析成斜体。
+
 ## 2. 节点侧准备
 
 ### 2.1 打开 DSH 视图与能力通道（配置文件，改完无需重启节点）
@@ -425,15 +450,15 @@ aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 产物：
 
 ```text
-android/dist/dshlink-control-0.6.2-debug.apk     # debug 签名（默认）
-android/dist/dshlink-control-0.6.2.apk           # -Release 签名（见 3.3）
+android/dist/dshlink-control-0.7.0-debug.apk     # debug 签名（默认）
+android/dist/dshlink-control-0.7.0.apk           # -Release 签名（见 3.3）
 android/dist/SHA256SUMS                          # 每次构建后对 dist/*.apk 全量重写
 ```
 
-`build-apk.ps1` 默认 `-VersionName "0.6.2" -VersionCode 9`（与 `ApiClient.APP_VERSION` 一致，
+`build-apk.ps1` 默认 `-VersionName "0.7.0" -VersionCode 10`（与 `ApiClient.APP_VERSION` 一致，
 发版时两处一起改）。
 
-APK 内容（0.6.2 通用构建）：
+APK 内容（0.7.0 通用构建）：
 
 - `lib/x86_64/libfrpc.so`、`lib/arm64-v8a/libfrpc.so`：模拟器/真机可执行的 frpc。源码是
   frp v0.71.0 的 Linux 二进制（x86_64 来自本机 frp-stcp-base，arm64 来自
@@ -466,7 +491,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
   -KeyAlias dshlink -KeyPassword <密码>
 ```
 
-- 输出 `android/dist/dshlink-control-0.6.2.apk`（release 不带 `-debug` 后缀）；
+- 输出 `android/dist/dshlink-control-0.7.0.apk`（release 不带 `-debug` 后缀）；
 - `-KeyPassword` 省略时用 `-KeystorePassword`；`-KeyAlias` 省略时用 keystore 里的别名；
 - 结尾会 `apksigner verify --print-certs`，打印 size / SHA-256，并把 `dist/*.apk` 的 SHA-256
   全量重写到 `dist/SHA256SUMS`（格式 `<大写 SHA-256>  <文件名>`）；把 APK 和校验值一起发给用户；
@@ -476,7 +501,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
 ### 3.4 安装
 
 ```powershell
-D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6.2-debug.apk
+D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.7.0-debug.apk
 ```
 
 或者把（`-Release` 或 debug）APK 传到手机点击安装（需允许“安装未知来源应用”）。
@@ -488,6 +513,8 @@ D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6
 “分享/用其他应用打开”给 App（`text/plain`）；导入成功后 App 自动填写并连接（见 1.2/1.3）。
 0.6.2 起还支持二维码：点“扫描二维码（相机）”对准 hub 控制台的动态二维码，或点“从文件导入”
 一次多选多张二维码截图（`frame-01.png…`），扫齐多帧后走同一套导入校验（见 1.4）。
+**（0.7.0 起）界面分三个区域**：底部 tab（宽屏为左侧栏）切换 工作区 / 连接 / 设置；工作区是默认主体，
+连接页负责导入与手动连接，设置页查看/清除当前连接与设备证书。连接成功后自动回到工作区。
 下面是手工填写的等价流程。
 
 1. 打开 App，填入口地址 + token，点“连接”。入口可以是：
@@ -636,7 +663,7 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 ## 7. 验证
 
 - 构建：`android/build-apk.ps1` 退出码 0；`aapt2 dump badging` 显示
-  `package dev.dshlink.control`、`versionName 0.6.2`/`versionCode 9`、`minSdk 26`、
+  `package dev.dshlink.control`、`versionName 0.7.0`/`versionCode 10`、`minSdk 26`、
   `targetSdk 36`、`native-code arm64-v8a x86_64`。
 - `apksigner verify --print-certs` 通过。
 - API 契约（本机 node:test，`DSH_HOME` 指向真实 DSH 时运行）：
@@ -901,5 +928,29 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     未重新消耗引导码；相机解码节流为 150 ms（`DECODE_INTERVAL_MS`）。
   - 已知未验证：真机 arm64 的相机解码路径、真实屏幕多帧扫码、极低分辨率/严重畸变截图。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.2（versionCode 9），与节点/CLI 独立演进
-> （当前仓库/节点 0.10.1，hub 0.10.1；hub 直连 + dshlink2 每设备证书是主推入口）。
+- 0.7.0 界面重做 / Markdown 冒烟（2026-11-07，Android 16 / API 36 x86_64 模拟器 `emulator-5554`；
+  真实节点 dsh-link 0.11.0 `/api/v1/info` + device token `ui-070-test`，验证后已吊销）：
+  - **APK（通用构建，无 `assets/tunnel/`）**：`dshlink-control-0.7.0-debug.apk` 12,301,450 bytes，
+    SHA-256 `48764E9E9C87D2559303C555A06839D85F1D94DCF82809FC042EFF86F7565512`；
+    `aapt2 dump badging` → versionCode 10 / versionName 0.7.0 / minSdk 26 / targetSdk 36 /
+    native-code arm64-v8a x86_64；permissions `INTERNET` + `CAMERA`；`unzip -l` 16 个条目，
+    无任何 `assets/`、无隧道凭据；`apksigner verify` 通过（debug 证书）。
+  - **界面**：底部 tab 工作区（默认）/连接/设置；宽屏 `wm size 1600x2560`（density 420 → 609dp，
+    命中 `layout-sw600dp`）自动切换为左侧栏，内容区显示工作区列表。连接成功后自动回到工作区。
+  - **工作区/会话**：状态“已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送”，控制节点显示本机
+    `DESKTOP-NODE-A`（修复 hub-enrolled 节点误显示 hub 名）；会话列表“共 14 个会话（9 个
+    子智能体）”；进入会话前台每 2.5s 增量刷新，加载更早可用（顶部行 `#829` → `#282`）。
+  - **Markdown**：标题、表格（列对齐）、表格单元格内行内代码/链接、围栏代码块（灰底等宽）、行内
+    代码、`[text](url)` 可点击；`PHONE_FRPS_OK` 保留字面下划线；assistant 头部时间由 epoch `time`
+    渲染为 `HH:mm`。reasoning 默认折叠、可展开（“思考 · 时间 · 预览”）；工具调用/结果按组折叠、
+    展开显示完整 JSON。
+  - **设置页**：显示当前连接与安全模式；“清除连接（地址与令牌）”确认后清空会话、地址与令牌，随后
+    手动重连成功。
+  - **发送 e2e（steer）**：在 `[phone-e2e] 短回复`（session-1aa41492-8bb7-48b1-9ed9-ce4b5e6f3f5a）
+    勾选插话发送 “UI070 probe: reply exactly UI070_OK”，transcript 33 → 37 条，assistant 回
+    `UI070_OK`。
+  - **证据**：本地留存 `android/dist/selftest-0.7.0/`（9 张截图，git-ignored）；截图另复制到
+    `docs/mobile/screenshots/`（该目录 git-ignored）。
+  - 已知未验证：真机 arm64 的 UI 与相机扫码、折叠屏内屏实际表现（仅用 `wm size` 模拟 ≥600dp）。
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.7.0（versionCode 10），与节点/CLI 独立演进
+> （当前仓库/节点 0.11.1，hub 0.11.1；hub 直连 + dshlink2 每设备证书是主推入口）。
