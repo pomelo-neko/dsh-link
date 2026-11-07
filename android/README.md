@@ -566,11 +566,11 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 - **重装/换机**：deviceId 与私钥都在 App 数据里，卸载或“清除数据”后会生成新的 deviceId
   （旧记录留在 hub 设备列表里，可吊销/清理）；重新导入引导码会按新设备注册。
 - **dshlink2 的隧道**：0.6.0 已支持 dshlink2 的 `tunnel` 字段（结构同 dshlink1，手机侧照旧用
-  内置 frpc + visitor）；但本版只在“无隧道直连 + adb reverse”路径上做了模拟器端到端验证，
-  真实 STCP 公网隧道 + 每设备证书的组合尚未实测。
-- **服务端热加载（0.10.0 实测）**：`hub serve` 启动后，用 CLI 在另一个进程里
-  `dshlink hub phone revoke` / 新建 token 不会热加载，需要重启 hub（或从 hub Web 控制台操作）
-  才生效；这是 hub 侧行为，App 会如实显示服务端返回的结果。
+  内置 frpc + visitor）。0.6.1 起已在“真实公网 phone-frps（STCP）+ 每设备证书”组合上完成
+  模拟器端到端验证（见 §7 末尾 0.6.1 冒烟）；真机 arm64 的 mTLS 路径仍待实测。
+- **服务端热加载（0.10.1 起）**：`hub serve` 每次鉴权前会检查配置/令牌文件与 `phones.json`
+  的 mtime/size，另一个进程里的 `dshlink hub phone revoke`、控制台或 CLI 新建令牌会立即生效，
+  不需要重启 hub（0.10.0 及更早才需要重启）。App 会如实显示服务端返回的结果。
 - **到期时间仅提示**：`expiresAt` 只用于展示和警告（过期仍可导入/连接，是否拒绝由 hub/节点的
   token 校验决定）；真正吊销要走 `dshlink hub token rm --id <tokenId>`。
 - **hub 模式**：只能看到 hub 登记表里的节点；节点离线时只显示状态、不能读取/发送；hub 未提供
@@ -589,7 +589,7 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
 ## 7. 验证
 
 - 构建：`android/build-apk.ps1` 退出码 0；`aapt2 dump badging` 显示
-  `package dev.dshlink.control`、`versionName 0.4.0`/`versionCode 5`、`minSdk 26`、
+  `package dev.dshlink.control`、`versionName 0.6.1`/`versionCode 8`、`minSdk 26`、
   `targetSdk 36`、`native-code arm64-v8a x86_64`。
 - `apksigner verify --print-certs` 通过。
 - API 契约（本机 node:test，`DSH_HOME` 指向真实 DSH 时运行）：
@@ -810,6 +810,13 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     对 node gateway / 8788 token gateway / mTLS phone gateway 三种监听都成立。
   - 截图仅本地留存（`test/.tmp/phone-frps-reply-clean.png`、`phone-frps-main.png`，含真实
     主机名/证书指纹，不入库）。
+  - **0.10.1 升级后复测（2026-11-07 16:50）**：hub 重启为 0.10.1、phone-frps 自动重连
+    （frpc run id `929b5e83c3ba2edc`，login success / visitor added），App 重新点“连接”恢复
+    “已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送”与 hub 0.10.1 summary。随后用
+    0.10.1 现签的真机连接串（label `real-phone-2026-11-07`，24 h，含隧道）在独立 visitor
+    （bindPort 18791）上验证：`https://127.0.0.1:18791/healthz` 用码内 gateway CA 校验通过，
+    返回 `{ok:true, name:DESKTOP-HUB-A, role:phone-gateway, version:0.10.1}`；
+    该码已交付用户文件 `C:/Users/example/phone-invite-v2-real-2026-11-07T08-51-31-296Z.txt`。
   - 未验证：安卓真机 arm64（frpc 二进制与 0.2.0 相同）、证书自然过期场景。
 
 > 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.1（versionCode 8），与节点/CLI 独立演进
