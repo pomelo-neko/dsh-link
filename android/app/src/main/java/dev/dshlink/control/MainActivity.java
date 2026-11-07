@@ -3,6 +3,7 @@ package dev.dshlink.control;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -34,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -58,6 +60,7 @@ public class MainActivity extends Activity {
     private static final String KEY_PROFILE_EXPIRES_AT = "profile.expiresAt";
     private static final String KEY_PROFILE_HAS_TUNNEL = "profile.hasTunnel";
     private static final int REQUEST_OPEN_PROFILE = 1001;
+    private static final int REQUEST_SCAN_QR = 1002;
 
     private EditText urlInput;
     private EditText tokenInput;
@@ -67,6 +70,7 @@ public class MainActivity extends Activity {
     private Button refreshButton;
     private Button importButton;
     private Button importFileButton;
+    private Button scanButton;
     private TextView statusView;
     private TextView summaryView;
     private TextView warningView;
@@ -154,6 +158,7 @@ public class MainActivity extends Activity {
 
         importButton = findViewById(R.id.import_button);
         importFileButton = findViewById(R.id.import_file_button);
+        scanButton = findViewById(R.id.scan_button);
         importButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -164,6 +169,12 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View view) {
                 pickProfileFile();
+            }
+        });
+        scanButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                startQrScan();
             }
         });
         resetCertButton.setOnClickListener(new View.OnClickListener() {
@@ -839,7 +850,9 @@ public class MainActivity extends Activity {
                 .setMessage("连接串和配置文件由 hub 管理员生成。dshlink2: 是 0.6.0 的每设备证书模式"
                         + "（一次性引导码，首次连接自动换取证书，只发送公钥）；dshlink1: 是旧的"
                         + " device token 模式。两者都可能包含专用的 STCP 隧道凭据。"
-                        + "导入后只保存在本机 App 私有目录。")
+                        + "导入后只保存在本机 App 私有目录。\n\n"
+                        + "0.6.2 起也可以用主界面的“扫描二维码（相机）”直接扫管理员屏幕上的"
+                        + "动态二维码，或者用“从文件导入”一次多选 frame-01.png … 截图。")
                 .setView(box)
                 .setPositiveButton("导入", new DialogInterface.OnClickListener() {
                     @Override
@@ -847,7 +860,7 @@ public class MainActivity extends Activity {
                         importText(input.getText().toString(), "粘贴的连接串");
                     }
                 })
-                .setNeutralButton("从文件选择", new DialogInterface.OnClickListener() {
+                .setNeutralButton("从文件/图片选择", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         pickProfileFile();
@@ -857,13 +870,18 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** Opens the system document picker for a .txt/.json/.dshlink profile file. */
+    /**
+     * Opens the system document picker for .txt/.json/.dshlink profiles and (0.6.2) QR-code
+     * images; several frame images can be selected at once.
+     */
     private void pickProfileFile() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES,
-                new String[]{"text/plain", "application/json", "application/octet-stream"});
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"text/plain", "application/json",
+                "application/octet-stream", "image/png", "image/jpeg", "image/webp", "image/gif",
+                "image/bmp"});
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         try {
             startActivityForResult(intent, REQUEST_OPEN_PROFILE);
         } catch (ActivityNotFoundException err) {
@@ -871,13 +889,199 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 0.6.2: opens the camera QR scanner; the assembled code comes back via EXTRA_CODE. */
+    private void startQrScan() {
+        try {
+            startActivityForResult(new Intent(this, ScanActivity.class), REQUEST_SCAN_QR);
+        } catch (RuntimeException err) {
+            Ui.toast(this, "无法打开相机扫描界面");
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_OPEN_PROFILE || resultCode != RESULT_OK) return;
-        if (data == null || data.getData() == null) return;
-        Uri uri = data.getData();
-        importUri(uri, "文件 " + displayName(uri));
+        if (resultCode != RESULT_OK) return;
+        if (requestCode == REQUEST_SCAN_QR) {
+            String code = data == null ? null : data.getStringExtra(ScanActivity.EXTRA_CODE);
+            if (code != null && !code.trim().isEmpty()) {
+                importText(code, "扫描的二维码");
+            } else {
+                status("扫描已取消");
+            }
+            return;
+        }
+        if (requestCode != REQUEST_OPEN_PROFILE) return;
+        importSelection(data);
+    }
+
+    /**
+     * 0.6.2: the document picker accepts several files now. A single text file keeps the old
+     * profile flow; picked images are decoded as QR frames and assembled into one connect code.
+     */
+    private void importSelection(Intent data) {
+        if (data == null) return;
+        List<Uri> uris = new ArrayList<>();
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri uri = clip.getItemAt(i).getUri();
+                if (uri != null && !uris.contains(uri)) uris.add(uri);
+            }
+        }
+        Uri single = data.getData();
+        if (single != null && !uris.contains(single)) uris.add(single);
+        if (uris.isEmpty()) {
+            status("没有选择文件");
+            return;
+        }
+        if (uris.size() == 1 && !isImageUri(uris.get(0))) {
+            Uri uri = uris.get(0);
+            importUri(uri, "文件 " + displayName(uri));
+            return;
+        }
+        importQrImages(uris);
+    }
+
+    /** Decodes the dshlink QR codes in the picked images and assembles them into one code. */
+    private void importQrImages(final List<Uri> uris) {
+        status("正在识别 " + uris.size() + " 个文件里的二维码…");
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                final QrAssembler assembler = new QrAssembler();
+                final List<String> profileTexts = new ArrayList<>();
+                final List<String> profileSources = new ArrayList<>();
+                String directCode = null;
+                int imageCount = 0;
+                int readFailures = 0;
+                int unrecognized = 0;
+                String firstFailure = null;
+                for (int i = 0; i < uris.size(); i++) {
+                    Uri uri = uris.get(i);
+                    String name = displayName(uri);
+                    if (isImageUri(uri)) {
+                        imageCount++;
+                        final int progress = imageCount;
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                status("正在识别二维码图片 " + progress + "…");
+                            }
+                        });
+                        try {
+                            List<String> texts = QrImages.decodeAll(getApplicationContext(), uri);
+                            for (String text : texts) {
+                                String trimmed = text == null ? "" : text.trim();
+                                if (trimmed.isEmpty()) continue;
+                                if (QrAssembler.isFrame(trimmed)) {
+                                    assembler.feed(trimmed);
+                                } else if (directCode == null && looksLikeConnectCode(trimmed)) {
+                                    directCode = trimmed;
+                                } else {
+                                    unrecognized++;
+                                }
+                            }
+                        } catch (IOException err) {
+                            readFailures++;
+                            if (firstFailure == null) firstFailure = name + "：" + describeIo(err);
+                        }
+                        continue;
+                    }
+                    // A text file may be a config profile; anything parseable is kept as candidate.
+                    try {
+                        String content = readTextUri(uri);
+                        if (content != null && !content.trim().isEmpty()) {
+                            profileTexts.add(content);
+                            profileSources.add(name);
+                        }
+                    } catch (IOException err) {
+                        readFailures++;
+                        if (firstFailure == null) firstFailure = name + "：" + describeIo(err);
+                    }
+                }
+
+                final String assembled = directCode != null ? directCode
+                        : (assembler.isComplete() ? assembler.code() : null);
+                final String assembledSource = directCode != null
+                        ? "二维码图片（单张完整连接串）"
+                        : "二维码图片（" + assembler.total() + " 帧）";
+                final int partialReceived = assembler.received();
+                final int partialTotal = assembler.total();
+                final boolean hasImage = imageCount > 0;
+                final int failures = readFailures;
+                final String failure = firstFailure;
+                final int junk = unrecognized;
+                final List<String> texts = profileTexts;
+                final List<String> sources = profileSources;
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (assembled != null) {
+                            importText(assembled, assembledSource);
+                            return;
+                        }
+                        if (!texts.isEmpty()) {
+                            importText(texts.get(0), "文件 " + sources.get(0));
+                            return;
+                        }
+                        status("导入失败");
+                        if (partialTotal > 0) {
+                            showQrImportError("只识别到 " + partialReceived + "/" + partialTotal
+                                    + " 帧，连接串不完整。请把全部二维码截图一起选中"
+                                    + "（frame-01.png … frame-"
+                                    + String.format(Locale.ROOT, "%02d", partialTotal)
+                                    + ".png），或改用相机扫描。");
+                        } else if (hasImage && failures > 0) {
+                            showQrImportError("所选图片读取/识别失败：" + failure);
+                        } else if (hasImage && junk > 0) {
+                            showQrImportError("识别到二维码，但内容不是 dsh-link 连接码。");
+                        } else if (hasImage) {
+                            showQrImportError("所选图片里没有识别到二维码。");
+                        } else {
+                            showImportError("所选文件里既没有连接配置，也没有可识别的二维码图片。");
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /** dshlink 连接串/JSON 配置判断，与 ConnectProfile 接受的前缀一致。 */
+    private static boolean looksLikeConnectCode(String text) {
+        return text.startsWith(ConnectProfile.PREFIX)
+                || text.startsWith(ConnectProfile.PREFIX_V2)
+                || text.startsWith("{");
+    }
+
+    /** True when the Uri should be decoded as a QR image (MIME type first, then extension). */
+    private boolean isImageUri(Uri uri) {
+        String type = null;
+        try {
+            type = getContentResolver().getType(uri);
+        } catch (RuntimeException ignored) {
+            // Some providers throw; fall back to the display name.
+        }
+        if (type != null) return type.startsWith("image/");
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
+                || name.endsWith(".webp") || name.endsWith(".gif") || name.endsWith(".bmp");
+    }
+
+    private static String describeIo(IOException err) {
+        return err.getMessage() == null ? "未知错误" : err.getMessage();
+    }
+
+    /** 二维码图片导入专用错误提示（与配置文件导入的错误提示区分）。 */
+    private void showQrImportError(String message) {
+        new AlertDialog.Builder(this)
+                .setTitle("二维码导入失败")
+                .setMessage(message + "\n\n建议：\n"
+                        + "· 相机扫描：对准管理员屏幕上的动态二维码，等它循环到全部帧；\n"
+                        + "· 图片导入：把 frame-01.png … frame-08.png 一起多选后导入；\n"
+                        + "· 二维码内容就是连接凭据，请让 hub 管理员现场展示。")
+                .setPositiveButton("知道了", null)
+                .show();
     }
 
     /** Reads a profile/document Uri off the UI thread and hands the text to importText. */

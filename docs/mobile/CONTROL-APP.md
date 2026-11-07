@@ -1,6 +1,6 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.6.1** (shipped with the dsh-link 0.10.1 tree; the app is versioned
+Status: **implemented, v0.6.2** (shipped with the dsh-link 0.11.0 tree; the app is versioned
 independently from the node). v0.6.0 adds the **`dshlink2:` per-device mTLS path**: the connect code
 carries the phone gateway CA and a one-time bootstrap secret instead of a device token; the app
 generates a keypair locally (AndroidKeyStore, with a software-key fallback), exchanges only its public
@@ -20,7 +20,14 @@ gateway alike. Verified end-to-end on the API 36 emulator through a real Aliyun-
 emulator → STCP visitor 18790 → phone-frps (VPS) → hub provider → phone gateway `https://127.0.0.1:8791`
 → hub → node → DSH Session, including sending `phone-frps e2e probe: reply exactly PHONE_FRPS_OK`
 and receiving `PHONE_FRPS_OK` in the transcript (2026-11-07; evidence in `android/README.md` §7).
-v0.5.0 made the APK **safe to hand out**: a phone joins with a
+v0.6.2 adds **QR handoff**: a connect code of any length is split into `dshlinkqr:<i>/<n>:<chunk>`
+frames by the hub console (or `scripts/qrgen.mjs`) and shown as a looping animated QR; the app can
+scan it with the camera (frames accumulate across the loop) or import a multi-selection of frame
+screenshots at once. Frames may arrive out of order and repeats are ignored; the assembled text is
+validated by the same `ConnectProfile` parser as a pasted code, so `dshlink1:` and `dshlink2:` are
+both accepted. Decoding uses vendored ZXing and retries four rotations × three hint modes, because
+the detector can fail on perfectly valid symbols for some payload/mask combinations (see
+[`../QR-CONNECT.md`](../QR-CONNECT.md)). v0.5.0 made the APK **safe to hand out**: a phone joins with a
 `dshlink1:` connect code that carries the entry URL, its own `device` token and (when the hub has
 FRP) the rendered STCP visitor profile + client certificate, so no tunnel template or credential is
 baked into the APK. v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 made the
@@ -400,6 +407,38 @@ template:
   there (expected).
 - Screenshots (not committed, they show real names): `test/.tmp/hub-main-2.png`,
   `test/.tmp/hub-sessions-2.png`, `test/.tmp/hub-transcript-bottom.png`.
+
+0.6.2 QR import (2026-11-07, dsh-link 0.11.0 tree, Android 16 / API 36 x86_64 emulator, local
+0.10.1 hub with a `dshlink2:` mTLS phone gateway on port 18790):
+
+1. **Build**: `dshlink-control-0.6.2-debug.apk` 12,284,757 bytes, SHA-256
+   `F1FC4B3737E3D186E11B50D9C0792C83D13C54B2DAA9ED82F04FC52CBB9CCC55`; `versionCode 9`,
+   `versionName 0.6.2`, `minSdk 26`/`targetSdk 36`, `INTERNET` + `CAMERA` permissions,
+   `uses-feature-not-required` for `camera`/`camera.any`. The generic build has **no `assets/`
+   entries** (no tunnel template or credential) and folds vendored ZXing into `classes.dex`.
+2. **Decoder unit smokes** (desktop JDK 17 against `vendor/zxing/zxing-core-3.5.3.jar`):
+   `QrAssembler` 38/38 (out-of-order/duplicate frames, total-mismatch reset, same-index-different-
+   content reset, non-frame text, >32 frames, 100k-char cap); `QrImages` 31/31 — all 8 frames of a
+   real 7,171-char `dshlink2:` code decode and reassemble byte-exactly, including inverted and 50%
+   scaled images and camera Y-plane frames; frame 06 only decodes through the retry chain
+   (4 rotations × plain / `TRY_HARDER` / `TRY_HARDER+PURE_BARCODE`), so the retry is proven, not
+   just present. Noise returns null.
+3. **Emulator image import e2e**: 8 frame PNGs were `adb push`ed (plus a per-file media-scan
+   broadcast so DocumentsUI sees them), multi-selected in the picker, and assembled. The import
+   dialog showed the expected code label, entry `https://127.0.0.1:18790`, security mode
+   "每设备证书（mTLS，一次性引导）", CA fingerprint, bootstrap/expiry/tunnel fields and the source
+   "二维码图片（8 帧）". "开始连接" performed the one-time bootstrap, obtained a client certificate
+   (valid to 2027-11-07), and reached "已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送" with
+   hub 0.10.1 / 1 node / mTLS; the dsh-link workspace read "共 13 个会话（8 个子智能体）". This
+   consumed the fixture's one-time bootstrap (test label `android-qr-e2e`, not a user credential).
+4. **Camera smoke**: with CAMERA revoked the scanner shows the system prompt; denying it shows an
+   actionable "无法使用相机" dialog (settings / back) with no crash and no process restart. Granting
+   opens `ScanActivity`, `logcat` shows `CameraService: Start camera streaming`; going back shows
+   `Stop camera streaming` / `Disconnected client for camera 1`, again without a crash.
+5. **Not verified**: real arm64-device camera decoding and a real on-screen multi-frame scan
+   (the emulator's virtual camera has no QR scene); extreme low-resolution or heavily distorted
+   photos may still fail. The final APK was reinstalled and reconnected from the stored profile
+   without spending another bootstrap code.
 
 The node test suite at this release: `node test/run.mjs` — see the root README for the current
 count (frp/MCP tests skip automatically when their binaries/SDK are missing).

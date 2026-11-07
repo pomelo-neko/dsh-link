@@ -731,6 +731,35 @@ test('hub: web console serves the UI and its admin APIs', async () => {
     assert.equal(noCa.status, 503);
     assert.equal(noCa.json.error.code, 'phone_ca_unavailable');
 
+    // QR helper: the console can render any connect code as animated multi-frame QR codes.
+    assert.match(page.text, /id="qrModal"/);
+    assert.match(page.text, /id="pvQr"/);
+    assert.match(page.text, /id="phoneQr"/);
+    const qrCode = 'dshlink1:' + 'a'.repeat(1200);
+    const qr = await httpJson(hub.url + '/api/v1/hub/phone/qr', {
+      method: 'POST', token: hub.adminToken, body: { code: qrCode }
+    });
+    assert.equal(qr.status, 200);
+    assert.equal(qr.json.codeBytes, qrCode.length);
+    assert.ok(qr.json.total >= 2, 'long codes need multiple frames, got ' + qr.json.total);
+    assert.equal(qr.json.frames.length, qr.json.total);
+    for (const frame of qr.json.frames) {
+      assert.equal(frame.total, qr.json.total);
+      assert.equal(typeof frame.rows, 'object');
+      assert.equal(frame.rows.length, frame.size);
+      assert.equal(frame.rows[0].length, frame.size);
+      assert.ok(frame.payload.length > 0);
+    }
+    const qrAsDevice = await httpJson(hub.url + '/api/v1/hub/phone/qr', {
+      method: 'POST', token: hub.deviceToken, body: { code: qrCode }
+    });
+    assert.equal(qrAsDevice.status, 403);
+    const qrBad = await httpJson(hub.url + '/api/v1/hub/phone/qr', {
+      method: 'POST', token: hub.adminToken, body: { code: 'not-a-connect-code' }
+    });
+    assert.equal(qrBad.status, 400);
+    assert.match(qrBad.json.error.message, /dshlink1:/);
+
     // Token listing: metadata only, never the secret or its hash.
     const listed = await httpJson(hub.url + '/api/v1/hub/tokens', { token: hub.adminToken });
     assert.equal(listed.status, 200);

@@ -1,4 +1,4 @@
-# Hub Web 控制台（0.8 起，0.10 加手机证书）
+# Hub Web 控制台（0.8 起，0.10 加手机证书，0.11 加二维码）
 
 > 适用：dsh-link **hub 进程**（`dshlink hub serve`）。节点（8787）和网关（8788）没有这个页面。
 > 相关：[HUB-TOPOLOGY-DESIGN.md](HUB-TOPOLOGY-DESIGN.md)（拓扑设计）、[GATEWAY.md](GATEWAY.md)（节点网关）、[OPERATIONS.md](OPERATIONS.md)（常驻与巡检）。
@@ -12,6 +12,7 @@
 - 查看并处理**缓存区**（hub outbox）：立即重投、单条重投、丢弃；
 - 管理**其他 hub 设置**：重试间隔、消息 TTL、每目标队列上限、准入策略与文件上限等（写回 hub 配置文件，多数立即生效）。
 - （0.10）签发 / 吊销**每设备 mTLS 手机证书**与一次性引导码，并查看 phone gateway / phone frps 状态（§3.6）。
+- （0.11）把连接串显示成**多帧二维码**，供手机 App 0.6.2+ 扫描或截图导入（§3.7）。
 
 实现是零依赖的单个 HTML 文件（`src/hubui.mjs`），由 hub 进程在 `/ui` 直接吐出；页面本身不含任何秘密，所有数据都通过同源 `/api/v1/hub/*` 拉取，每个请求都要求 **admin** 令牌——hub 从不像节点那样信任回环地址。
 
@@ -38,6 +39,7 @@ http://<hub 地址>:<hub 端口>/          # 302 -> /ui（方便记地址）
 | 接入令牌 | 标签、角色、绑定节点、过期时间、最大次数、已用次数 | 生成 enroll/admin/device/peer 令牌（明文只显示一次，可复制）、吊销 |
 | 手机证书（0.10） | phone gateway 地址/CA 指纹/注入令牌状态、phone frps 状态、手机证书表、引导码表 | 生成一次性 `dshlink2:` 引导码（可下载）、吊销手机证书 / 作废引导码 |
 | 手机接入（旧版 dshlink1） | 标签、有效期、最近一次生成的连接串（可复制/下载） | 生成旧版连接串（device 令牌 + 可选内嵌 STCP 隧道与证书） |
+| 二维码（0.11） | 覆盖层 canvas 循环显示生成好的连接串帧（i/N） | 把 `dshlink2:`/`dshlink1:` 连接串显示成多帧二维码，供手机扫描导入 |
 | 缓存区（outbox） | 每条待下发消息 id、时间、方向、目标、主题、投递状态/错误 | 「只看待投递」过滤、立即重投整队、单条重投、丢弃（标记 dropped，不物理删除） |
 | 运行中会话 | 各节点聚合的 Session 运行状态（不返回正文） | 只读 |
 | 设置 | 当前 hub 配置（脱敏，无 frp secretKey） | 修改常用项并保存；未知键/越界会被拒绝 |
@@ -105,6 +107,20 @@ dshlink hub serve
 `adb reverse`、端口转发或内网 DNS 指向网关）；跨网络请启用 phone-frps，App 会使用引导码里的 visitor 配置。
 手机 App 需要 **0.6.0+**。旧的“手机接入（旧版 dshlink1）”卡保留用于兼容 0.9 的连接串。
 
+## 3.7 二维码（0.11）
+
+生成的连接串（无论 `dshlink2:` 还是 `dshlink1:`）旁边都有「显示二维码」按钮。点击后控制台请求
+`POST /api/v1/hub/phone/qr`，把连接串切成多帧（默认 900 字符一帧，7.2 KB 的隧道码约 8 帧），
+在覆盖层 canvas 上约每 0.9 秒循环播放一帧，底部显示 `i/N`。手机 App 0.6.2+ 可以：
+
+- 用「扫描二维码」相机连续扫（显示已扫描 x/y 帧，收齐后自动拼装并走正常导入流程）；
+- 或截几张图后「从文件导入」多选，离屏逐张解码拼装。
+
+关闭覆盖层、按 Escape 或重新生成连接串都会停止动画。连接串不会写进 localStorage，二维码只存在于
+当前 canvas；帧格式与排障细节见 [QR-CONNECT.md](QR-CONNECT.md)。二维码内容等同凭据，不要录屏分享。
+
+![二维码覆盖层](images/hub-qr.png)
+
 ## 4. 设置项（`PATCH /api/v1/hub/settings` 白名单）
 
 | 键 | 范围 | 作用 |
@@ -149,6 +165,7 @@ dshlink hub serve
 | POST | `/api/v1/hub/phones/:id/revoke` | 吊销一部手机（admin，按 id/deviceId/指纹） |
 | POST | `/api/v1/hub/phone/bootstrap` | 生成一次性 `dshlink2:` 引导码：`{label,ttlHours,maxUses,tunnel,url?}` → `201 {code,summary,...}`（需先 phone setup） |
 | DELETE | `/api/v1/hub/phone/bootstrap/:id` | 作废引导码（admin） |
+| POST | `/api/v1/hub/phone/qr` | 把连接串编码成多帧 QR 矩阵：`{code,chunkSize?}` → `{total,chunkSize,codeBytes,frames}`（admin；审计只记帧数/大小） |
 | GET | `/api/v1/hub/status` / `/nodes` / `/outbox` / `/api/v1/audit` | 与 CLI 共用的只读视图 |
 
 示例（不经过页面也能做同样的事）：
@@ -194,6 +211,12 @@ curl -s -X PATCH "$HUB/api/v1/hub/settings" \
 生成无隧道 `dshlink2:` 引导码（入口/CA/无隧道/过期/引导码 ID 文案）、引导码入表、确认框作废后状态变为“已吊销”、截图、
 **零 JS 异常 / 零 console error**、页面不含 `pbs_` 或私钥。截图即上面的 `images/hub-phone10.png`。
 服务端侧另有 `test/hub.test.mjs` 的 phone control-plane 断言（无 CA 时 503、device 角色 403、状态为空）。
+
+2026-11-07 对临时 hub（`UI-QR-HUB`，端口 18795、phone gateway 18796）用无头 Edge + CDP 跑了 14 项二维码覆盖层断言，全部通过：
+登录、生成无隧道 `dshlink2:` 引导码（1691 字符 → 2 帧）、打开二维码覆盖层、canvas 436×436 有内容、
+帧自动前进（1/2 → 2/2）、截图、关闭后动画停止、旧版 `dshlink1:` 码（391 字符 → 1 帧）同样渲染、
+重新生成时旧覆盖层关闭、**零 JS 异常 / 零 console error**。截图即上面的 `images/hub-qr.png`；
+服务端断言（admin 200 帧字段、device 403、坏 code 400、页面含 `#qrModal`/`pvQr`/`phoneQr`）在 `test/hub.test.mjs`。
 
 ## 8. 排障
 

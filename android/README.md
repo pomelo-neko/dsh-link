@@ -5,8 +5,9 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 模式），把入口背后的 DSH 工作区/会话/transcript 显示在手机上，并通过能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.6.1`，minSdk 26，targetSdk 36
-- 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX、无第三方依赖**
+- 包名：`dev.dshlink.control`，版本 `0.6.2`（versionCode 9），minSdk 26，targetSdk 36
+- 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX**；唯一第三方库是 vendored 的
+  ZXing core 3.5.3（Apache-2.0，仅用于解码二维码，见 §1.4 与 §3.1）
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
 - 0.3.0：连接后可选择该节点网络里**直连**的其他节点并远程读写/发消息；标注子智能体会话；
   连续的工具调用/结果折叠成一行，点击展开；内置 STCP 中转改指 **8788 token 网关**
@@ -24,6 +25,10 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 - 0.6.1：修复 **含内置隧道的 dshlink2 连接串误报“frpc 未能在 20 秒内建立中转”**。隧道就绪
   探测原为 HTTP GET /healthz，而 phone gateway 是 HTTPS(mTLS) 监听，明文 HTTP 必然失败；
   改为协议无关的 TCP 连接探测（见 §5 与验证记录）。这是真机走阿里云 phone-frps 的前置修复。
+- 0.6.2：**二维码导入连接串**。hub 控制台把约 7 KB 的 dshlink2 连接串切成多帧动态二维码
+  （帧文本 `dshlinkqr:<index>/<total>:<chunk>`，默认 chunk 900、最多 32 帧）；App 新增
+  「扫描二维码（相机）」连续扫描，以及「从文件导入」一次多选多张二维码图片离屏拼装。
+  拼齐后仍走既有 ConnectProfile 校验与导入/连接流程，不绕过任何校验（见 §1.4）。
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -195,6 +200,35 @@ code 是 `dshlink2:` + `base64url(gzip(JSON))`，包含 `entry.url`（必须 htt
 “私钥 软件密钥（可导出）”作为风险提示。CA 与设备证书 PEM 存在 `SharedPreferences`
 （应用私有、未加密）。
 
+### 1.4 二维码导入连接串（0.6.2）
+
+dshlink2 连接串约 7 KB，超过单个二维码的容量（版本 40 / ECC L 的 byte 模式约 2953 字节），
+所以 hub 控制台把它切成**多帧动态二维码**：帧文本格式 `dshlinkqr:<index>/<total>:<chunk>`，
+index 从 1 开始，chunk 默认 900 字符（可配 200..2400），最多 32 帧；各帧 chunk 按 index
+升序直接拼接即原连接串（不插入分隔符）。手机端有两种导入方式：
+
+1. **相机连续扫描**：主界面点「扫描二维码（相机）」→ ScanActivity 用 Camera1 预览 + ZXing
+   逐帧解码（约 150 ms 节流），识别到帧文本后交给 `QrAssembler`，界面显示「已扫描 x/y 帧」；
+   帧可以乱序到达、也可以重复扫描，`total` 不一致时重置并提示重新开始。收齐后把完整连接串
+   回传主界面，沿用 `importText(code, "扫描的二维码")` 流程。
+2. **图片多选导入**：主界面「从文件导入」一次可以选中多张二维码截图（PNG/JPEG/WebP），逐张
+   ZXing 解码后用同一个 `QrAssembler` 拼装；选择器仍同时支持 `.txt/.json/.dshlink` 连接串
+   文件。多帧图片的来源可以是逐帧截图，或 `node scripts/qrgen.mjs --code-file <code>
+   --out-dir <dir>` 生成的 `frame-01.png …`（供离线/模拟器测试）。
+
+拼装完成后先做 ConnectProfile 的既有校验（`dshlink1:`/`dshlink2:` 前缀、字段完整性），再走
+与粘贴/文件导入完全相同的摘要弹窗、保存与连接流程；二维码不绕过任何校验，连接串也不写入日志。
+
+- **解码重试**：ZXing 的 detector 可能在**完全合法**的二维码上抛 NotFoundException（payload 与
+  mask 组合出的局部图案在特定方向被误判成 finder pattern）。因此解码器对每个方向都做
+  「常规检测 / 反色 / PURE_BARCODE」重试，并对 90°/180°/270° 旋转重试；相机 Y 平面路径同样
+  做旋转重试。
+- **权限**：首次点扫描会请求 CAMERA 运行时权限；拒绝时弹「无法使用相机」，说明原因并提示
+  改用「从文件导入」多选截图，另有「去系统设置」按钮，不崩溃。没有相机的设备（
+  `uses-feature android.hardware.camera required=false`）仍可用图片导入。
+- **凭据边界**：二维码内容 = 完整连接串 = 凭据。hub 控制台只对 admin 展示、默认 TTL 2 小时；
+  拿到二维码的人在有效期内都能接入，扫完请尽快兑换（dshlink2 引导码一次性）。
+
 ## 2. 节点侧准备
 
 ### 2.1 打开 DSH 视图与能力通道（配置文件，改完无需重启节点）
@@ -351,6 +385,9 @@ Invoke-WebRequest http://127.0.0.1:18788/healthz   # 无 token 应是 401（网�
   - `platform-tools`
   - `platforms;android-36`
   - `build-tools;36.0.0`
+- 第三方库只在仓库内 vendored：`vendor/zxing/zxing-core-3.5.3.jar`（ZXing core，Apache-2.0，
+  用于二维码解码，见 1.4）。构建脚本把它加进 `javac` classpath **并作为 `d8` 输入**打进
+  `classes.dex`（不需要 Gradle/Maven/联网）；jar 缺失时脚本直接报错。
 
 安装（sdkmanager.bat 会把带分号的包名拆参，用新版 `android.exe` 或 `cmd /c` 包一层引号）：
 
@@ -388,15 +425,15 @@ aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 产物：
 
 ```text
-android/dist/dshlink-control-0.6.1-debug.apk     # debug 签名（默认）
-android/dist/dshlink-control-0.6.1.apk           # -Release 签名（见 3.3）
+android/dist/dshlink-control-0.6.2-debug.apk     # debug 签名（默认）
+android/dist/dshlink-control-0.6.2.apk           # -Release 签名（见 3.3）
 android/dist/SHA256SUMS                          # 每次构建后对 dist/*.apk 全量重写
 ```
 
-`build-apk.ps1` 默认 `-VersionName "0.6.1" -VersionCode 8`（与 `ApiClient.APP_VERSION` 一致，
+`build-apk.ps1` 默认 `-VersionName "0.6.2" -VersionCode 9`（与 `ApiClient.APP_VERSION` 一致，
 发版时两处一起改）。
 
-APK 内容（0.6.1 通用构建）：
+APK 内容（0.6.2 通用构建）：
 
 - `lib/x86_64/libfrpc.so`、`lib/arm64-v8a/libfrpc.so`：模拟器/真机可执行的 frpc。源码是
   frp v0.71.0 的 Linux 二进制（x86_64 来自本机 frp-stcp-base，arm64 来自
@@ -406,6 +443,8 @@ APK 内容（0.6.1 通用构建）：
 - **没有 `assets/tunnel/`**：通用 APK 里查不到任何 frps token / mTLS 私钥 / STCP `secretKey`
   （`jar tf` / `unzip -l` 即可确认）；隧道配置只在用户导入 code 后才写进 `files/tunnel/`
   （见 1.2）；
+- `classes.dex` 里合并了 vendored 的 `vendor/zxing/zxing-core-3.5.3.jar`（QR 解码；
+  `jar tf` 里仍只有一个 `classes.dex`，没有额外 jar 条目）；
 - 内部构建（本地放了 `assets/tunnel/` 四件套）仍会把凭据打进 APK，只能内部使用、不要分发。
 
 ### 3.3 release 签名（分发给他人）
@@ -427,7 +466,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
   -KeyAlias dshlink -KeyPassword <密码>
 ```
 
-- 输出 `android/dist/dshlink-control-0.6.1.apk`（release 不带 `-debug` 后缀）；
+- 输出 `android/dist/dshlink-control-0.6.2.apk`（release 不带 `-debug` 后缀）；
 - `-KeyPassword` 省略时用 `-KeystorePassword`；`-KeyAlias` 省略时用 keystore 里的别名；
 - 结尾会 `apksigner verify --print-certs`，打印 size / SHA-256，并把 `dist/*.apk` 的 SHA-256
   全量重写到 `dist/SHA256SUMS`（格式 `<大写 SHA-256>  <文件名>`）；把 APK 和校验值一起发给用户；
@@ -437,7 +476,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
 ### 3.4 安装
 
 ```powershell
-D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6.1-debug.apk
+D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6.2-debug.apk
 ```
 
 或者把（`-Release` 或 debug）APK 传到手机点击安装（需允许“安装未知来源应用”）。
@@ -447,6 +486,8 @@ D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6
 **（0.6.0 起，推荐）先导入连接串/配置文件**：点“导入连接串/配置文件”粘贴 `dshlink2:…`
 或 `dshlink1:…`，或点“从文件导入”选 `.txt/.json/.dshlink` 文件，也可以从聊天工具里直接
 “分享/用其他应用打开”给 App（`text/plain`）；导入成功后 App 自动填写并连接（见 1.2/1.3）。
+0.6.2 起还支持二维码：点“扫描二维码（相机）”对准 hub 控制台的动态二维码，或点“从文件导入”
+一次多选多张二维码截图（`frame-01.png…`），扫齐多帧后走同一套导入校验（见 1.4）。
 下面是手工填写的等价流程。
 
 1. 打开 App，填入口地址 + token，点“连接”。入口可以是：
@@ -585,11 +626,17 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
   `nativeLibraryDir` 里的二进制。APK 因两个 frpc 约 12 MB；首次中转连接最多等 20 秒。
   个别 Android 15/16 的 16 KB page-size 设备若拒绝执行 4 KB 对齐的 Go 二进制，会弹
   “frpc 未能在 20 秒内建立中转”，此时改用 VPN/局域网路径（或换 16 KB 对齐的 frpc 重新打包）。
+- **二维码导入（0.6.2）**：二维码内容就是连接凭据（等价于明文连接串），不要截图外发；hub 端
+  动态二维码有 TTL，dshlink2 的一次性引导码兑换后即失效。相机扫描需要 CAMERA 权限（拒绝时
+  弹窗会提示改用“从文件导入”多选截图，不会崩溃）；多帧必须扫齐同一 total，缺帧/乱序/重复帧
+  会按帧号合并，不会拼出错误的连接串。图像导入对每帧做旋转 × 提示组合重试，但极低分辨率或
+  严重畸变的截图仍可能识别失败（可重截/放大）；模拟器虚拟相机只能验证打开与释放，不能验证
+  真实扫码。
 
 ## 7. 验证
 
 - 构建：`android/build-apk.ps1` 退出码 0；`aapt2 dump badging` 显示
-  `package dev.dshlink.control`、`versionName 0.6.1`/`versionCode 8`、`minSdk 26`、
+  `package dev.dshlink.control`、`versionName 0.6.2`/`versionCode 9`、`minSdk 26`、
   `targetSdk 36`、`native-code arm64-v8a x86_64`。
 - `apksigner verify --print-certs` 通过。
 - API 契约（本机 node:test，`DSH_HOME` 指向真实 DSH 时运行）：
@@ -819,5 +866,40 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     该码已交付用户文件 `C:/Users/example/phone-invite-v2-real-2026-11-07T08-51-31-296Z.txt`。
   - 未验证：安卓真机 arm64（frpc 二进制与 0.2.0 相同）、证书自然过期场景。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.1（versionCode 8），与节点/CLI 独立演进
+- 0.6.2 二维码导入冒烟（2026-11-07，Android 16 / API 36 x86_64 模拟器 `emulator-5554`；
+  hub `https://127.0.0.1:18790` phone gateway mTLS；真机 arm64 未验证）：
+  - **APK（通用构建，无 `assets/tunnel/`）**：`dshlink-control-0.6.2-debug.apk` 12,284,757 bytes，
+    SHA-256 `F1FC4B3737E3D186E11B50D9C0792C83D13C54B2DAA9ED82F04FC52CBB9CCC55`；
+    `aapt2 dump badging` → versionCode 9 / versionName 0.6.2 / minSdk 26 / targetSdk 36 /
+    native-code arm64-v8a x86_64；permissions `INTERNET` + `CAMERA`；
+    `uses-feature-not-required` camera/camera.any；`jar tf` 无任何 `assets/` 条目，
+    `classes.dex`（693,120 bytes）含 `com/google/zxing/MultiFormatReader`、`ScanActivity`、
+    `QrAssembler`、`QrImages`；`apksigner verify` 通过（debug 证书）。
+  - **解码器单测（桌面 JDK17，直接跑 vendored ZXing jar）**：`QrAssembler` 38/38 通过
+    （乱序/重复帧、total 不匹配重置、同帧号不同内容重置、非帧文本、超过 32 帧、超大连接串上限）；
+    `QrImages` 31/31 通过——`scripts/qrgen.mjs` 生成的 8 帧真实 dshlink2 连接串全部解出并拼回
+    7,171 字符原码；倒置/50% 缩放图像、相机 Y 平面、旋转 Y 平面、噪声返回 null；其中 frame-06
+    普通检测失败、靠 TRY_HARDER+PURE_BARCODE/旋转重试才解出（证明重试链，桌面 fixture
+    `test/.tmp/qr-hard-frame-01.png` 同样通过）。
+  - **模拟器图像导入 e2e（8 帧）**：`adb push` 到 `/sdcard/Download/qr-e2e/` 后（adb 推送的文件
+    需逐个广播 `MEDIA_SCANNER_SCAN_FILE` 才会出现在 DocumentsUI）长按多选 8 张 PNG → 导入对话框：
+    标签 `android-qr-e2e`、入口 `https://127.0.0.1:18790`、安全模式“每设备证书（mTLS，一次性
+    引导）”、CA 指纹、引导码/到期/隧道字段均正确、“来源：二维码图片（8 帧）” → “开始连接”后
+    自动 bootstrap（logcat `引导成功：设备证书 3F:FE:82:…`）→ 状态“已连接 · 11 个工作区 ·
+    DESKTOP-NODE-A · 可发送”，summary 为 hub 0.10.1 / 1 节点 / 每设备证书 mTLS；打开
+    dsh-link 工作区，会话列表“共 13 个会话（8 个子智能体）”。截图本地留存于
+    `android/.tmp/e2e-*.png`（含真实主机名/指纹，不入库）。该 e2e 消耗了 fixture dshlink2 码的
+    一次性引导码（测试标签 `android-qr-e2e`，非用户真机码）。
+  - **相机扫描冒烟**：撤销 CAMERA 权限后点“扫描二维码（相机）”→ 系统权限弹窗；拒绝 → 弹窗
+    “无法使用相机”+“没有相机权限…仍可用从文件导入”+“去系统设置/返回”，返回后进程未重启、
+    logcat 无崩溃；允许 → `ScanActivity` 打开（扫码提示 + 帧进度文案），logcat
+    `CameraService: Start camera streaming for dev.dshlink.control`；按返回 →
+    `Stop camera streaming` + `Disconnected client for camera 1`，无崩溃。模拟器虚拟相机无
+    真实二维码场景，真实扫码未验证。
+  - **最终 APK 复装**：用最终构建重新 `adb install -r` 后启动即自动连回已保存的
+    `android-qr-e2e` 配置（“已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送”），
+    未重新消耗引导码；相机解码节流为 150 ms（`DECODE_INTERVAL_MS`）。
+  - 已知未验证：真机 arm64 的相机解码路径、真实屏幕多帧扫码、极低分辨率/严重畸变截图。
+
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.2（versionCode 9），与节点/CLI 独立演进
 > （当前仓库/节点 0.10.1，hub 0.10.1；hub 直连 + dshlink2 每设备证书是主推入口）。

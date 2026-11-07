@@ -11,6 +11,7 @@
 - **手机控制端（0.6）**：`android/` 里的 App 连到一台节点，用 `device` token 浏览该节点的 DSH 工作区/会话、前台增量看对话、通过 `sessions.prompt` 发消息。它是控制端，不是节点；0.4.0 起也可直连 **hub**。
 - **随手交给别人（0.9）**：一个便携发行包带 CLI、文档、集成与安卓 APK（可选 frpc）；手机用一条**连接串**接入 hub——连接串自带 `device` 令牌，启用 FRP 时还内嵌 STCP 隧道与证书，APK 内不含任何密钥。
 - **一部手机一张证书（0.10）**：手机接入不再共享 hub 令牌和隧道凭据，改用一次性 `dshlink2:` 引导：连接串只 pin hub 的 phone CA 公钥和一次性 secret，手机本地生成密钥对、由 hub 签发客户端证书；手机只连 hub 回环上的 mutual-TLS 网关（8791），网关再注入 hub 令牌，隧道走独立的 phone-frps 租户。吊销一部手机是按证书指纹的独立操作，手机之间不共享秘密。见 [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md)。
+- **扫描二维码连接（0.11）**：连接串约 7 KB，既超单张二维码上限也不适合手抄。hub 控制台可把它显示成一组循环播放的二维码帧，手机 App 0.6.2+ 用相机连扫或选几张截图拼回完整连接串，再走与粘贴完全相同的校验与导入流程。见 [`docs/QR-CONNECT.md`](docs/QR-CONNECT.md)。
 - **hub 拓扑（0.8）**：一个独立的 `dshlink hub` 进程做中心，节点用一次性 enroll token 接入；消息/DSH 视图/能力调用/文件全部经 hub 中转，hub 带持久 outbox、心跳补发与去重，并自带 Web 控制台（`/ui`）。
 - 文件访问被限制在配置的共享根目录内，默认可读、需显式开启写入；`.env`、`*.key`、`.ssh` 等默认在拒绝清单里。
 
@@ -161,6 +162,9 @@ dshlink bind --thread msg_<根消息> --session session-yyyy
 hub 回环上的 phone gateway（8791）。手机拿不到 hub 令牌，吊销一部手机也不会影响其他手机或隧道。
 0.9 的 `dshlink1:`（hub `device` 令牌 + 码内共享 STCP 凭据）仍可用于已配置的设备。安全模型、
 命令与威胁模型见 [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md)。
+App **0.6.2** 起还可以直接扫 hub 控制台（`/ui` →「显示二维码」）播放的**多帧二维码**：扫码页显示
+已扫描 x/y 帧，收齐后自动拼装并导入同一份 profile，不必再复制/粘贴 7 KB 文本。帧格式与排障见
+[`docs/QR-CONNECT.md`](docs/QR-CONNECT.md)。
 
 ```powershell
 # 节点侧：给手机铸造一个 device token（只能读 DSH 视图 + 调用被允许的能力方法）
@@ -335,7 +339,7 @@ dsh-link/
 │   └── pairing.mjs         # 配对码 + DSH 安装（MCP 条目 / 技能 / 自动唤醒桥）
 ├── vendor/frp/             # frp v0.71.0 校验清单（二进制自行下载，不入库；Apache-2.0）
 ├── android/                # 安卓控制端 App（纯 Java，无 Gradle 依赖）+ 手动构建脚本
-├── test/                   # 234 项检查 / 30 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约与 mTLS）+ CLI 冒烟
+├── test/                   # 240 项检查 / 31 个测试文件（含真实 frps+frpc 隧道、真实 MCP SDK 客户端、热重载、桥与定向会话、hub、网络/网关、手机契约与 mTLS、二维码回归）+ CLI 冒烟
 ├── docs/                   # 架构、设计、协议、DSH 接入、定向会话、hub 设计与控制台、FRP 部署、运维手册、排障手册、手机端
 └── integrations/           # DSH 技能 + settings 片段 + dsh-link-bridge 插件（自动唤醒对话；0.4 定向投递；0.8 hub 面板）
 ```
@@ -343,7 +347,7 @@ dsh-link/
 ## 8. 验证
 
 ```powershell
-node test/run.mjs                     # 234 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约与 mTLS、doctor
+node test/run.mjs                     # 240 项检查（frp/MCP 缺失时自动跳过）：鉴权、消息、队列、同步、中继、文件沙箱、MCP、FRP、配对、桥、定向会话、hub、网络/网关、DSH 视图、手机契约与 mTLS、二维码、doctor
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13：两个真实进程
 ```
 

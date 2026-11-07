@@ -39,6 +39,10 @@ files, queue messages while the other side is offline, and appear inside DSH as 
   mutual-TLS gateway (8791) injects the hub token; a separate **phone-frps** tenant carries the
   tunnel; revoking one phone is a per-certificate operation. Nothing secret is shared between
   phones. See [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md).
+- **Point the camera at it (0.11).** A connect code is ~7 KB: too long for one QR symbol and painful
+  to copy by hand. The hub console now plays one as an animated set of QR frames, and the Android
+  scanner (app 0.6.2+) rebuilds it from the camera or a handful of screenshots before running the
+  same validation as a pasted code. See [`docs/QR-CONNECT.md`](docs/QR-CONNECT.md).
 
 ---
 
@@ -234,6 +238,9 @@ phone gateway (8791). The phone never receives the hub's token, and revoking one
 touch any other phone or the tunnel. The older 0.9 `dshlink1:` path (hub `device` token plus the
 shared STCP credentials in the code) still works for already-provisioned devices. Security model,
 commands and threat model: [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md).
+Since app **0.6.2** the code can also be scanned as a **multi-frame QR code** shown by the hub
+console (`/ui` → 显示二维码): the scanner assembles the frames and imports the same profile, so a
+7 KB code no longer has to be copied or pasted. See [`docs/QR-CONNECT.md`](docs/QR-CONNECT.md).
 
 ```powershell
 # on the node: allow the phone to read the view and prompt conversations
@@ -465,7 +472,7 @@ dsh-link/
 ├── scripts/                # autostart, bundle build/verify, gen-secrets, gen-certs, vendor check
 ├── vendor/frp/             # sha256 manifest only — download the frp binaries yourself
 ├── android/                # Android controller app (Java, no Gradle dependencies) + build-apk.ps1
-├── test/                   # 30 test files / 234 checks + CLI smoke script
+├── test/                   # 31 test files / 240 checks + CLI smoke script
 ├── docs/                   # architecture, design, protocol, DSH access, directed conversations, hub, FRP, operations, troubleshooting, mobile
 └── examples/               # sanitised config samples
 ```
@@ -473,7 +480,7 @@ dsh-link/
 ## Testing
 
 ```powershell
-node test/run.mjs                                                        # 234 checks (frp/MCP suites skip if absent), ~19 s
+node test/run.mjs                                                        # 240 checks (frp/MCP suites skip if absent), ~20 s
 node --test --test-concurrency=1 test/                                   # the same suites via node:test
 powershell -NoProfile -ExecutionPolicy Bypass -File test/cli-smoke.ps1   # 13/13, two real processes
 ```
@@ -537,6 +544,7 @@ Cross-internet verification (Windows node ↔ WSL node through a public frps) is
 | [`docs/HUB-CONSOLE.md`](docs/HUB-CONSOLE.md) | The hub web console at `/ui`: enroll tokens, node approval, queue, settings, phone invites, admin APIs |
 | [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) | 0.9 distribution: build a portable bundle, deploy a hub for others, hand out the APK, upgrade/rollback, security, checklist |
 | [`docs/PHONE-SECURITY.md`](docs/PHONE-SECURITY.md) | 0.10 phone access: per-device client certificates, one-time `dshlink2:` bootstrap, mutual-TLS gateway, separate phone-frps tenant, revocation, threat model |
+| [`docs/QR-CONNECT.md`](docs/QR-CONNECT.md) | 0.11 QR connect codes: multi-frame format, hub encode API, console overlay, Android scanning, decoder retries, security |
 | [`docs/GATEWAY.md`](docs/GATEWAY.md) | The 8788 loopback token gateway used by the phone relay path |
 | [`docs/FRP.md`](docs/FRP.md) | Public `frps` deployment, STCP provider/visitor, TLS, verification |
 | [`docs/WAN-VERIFICATION.md`](docs/WAN-VERIFICATION.md) | What was actually verified across the internet, and how |

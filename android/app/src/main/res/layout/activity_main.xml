@@ -43,6 +43,13 @@
             android:text="从文件导入" />
     </LinearLayout>
 
+    <Button
+        android:id="@+id/scan_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:text="扫描二维码（相机）" />
+
     <EditText
         android:id="@+id/url_input"
         android:layout_width="match_parent"

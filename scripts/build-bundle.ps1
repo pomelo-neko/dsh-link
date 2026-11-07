@@ -5,7 +5,8 @@
     dsh-link-<版本>-portable.tar.gz    （Linux/WSL 友好，含可执行位）
     SHA256SUMS.txt                     （两个包各自的 sha256）
   包内容：bin src docs integrations test + README + install.ps1/install.sh，
-          vendor/frp 只含 frpc（Windows + Linux）——frps 属于服务器侧，不入包。
+          vendor/frp 只含 frpc（Windows + Linux）——frps 属于服务器侧，不入包；
+          vendor/qrcodegen（纯 JS，hub QR 端点运行时依赖）始终入包。
   用法：powershell -ExecutionPolicy Bypass -File scripts\build-bundle.ps1 [-NoVendor] [-Suffix -src] [-Apk <path>] [-NoApk]
         -NoVendor 只打源码（约 0.1 MB，对方自备 frpc）；-Suffix 给产物名加后缀，避免覆盖完整包。
         -Apk 指定手机 APK（默认自动取 android/dist 下最新的 dshlink-control-*.apk）；-NoApk 不打包 APK。
@@ -64,6 +65,15 @@ foreach ($file in 'start-dshlink.ps1', 'start-dshlink.vbs', 'start-dshlink.cmd')
 }
 Remove-Item -Recurse -Force (Join-Path $stage 'test\.tmp') -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $stage 'integrations\wan-lab') -ErrorAction SilentlyContinue
+
+# hub 的 /api/v1/hub/phone/qr 端点通过 src/qr.mjs 运行时 import vendor/qrcodegen；它很小且是纯
+# JS，所以不受 -NoVendor（只跳过 frpc 二进制）影响，始终入包。缺少它会让 hub 启动即报
+# ERR_MODULE_NOT_FOUND。
+$qrVendor = Join-Path $stage 'vendor\qrcodegen'
+New-Item -ItemType Directory -Force -Path $qrVendor | Out-Null
+Copy-Item -Force (Join-Path $root 'vendor\qrcodegen\qrcodegen.mjs') $qrVendor
+Copy-Item -Force (Join-Path $root 'vendor\qrcodegen\README.md') $qrVendor
+if (-not (Test-Path (Join-Path $qrVendor 'qrcodegen.mjs'))) { throw "vendor/qrcodegen missing after copy: $qrVendor" }
 
 if (-not $NoVendor) {
   Write-Host '[3/6] 放入 FRP 客户端（frpc，Windows + Linux；不含 frps）'

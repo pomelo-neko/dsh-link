@@ -34,3 +34,17 @@ test('release: every PowerShell script keeps its UTF-8 BOM', async () => {
     assert.ok(text.startsWith('\uFEFF'), `${path.relative(PROJECT_DIR, file)} lost its UTF-8 BOM — run: npm run bom`);
   }
 });
+
+test('release: the portable bundle stages runtime vendor dependencies', async () => {
+  // The 0.11 hub QR endpoint imports src/qr.mjs, which imports vendor/qrcodegen/qrcodegen.mjs
+  // at runtime. build-bundle.ps1 copies an explicit allowlist of paths, so that pure-JS
+  // dependency has to be staged explicitly; missing it makes a freshly installed hub die with
+  // ERR_MODULE_NOT_FOUND (caught while verifying the 0.11.0 bundle).
+  const moduleFile = path.join(PROJECT_DIR, 'vendor', 'qrcodegen', 'qrcodegen.mjs');
+  await fs.access(moduleFile);
+  const qrSource = await fs.readFile(path.join(PROJECT_DIR, 'src', 'qr.mjs'), 'utf8');
+  assert.match(qrSource, /\.\.\/vendor\/qrcodegen\/qrcodegen\.mjs/);
+  const bundle = await fs.readFile(path.join(PROJECT_DIR, 'scripts', 'build-bundle.ps1'), 'utf8');
+  assert.match(bundle, /vendor\\qrcodegen/);
+  assert.match(bundle, /qrcodegen\.mjs/);
+});

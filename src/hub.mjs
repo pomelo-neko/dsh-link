@@ -19,6 +19,7 @@ import { HubTunnelManager } from './hubfrp.mjs';
 import { hubUiHtml } from './hubui.mjs';
 import { PHONE_TUNNEL_BIND_PORT, buildHubPhoneInvite } from './phone.mjs';
 import { buildPhoneBootstrap, summarizePhoneBootstrap } from './phonebootstrap.mjs';
+import { encodeFrames } from './qr.mjs';
 
 const ALL_ROLES = ['admin', 'peer', 'device'];
 const DSH_ROLES = ['admin', 'peer', 'device'];
@@ -1140,6 +1141,27 @@ export function createHub({ cfg, store, logger, tunnel = null, clientFactory = n
     if (!revoked) throw notFound('no phone bootstrap ' + ctx.params.id);
     await audit({ event: 'hub_phone_bootstrap_revoked', bootstrapId: revoked.id, by: ctx.auth.token?.label ?? null });
     sendJson(ctx.res, 200, { revoked: revoked.id });
+  }, { roles: ['admin'] });
+
+  // Encode a phone connect code / bootstrap code as animated QR frames. The payloads are transport
+  // only; the phone must still run the normal dshlink1:/dshlink2: validation after reassembly.
+  add('POST', API_PREFIX + '/hub/phone/qr', async (ctx) => {
+    const body = await readJson(ctx.req, 24 * 1024);
+    const code = typeof body.code === 'string' ? body.code.trim() : '';
+    if (!code) throw badRequest('code is required');
+    let encoded;
+    try {
+      encoded = encodeFrames(code, { chunkSize: body.chunkSize });
+    } catch (error) {
+      throw badRequest(error.message);
+    }
+    await audit({ event: 'hub_phone_qr', frames: encoded.total, codeBytes: encoded.codeBytes, by: ctx.auth.token?.label ?? null, ip: ctx.auth.ip });
+    sendJson(ctx.res, 200, {
+      total: encoded.total,
+      chunkSize: encoded.chunkSize,
+      codeBytes: encoded.codeBytes,
+      frames: encoded.frames
+    });
   }, { roles: ['admin'] });
 
   add('POST', API_PREFIX + '/hub/flush', async (ctx) => {

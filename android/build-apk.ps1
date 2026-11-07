@@ -16,8 +16,8 @@
 # under android\native\lib are still required.
 param(
     [string]$Sdk = "D:\AndroidSdk",
-    [string]$VersionName = "0.6.1",
-    [int]$VersionCode = 8,
+    [string]$VersionName = "0.6.2",
+    [int]$VersionCode = 9,
     [switch]$Release,
     [string]$Keystore = "",
     [string]$KeystorePassword = "",
@@ -38,9 +38,12 @@ $Obj = Join-Path $Dist "obj"
 $Gen = Join-Path $Obj "gen"
 $Classes = Join-Path $Obj "classes"
 $DebugKeystore = Join-Path $Root "debug.keystore"
+# 0.6.2: ZXing core (Apache-2.0) for QR-code scanning/decoding; vendored, never copied into assets.
+$ZxingJar = Join-Path (Split-Path -Parent $Root) "vendor\zxing\zxing-core-3.5.3.jar"
 
 if (-not (Test-Path $BuildTools)) { throw "build-tools not found: $BuildTools" }
 if (-not (Test-Path $AndroidJar)) { throw "android.jar not found: $AndroidJar" }
+if (-not (Test-Path $ZxingJar)) { throw "zxing-core jar not found: $ZxingJar (0.6.2 QR import needs it)" }
 
 if ($Release) {
     if (-not $Keystore) {
@@ -124,13 +127,14 @@ if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
 Write-Host "[3/6] javac --release 11"
 $sources = @(Get-ChildItem -Path "$App\src\main\java", $Gen -Recurse -Filter *.java | ForEach-Object { $_.FullName })
 if ($sources.Count -eq 0) { throw "no Java sources found" }
-$javacArgs = @("--release", "11", "-encoding", "UTF-8", "-cp", $AndroidJar, "-d", $Classes) + $sources
+$javacArgs = @("--release", "11", "-encoding", "UTF-8", "-cp", "$AndroidJar;$ZxingJar", "-d", $Classes) + $sources
 & $Javac @javacArgs
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 Write-Host "[4/6] d8"
 New-Item -ItemType Directory -Force -Path "$Obj\dex" | Out-Null
-& "$BuildTools\d8.bat" --min-api 26 --lib $AndroidJar --output "$Obj\dex" (Get-ChildItem -Path $Classes -Recurse -Filter *.class | ForEach-Object { $_.FullName })
+$dexInputs = @(Get-ChildItem -Path $Classes -Recurse -Filter *.class | ForEach-Object { $_.FullName }) + @($ZxingJar)
+& "$BuildTools\d8.bat" --min-api 26 --lib $AndroidJar --output "$Obj\dex" $dexInputs
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 
 Write-Host "[5/6] package assets, classes.dex and frpc native libs into the APK"

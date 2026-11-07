@@ -71,6 +71,10 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   .toast { position:fixed; right:18px; bottom:18px; max-width:420px; background:var(--panel2); border:1px solid var(--line); border-left:3px solid var(--ok); border-radius:8px; padding:10px 14px; box-shadow:0 8px 24px rgba(0,0,0,.4); z-index:50; }
   .toast.error { border-left-color:var(--danger); }
   .login .error { color:var(--danger); margin:10px 0 0; }
+  .modal { position:fixed; inset:0; z-index:60; background:rgba(6,10,16,.82); display:flex; align-items:center; justify-content:center; padding:18px; }
+  .modal-card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; width:min(560px,100%); max-height:92vh; overflow:auto; }
+  .qr-wrap { display:flex; align-items:center; justify-content:center; background:#fff; border-radius:10px; padding:12px; margin:12px 0; }
+  #qrCanvas { width:min(74vw,440px); height:auto; image-rendering:pixelated; }
   footer { color:var(--muted); text-align:center; font-size:12px; padding:12px 0 28px; }
   @media (max-width:700px) { header { flex-wrap:wrap; } .meta { display:none; } }
 </style>
@@ -143,8 +147,8 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     <div id="pvOut" class="minted hidden">
       <div class="muted" id="pvMeta"></div>
       <textarea id="pvCode" readonly rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px"></textarea>
-      <div class="row"><button id="pvCopy" class="btn" type="button">复制引导码</button><button id="pvDownload" class="btn" type="button">下载引导文件</button></div>
-      <div class="muted">手机 App 0.6.0+ 导入 dshlink2: 引导码 → 自动生成密钥对并换取客户端证书。引导码只能用一次。</div>
+      <div class="row wrap"><button id="pvCopy" class="btn" type="button">复制引导码</button><button id="pvDownload" class="btn" type="button">下载引导文件</button><button id="pvQr" class="btn primary" type="button">显示二维码</button></div>
+      <div class="muted">手机 App 0.6.0+ 导入 dshlink2: 引导码 → 自动生成密钥对并换取客户端证书。引导码只能用一次。App 0.6.2+ 可直接扫描二维码（多帧自动累积，码太长时不是一张图）。</div>
     </div>
     <div class="card-head" style="margin-top:12px"><h3 style="margin:0;font-size:14px">已登记的手机</h3><span class="muted" id="pvDeviceHint"></span></div>
     <div id="pvDevices" class="table-wrap"></div>
@@ -164,8 +168,8 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     <div id="phoneOut" class="minted hidden">
       <div class="muted" id="phoneMeta"></div>
       <textarea id="phoneCode" readonly rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px"></textarea>
-      <div class="row"><button id="phoneCopy" class="btn" type="button">复制连接串</button><button id="phoneDownload" class="btn" type="button">下载连接文件</button></div>
-      <div class="muted">手机 App 0.5.0+：导入连接串 → 粘贴；或把下载的文件发到手机后从文件导入。令牌只显示这一次。</div>
+      <div class="row wrap"><button id="phoneCopy" class="btn" type="button">复制连接串</button><button id="phoneDownload" class="btn" type="button">下载连接文件</button><button id="phoneQr" class="btn primary" type="button">显示二维码</button></div>
+      <div class="muted">手机 App 0.5.0+：导入连接串 → 粘贴；或把下载的文件发到手机后从文件导入。令牌只显示这一次。App 0.6.2+ 可直接扫描二维码（多帧自动累积）。</div>
     </div>
   </section>
 
@@ -195,6 +199,14 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   </section>
 </main>
 
+<div id="qrModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="card-head"><h2 id="qrTitle">扫描二维码</h2><div class="grow"></div><button id="qrClose" class="btn" type="button">关闭</button></div>
+    <div class="muted" id="qrHint">帧会自动循环；手机端的扫码页会自动累积已扫到的帧。</div>
+    <div class="qr-wrap"><canvas id="qrCanvas" width="440" height="440"></canvas></div>
+    <div class="row"><span class="chip" id="qrFrame">1/1</span><span class="muted" id="qrMeta"></span></div>
+  </div>
+</div>
 <div id="toast" class="toast hidden"></div>
 <footer>dsh-link hub __VERSION__ · 控制台仅同源调用 /api/v1，令牌保存在本浏览器</footer>
 
@@ -205,7 +217,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
   var state = {
     token: '', timer: null, signedIn: false, settingsDirty: false, mintedToken: '', phoneCode: '', phoneCodeV2: '',
     status: null, nodes: [], tokens: [], outbox: [], hub: null, settings: null,
-    consoleUrl: '', running: null, phone: null
+    consoleUrl: '', running: null, phone: null, qr: null, qrTimer: null, qrIndex: 0
   };
 
   function $(id) { return document.getElementById(id); }
@@ -348,6 +360,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     });
   }
   function logout() {
+    stopQr();
     localStorage.removeItem(TOKEN_KEY);
     state.token = '';
     state.signedIn = false;
@@ -664,7 +677,57 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     try { document.execCommand('copy'); toast('已复制'); } catch (err) { toast('复制失败，请手动选择令牌', true); }
     document.body.removeChild(area);
   }
+  var QR_FRAME_MS = 900;
+  var QR_MARGIN_MODULES = 4;
+  function drawQrFrame() {
+    var qr = state.qr;
+    if (!qr || !qr.frames || !qr.frames.length) return;
+    var frame = qr.frames[state.qrIndex % qr.frames.length];
+    var size = Number(frame.size) || frame.rows.length;
+    var scale = Math.max(1, Math.floor(440 / (size + QR_MARGIN_MODULES * 2)));
+    var dim = (size + QR_MARGIN_MODULES * 2) * scale;
+    var canvas = $('qrCanvas');
+    if (canvas.width !== dim) { canvas.width = dim; canvas.height = dim; }
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, dim, dim);
+    ctx.fillStyle = '#000';
+    var offset = QR_MARGIN_MODULES * scale;
+    for (var y = 0; y < size; y += 1) {
+      var row = frame.rows[y] || '';
+      for (var x = 0; x < size; x += 1) {
+        if (row.charAt(x) === '1') ctx.fillRect(offset + x * scale, offset + y * scale, scale, scale);
+      }
+    }
+    $('qrFrame').textContent = frame.index + '/' + qr.total;
+    $('qrMeta').textContent = '共 ' + qr.total + ' 帧 · 每 ' + (QR_FRAME_MS / 1000).toFixed(1) + ' 秒循环一次';
+  }
+  function stopQr() {
+    if (state.qrTimer) { clearInterval(state.qrTimer); state.qrTimer = null; }
+    state.qr = null;
+    show('qrModal', false);
+  }
+  function showQr(code, title) {
+    if (!code) { toast('先生成连接串或引导码', true); return; }
+    request('/api/v1/hub/phone/qr', { method: 'POST', body: { code: code } }).then(function (result) {
+      state.qr = result;
+      state.qrIndex = 0;
+      $('qrTitle').textContent = title || '扫描二维码';
+      $('qrHint').textContent = '共 ' + result.total + ' 帧（每帧约 ' + result.chunkSize + ' 字符）。帧会自动循环，手机 App 0.6.2+ 的扫码页会自动累积已扫到的帧。';
+      show('qrModal', true);
+      drawQrFrame();
+      if (state.qrTimer) clearInterval(state.qrTimer);
+      state.qrTimer = setInterval(function () {
+        if (!state.qr) return;
+        state.qrIndex = (state.qrIndex + 1) % state.qr.frames.length;
+        drawQrFrame();
+      }, QR_FRAME_MS);
+    }).catch(function (err) { toast(err.message || String(err), true); });
+  }
+  function showPhoneQr() { showQr(state.phoneCode, '扫描连接串二维码'); }
+  function showPhoneQrV2() { showQr(state.phoneCodeV2, '扫描证书引导码二维码'); }
   function generatePhone() {
+    stopQr();
     var label = $('phLabel').value.trim() || 'phone';
     var ttl = Number($('phTtl').value);
     var url = ($('phUrl').value || '').trim();
@@ -701,6 +764,7 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     toast('已下载连接文件');
   }
   function generatePhoneV2() {
+    stopQr();
     var label = $('pvLabel').value.trim() || 'phone';
     var ttl = Number($('pvTtl').value);
     var maxUses = Number($('pvMax').value);
@@ -880,6 +944,10 @@ export const HUB_UI_HTML = String.raw`<!DOCTYPE html>
     $('pvBtn').addEventListener('click', generatePhoneV2);
     $('pvCopy').addEventListener('click', copyPhoneV2);
     $('pvDownload').addEventListener('click', downloadPhoneV2);
+    $('phoneQr').addEventListener('click', showPhoneQr);
+    $('pvQr').addEventListener('click', showPhoneQrV2);
+    $('qrClose').addEventListener('click', stopQr);
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && state.qr) stopQr(); });
     $('flushBtn').addEventListener('click', flushQueue);
     $('saveSettingsBtn').addEventListener('click', saveSettings);
     $('auditBtn').addEventListener('click', loadAudit);

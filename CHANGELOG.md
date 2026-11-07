@@ -9,6 +9,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-07
+
+"Point the camera at it": a 7 KB connect code is too long to copy by hand and too long for one
+QR symbol, so the hub console now plays it as an animated multi-frame QR code and the Android app
+can rebuild it with the camera or from a handful of screenshots.
+
+### Added
+
+- **Multi-frame QR connect codes (hub side).** POST /api/v1/hub/phone/qr (admin only) turns a
+  dshlink1:/dshlink2: connect code into a sequence of QR matrices (Nayuki qrcodegen, MIT,
+  vendored; no runtime dependency). Frames carry dshlinkqr:<index>/<total>:<chunk>; concatenating
+  the chunks in index order restores the original ASCII code. Default chunk 900 chars (~8 frames for
+  a 7.2 KB tunnel profile), configurable 200..2400, at most 32 frames. The endpoint returns matrices,
+  not images, and the audit event stores only frame count/size, never the code.
+- **"显示二维码" in the hub console.** Both the 0.10 phone-certificate card and the legacy
+  dshlink1 card can render the just-generated code in an overlay canvas, one frame per ~0.9 s,
+  with an i/N chip; closing the overlay stops the timer and a new code closes the old overlay.
+  Walkthrough: docs/QR-CONNECT.md; screenshot docs/images/hub-qr.png.
+- **Android 0.6.2 — scan / import QR frames.** Camera1 preview with ZXing (vendored
+  zxing-core-3.5.3.jar, Apache-2.0), plus multi-select image import; QrAssembler tolerates
+  out-of-order and repeated frames and shows x/y progress. Assembled text goes through the normal
+  ConnectProfile validation, so a QR code does not bypass any check.
+- **Portable bundle now stages vendor/qrcodegen.** The QR endpoint is a hub runtime feature
+  (src/qr.mjs imports the vendored Nayuki module), and the bundle only copies an explicit path
+  allowlist. build-bundle.ps1 now always copies vendor/qrcodegen (even with -NoVendor, which only
+  skips the frpc binaries), and test/release.test.mjs guards it. A bundle built without it makes a
+  freshly installed hub die at startup with ERR_MODULE_NOT_FOUND.
+
+### Fixed
+
+- **QR detection is not always a plain decode.** ZXing detector can throw NotFoundException on a
+  perfectly rendered symbol when the payload/mask combination forms a false finder pattern; decoding
+  the same matrix with PURE_BARCODE or after a 90/180/270 degree rotation succeeds. The bundled test
+  decoder and the Android scanner therefore retry across four rotations and three hint modes, and
+  the round-trip test fails on any undecoded frame instead of silently skipping it.
+
 ## [0.10.1] — 2026-11-07
 
 "Pick up the phone": the Android control app can now actually use the per-device mTLS phone path
@@ -729,7 +765,7 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.11.0...HEAD
 [0.10.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.1
 [0.10.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.0
 [0.9.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.1

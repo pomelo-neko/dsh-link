@@ -7,6 +7,15 @@
         android:targetSdkVersion="36" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 0.6.2: camera QR scanning is optional; image import works on devices without a camera. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -47,5 +56,10 @@
             android:name=".SessionActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- 0.6.2: camera QR scanner for multi-frame dshlink connect codes. -->
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false" />
     </application>
 </manifest>

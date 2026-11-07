@@ -1,4 +1,4 @@
-# 分发与部署（0.9 起；0.10 手机接入升级）
+# 分发与部署（0.9 起；0.10 手机接入升级；0.11 二维码交接）
 
 这份文档面向**把 dsh-link 交给别人用**的场景，而不是只在一台机器上自用。它回答三件事：
 
@@ -16,7 +16,7 @@
 | 发行物 | 路径 | 说明 |
 |---|---|---|
 | 通用发行包 | `dist/dsh-link-<version>-portable.zip` / `.tar.gz` | 节点 + hub + CLI + 文档 + 示例 + （可选）APK；零 npm 依赖 |
-| 手机控制端 APK | 包内 `apk/dshlink-control-<version>-debug.apk` | 0.5.0 起**不含任何密钥/证书/隧道配置**；0.6.0 起支持 `dshlink2:` 每设备证书引导（0.10 推荐） |
+| 手机控制端 APK | 包内 `apk/dshlink-control-<version>-debug.apk` | 0.5.0 起**不含任何密钥/证书/隧道配置**；0.6.0 起支持 `dshlink2:` 每设备证书引导（0.10 推荐）；0.6.2 起可扫码导入（0.11，见 [QR-CONNECT.md](QR-CONNECT.md)） |
 | 完整性清单 | 包内 `SHA256SUMS.txt`、`dist/SHA256SUMS.txt` | 逐个文件校验；下载后先验再装 |
 
 发行包**不含** frps 服务端，也不含任何真实 token。`vendor/frp/` 里只有 frp **客户端**（`frpc`），
@@ -275,7 +275,7 @@ node bin\dshlink.mjs hub token rm --id <token-id>
 
 1. 把 APK 传到手机（QQ/网盘/USB 均可），在文件管理器里点击安装，允许“安装未知来源应用”；
 2. 打开 App（dsh-link 控制端）；
-3. 点 **导入连接串** → 粘贴连接串（或选择 `.txt` 文件）→ 保存；
+3. 点 **导入连接串** → 粘贴连接串（或选择 `.txt` 文件）→ 保存；App 0.6.2+ 也可以点 **扫描二维码** 对着 hub 控制台「显示二维码」的覆盖层连扫，或一次多选二维码截图从文件导入（0.11，见 [QR-CONNECT.md](QR-CONNECT.md)）；
 4. 勾选“通过阿里云 STCP 中转”，点 **连接**；App 会用连接串里的 frpc 配置在本机起 frpc visitor；
 5. 连接成功后显示工作区/会话；发送消息走 hub → 节点 DSH。
 

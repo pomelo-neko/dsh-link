@@ -28,7 +28,7 @@ public final class ApiClient {
 
     static final int CONNECT_TIMEOUT_MS = 8000;
     static final int READ_TIMEOUT_MS = 60000;
-    public static final String APP_VERSION = "0.6.1";
+    public static final String APP_VERSION = "0.6.2";
 
     private final String baseUrl;
     private final String token;
