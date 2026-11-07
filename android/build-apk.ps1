@@ -16,8 +16,8 @@
 # under android\native\lib are still required.
 param(
     [string]$Sdk = "D:\AndroidSdk",
-    [string]$VersionName = "0.6.0",
-    [int]$VersionCode = 7,
+    [string]$VersionName = "0.6.1",
+    [int]$VersionCode = 8,
     [switch]$Release,
     [string]$Keystore = "",
     [string]$KeystorePassword = "",

@@ -11,8 +11,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -206,21 +206,25 @@ final class TunnelManager {
     }
 
     private static boolean healthy() {
-        HttpURLConnection conn = null;
+        // The visitor's local port only accepts connections once frpc has logged in and attached the
+        // STCP visitor. Probe it at the TCP level: the remote end may be a plain-HTTP node gateway, a
+        // token-checking 8788 gateway, or the mTLS phone gateway (HTTPS with a self-signed CA). A TCP
+        // connect is protocol-agnostic and therefore works for all three; HTTP probing broke the
+        // phone gateway case because a plain HTTP request to an HTTPS listener always failed.
+        Socket socket = null;
         try {
-            conn = (HttpURLConnection) new URL("http://127.0.0.1:" + localPort + "/healthz").openConnection();
-            conn.setConnectTimeout(800);
-            conn.setReadTimeout(1200);
-            conn.setRequestMethod("GET");
-            int status = conn.getResponseCode();
-            // The visitor port only answers once the tunnel is up. Past 0.7 it lands on the
-            // token-checking gateway, which answers 401 to this unauthenticated probe - that
-            // still proves the tunnel is connected, so any HTTP answer counts as healthy.
-            return status > 0;
+            socket = new Socket();
+            socket.connect(new InetSocketAddress("127.0.0.1", localPort), 800);
+            return true;
         } catch (IOException err) {
             return false;
         } finally {
-            if (conn != null) conn.disconnect();
+            if (socket != null) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                }
+            }
         }
     }
 

@@ -5,7 +5,7 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
 模式），把入口背后的 DSH 工作区/会话/transcript 显示在手机上，并通过能力通道
 （`sessions.prompt`）向指定会话发消息。
 
-- 包名：`dev.dshlink.control`，版本 `0.6.0`，minSdk 26，targetSdk 36
+- 包名：`dev.dshlink.control`，版本 `0.6.1`，minSdk 26，targetSdk 36
 - 纯 Java + Android 平台 API，**无 Gradle、无 AndroidX、无第三方依赖**
 - 不常驻、不后台轮询：列表在进入/手动刷新时拉一次；会话界面只在 **前台可见期间** 每 2.5 s 拉一次增量
 - 0.3.0：连接后可选择该节点网络里**直连**的其他节点并远程读写/发消息；标注子智能体会话；
@@ -21,6 +21,9 @@ dsh-link 节点（0.3.0 起的单节点模式）或一个 dsh-link 中心服务�
   公钥，用一次性引导码换取只属于这台手机的客户端证书，之后所有请求走 mutual TLS、不再携带
   device token；连接串里的自签 CA 是唯一信任锚。0.5.0 的 `dshlink1:` token 路径完全保留，
   导入时按前缀分流，主界面显示当前安全模式（见 §1.3）。
+- 0.6.1：修复 **含内置隧道的 dshlink2 连接串误报“frpc 未能在 20 秒内建立中转”**。隧道就绪
+  探测原为 HTTP GET /healthz，而 phone gateway 是 HTTPS(mTLS) 监听，明文 HTTP 必然失败；
+  改为协议无关的 TCP 连接探测（见 §5 与验证记录）。这是真机走阿里云 phone-frps 的前置修复。
 - 深色不需要；UI 中文
 
 > 可行性研究、方案对比与威胁模型见 [`docs/MOBILE-CONTROL-FEASIBILITY.md`](../docs/MOBILE-CONTROL-FEASIBILITY.md)；
@@ -385,15 +388,15 @@ aapt2 compile → aapt2 link → javac --release 11 → d8 --min-api 26
 产物：
 
 ```text
-android/dist/dshlink-control-0.6.0-debug.apk     # debug 签名（默认）
-android/dist/dshlink-control-0.6.0.apk           # -Release 签名（见 3.3）
+android/dist/dshlink-control-0.6.1-debug.apk     # debug 签名（默认）
+android/dist/dshlink-control-0.6.1.apk           # -Release 签名（见 3.3）
 android/dist/SHA256SUMS                          # 每次构建后对 dist/*.apk 全量重写
 ```
 
-`build-apk.ps1` 默认 `-VersionName "0.6.0" -VersionCode 7`（与 `ApiClient.APP_VERSION` 一致，
+`build-apk.ps1` 默认 `-VersionName "0.6.1" -VersionCode 8`（与 `ApiClient.APP_VERSION` 一致，
 发版时两处一起改）。
 
-APK 内容（0.6.0 通用构建）：
+APK 内容（0.6.1 通用构建）：
 
 - `lib/x86_64/libfrpc.so`、`lib/arm64-v8a/libfrpc.so`：模拟器/真机可执行的 frpc。源码是
   frp v0.71.0 的 Linux 二进制（x86_64 来自本机 frp-stcp-base，arm64 来自
@@ -424,7 +427,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
   -KeyAlias dshlink -KeyPassword <密码>
 ```
 
-- 输出 `android/dist/dshlink-control-0.6.0.apk`（release 不带 `-debug` 后缀）；
+- 输出 `android/dist/dshlink-control-0.6.1.apk`（release 不带 `-debug` 后缀）；
 - `-KeyPassword` 省略时用 `-KeystorePassword`；`-KeyAlias` 省略时用 keystore 里的别名；
 - 结尾会 `apksigner verify --print-certs`，打印 size / SHA-256，并把 `dist/*.apk` 的 SHA-256
   全量重写到 `dist/SHA256SUMS`（格式 `<大写 SHA-256>  <文件名>`）；把 APK 和校验值一起发给用户；
@@ -434,7 +437,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Sdk D:\AndroidSd
 ### 3.4 安装
 
 ```powershell
-D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6.0-debug.apk
+D:\AndroidSdk\platform-tools\adb.exe install -r android\dist\dshlink-control-0.6.1-debug.apk
 ```
 
 或者把（`-Release` 或 debug）APK 传到手机点击安装（需允许“安装未知来源应用”）。
@@ -778,5 +781,36 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     `selftest-0.6.0.md`）。
   - 未验证：真机 arm64、dshlink2 + 真实公网 STCP 隧道、强制 TLS 1.2、证书自然过期场景。
 
-> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.0（versionCode 7），与节点/CLI 独立演进
-> （当前仓库/节点 0.10.0，hub 0.10.0；hub 直连 + 0.6.0 的 dshlink2 每设备证书是主推入口）。
+- 0.6.1 手机侧 STCP + 阿里云 phone-frps 真链路冒烟（2026-11-07，Android 16 / API 36.1
+  x86_64 模拟器 `emulator-5554`；真实 hub 0.10.0 @ 8790，phone gateway `https://127.0.0.1:8791`
+  mTLS；独立 phone-frps @ 阿里云 VPS `203.0.113.10:16445`；手机侧 visitor 18790）：
+  - **APK（通用构建）**：`dshlink-control-0.6.1-debug.apk` 12,010,323 bytes，SHA-256
+    `B65D7ECAC3212240682082B5B0877E923F64052542C5C4255A988A4C8BA744D2`；
+    `aapt2 dump badging` → versionCode 8 / versionName 0.6.1 / minSdk 26 / targetSdk 36 /
+    native-code arm64-v8a x86_64；`tar -tf` 无任何 `assets/` 条目（`tunnel credentials: none
+    (distribution build)`）；`apksigner verify` 通过（debug 证书）。
+  - **导入 dshlink2（含内置 tunnel）**：文件导入 `dshlink2:` 码 → 摘要显示标签/入口
+    `https://127.0.0.1:18790`/CA 指纹/引导码/“隧道：含内置隧道” → “开始连接”后自动 bootstrap
+    换证书（设备 `ph_…` 在 hub `devices: 1 active`），界面显示“安全模式：每设备证书（mTLS） ·
+    CA … · 设备证书：… 到期 2027-11-07 · 私钥 AndroidKeyStore（不可导出）”。
+  - **经公网 phone-frps 的连接**：状态“已连接 · 11 个工作区 · DESKTOP-NODE-A · 可发送”，
+    summary “中心服务器 DESKTOP-HUB-A · dsh-link-hub 0.10.0 · 1 个节点 · 1 在线 ·
+    当前 DESKTOP-NODE-A · 每设备证书 mTLS”；工作区列表 11 个；dsh-link 会话列表
+    “共 12 个会话（7 个子智能体）”；打开 `[phone-e2e] 短回复` 拉到 28 条消息
+    （状态“共 28 条 · DESKTOP-NODE-A（经 DESKTOP-HUB-A） · 每 2.5 秒仅在前台刷新”）。
+  - **发送 + 回复**：会话页发送 `phone-frps e2e probe: reply exactly PHONE_FRPS_OK` →
+    transcript 出现 `#73 · 用户 · 08:44:54`，约 2 s 后 `#75 · 思考` 与
+    `#75 · DSH · 08:44:56 / PHONE_FRPS_OK`；即 App → STCP visitor 18790 → phone-frps(VPS) →
+    hub provider → phone gateway 8791 → hub 8790 → 节点 → DSH 会话 → 回复 → App 轮询，全链路闭环。
+  - **根因与修复**：`TunnelManager.healthy()` 原来用 `HttpURLConnection` 请求
+    `http://127.0.0.1:<localPort>/healthz`；phone gateway 是 HTTPS(mTLS) 监听，明文 HTTP 打
+    HTTPS 必抛 IOException，healthy 永远 false，于是 20 s 超时误报——其实 frpc 日志已
+    `start visitor success / visitor added [phone-to-hub]`。修复为
+    `new Socket().connect(new InetSocketAddress("127.0.0.1", localPort), 800)` 的 TCP 探测，
+    对 node gateway / 8788 token gateway / mTLS phone gateway 三种监听都成立。
+  - 截图仅本地留存（`test/.tmp/phone-frps-reply-clean.png`、`phone-frps-main.png`，含真实
+    主机名/证书指纹，不入库）。
+  - 未验证：安卓真机 arm64（frpc 二进制与 0.2.0 相同）、证书自然过期场景。
+
+> 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.6.1（versionCode 8），与节点/CLI 独立演进
+> （当前仓库/节点 0.10.1，hub 0.10.1；hub 直连 + dshlink2 每设备证书是主推入口）。

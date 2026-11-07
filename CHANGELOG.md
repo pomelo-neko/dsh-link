@@ -9,6 +9,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-11-07
+
+"Pick up the phone": the Android control app can now actually use the per-device mTLS phone path
+over a real, internet-facing phone-frps.
+
+### Fixed
+
+- **Android 0.6.1 — tunnel bring-up detection for the mTLS phone gateway.** The app waited for the
+  local STCP visitor by calling `http://127.0.0.1:<bindPort>/healthz`. A `dshlink2:` profile points
+  that visitor at the phone gateway, which is HTTPS-only (mutual TLS), so the plain-HTTP probe always
+  failed and the app aborted with “frpc 未能在 20 秒内建立中转” even though frpc had already logged
+  `start visitor success / visitor added [phone-to-hub]`. The probe is now a plain TCP connect to
+  the local port, valid for the node gateway, the 8788 token gateway and the mTLS phone gateway
+  alike. Verified end-to-end on an API 36 emulator through a real Aliyun-hosted phone-frps
+  (emulator → STCP visitor 18790 → phone-frps VPS → hub provider → phone gateway 8791 → hub → node),
+  including sending a prompt through the capability channel and receiving the reply in the
+  transcript. Evidence: `android/README.md` §7. The generic 0.6.1 APK is built without any
+  bundled tunnel credentials.
+- The hub control console / `hub phone` CLI work released in 0.10.0 is unchanged; this patch only
+  carries the Android-side fix and its documentation.
+
 ## [0.10.0] — 2026-11-06
 
 "Trust one phone, not the whole tunnel": the phone control surface no longer shares the
@@ -708,7 +729,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.1
 [0.10.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.0
 [0.9.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.1
 [0.9.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.9.0

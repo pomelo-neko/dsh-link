@@ -1,6 +1,6 @@
 # dsh-link control app (Android) — implementation notes
 
-Status: **implemented, v0.6.0** (shipped with the dsh-link 0.10.0 tree; the app is versioned
+Status: **implemented, v0.6.1** (shipped with the dsh-link 0.10.1 tree; the app is versioned
 independently from the node). v0.6.0 adds the **`dshlink2:` per-device mTLS path**: the connect code
 carries the phone gateway CA and a one-time bootstrap secret instead of a device token; the app
 generates a keypair locally (AndroidKeyStore, with a software-key fallback), exchanges only its public
@@ -9,7 +9,18 @@ mTLS only. The certificate is revoked per phone by the hub, without rotating any
 `dshlink1:` token path still works. The 0.6.0 path was verified end-to-end on an API 36 emulator
 against a local 0.10 hub (bootstrap → certificate → mTLS → revocation → recovery with a fresh
 deviceId, plus the legacy token mode); evidence: `android/README.md` §7 and
-`android/dist/selftest-0.6.0/`. v0.5.0 made the APK **safe to hand out**: a phone joins with a
+`android/dist/selftest-0.6.0/`.
+
+v0.6.1 fixes tunnel bring-up detection. The app used to wait for the local visitor port by calling
+`http://127.0.0.1:<bindPort>/healthz`; a `dshlink2:` profile points the visitor at the phone
+gateway, which is HTTPS-only (mutual TLS), so the plain-HTTP probe always failed and the app reported
+“frpc 未能在 20 秒内建立中转” even though the tunnel was already up. v0.6.1 probes the port with a
+plain TCP connect, which is correct for the node gateway, the 8788 token gateway and the mTLS phone
+gateway alike. Verified end-to-end on the API 36 emulator through a real Aliyun-hosted phone-frps:
+emulator → STCP visitor 18790 → phone-frps (VPS) → hub provider → phone gateway `https://127.0.0.1:8791`
+→ hub → node → DSH Session, including sending `phone-frps e2e probe: reply exactly PHONE_FRPS_OK`
+and receiving `PHONE_FRPS_OK` in the transcript (2026-11-07; evidence in `android/README.md` §7).
+v0.5.0 made the APK **safe to hand out**: a phone joins with a
 `dshlink1:` connect code that carries the entry URL, its own `device` token and (when the hub has
 FRP) the rendered STCP visitor profile + client certificate, so no tunnel template or credential is
 baked into the APK. v0.2.0 added an optional built-in **STCP tunnel**; v0.3.0 made the
