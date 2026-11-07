@@ -11,6 +11,7 @@ Entry points, in the order most readers want them:
 | [`HUB-CONSOLE.md`](HUB-CONSOLE.md) | 0.8 hub 自带 Web 控制台：`/ui` 登录、enroll 令牌生成/吊销、状态监控、缓存区重投/丢弃、设置管理、0.10 每设备 mTLS 手机证书/引导码（§3.6）、0.11 二维码显示（§3.7）、admin API 与安全边界 |
 | [`PHONE-SECURITY.md`](PHONE-SECURITY.md) | 0.10 手机接入安全：每设备 mTLS 客户端证书、一次性 `dshlink2:` 引导、回环 mutual-TLS 网关、独立 phone-frps 租户、吊销与威胁模型 |
 | [`QR-CONNECT.md`](QR-CONNECT.md) | 0.11 二维码连接串：多帧 `dshlinkqr:` 帧格式、`POST /api/v1/hub/phone/qr`、控制台覆盖层动画、Android 0.6.2 扫码/图片导入、ZXing 多方向重试与安全边界 |
+| [`HUB-SERVICE.md`](HUB-SERVICE.md) | 0.11.2+ Windows hub 常驻服务：计划任务 + 独立 daemon 保活、install/status/start/stop/uninstall、临时停用（禁用自启）、日志与杀软信任路径 |
 | [`OPERATIONS.md`](OPERATIONS.md) | 部署、升级、常驻、巡检、令牌轮换、唤醒排障 |
 | [`DSH-INTEGRATION.md`](DSH-INTEGRATION.md) | MCP 条目、技能安装、桥插件安装、profile patch 机制 |
 | [`DSH-ACCESS.md`](DSH-ACCESS.md) | 0.3 的只读视图 / 转录 / 动作能力：开关、威胁模型、建议组合 |

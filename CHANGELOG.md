@@ -7,7 +7,27 @@ version: the node/CLI (`package.json`) and the DSH Host plugin
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.2] — 2026-11-08
+
+### Added
+
+- **Windows hub auto-start service.** `scripts/hub-service.ps1` (with `hub-service-lib.ps1`,
+  `hub-daemon.ps1` and `hub-daemon.vbs`) registers the `dshlink-hub-autostart` logon task (plus a
+  15-minute top-up) and runs the hub through a hidden, single-instance daemon. The daemon restarts
+  the hub after an exit or failed `/healthz` checks, removes leftover hub/frpc processes matched
+  by data directory, rotates logs and backs off exponentially on repeated failures. Actions:
+  install / status / start / stop / restart / enable / disable / uninstall / run-task; `status
+  -Json` is machine readable. `stop` disables the task before killing the daemon so the periodic
+  top-up cannot resurrect the hub during maintenance. The scripts contain no host names, user
+  paths, IPs or tokens; they ship in the repository. New guide: `docs/HUB-SERVICE.md`.
+- Hub auto-start is independent of the DSH host: restarting the host (or upgrading it) no longer
+  takes the hub offline.
+
+### Fixed
+
+- `scripts/start-dshlink.ps1` skipped the node's external frpc whenever **any** `frpc.exe` was
+  running (for example the hub's own frpc). It now checks the process command line for this node's
+  frpc config path before assuming the tunnel is already up.
 
 ## [0.11.1] — 2026-11-07
 
@@ -806,7 +826,8 @@ First packaged version.
 - The `dsh-link-bridge` DSH Host plugin: polls the node and wakes a DSH conversation when unread
   messages arrive (`integrations/dsh-link-bridge/`).
 
-[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/pomelo-neko/dsh-link/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.11.2
 [0.11.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.11.1
 [0.11.0]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.11.0
 [0.10.1]: https://github.com/pomelo-neko/dsh-link/releases/tag/v0.10.1

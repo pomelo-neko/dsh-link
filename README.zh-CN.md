@@ -289,6 +289,19 @@ scripts\start-dshlink.cmd      # 双击/命令行都行：幂等地把节点和 
 缺什么补什么（重复执行安全），全程 `-WindowStyle Hidden`，不会弹控制台。计划任务指向 `start-dshlink.vbs` 即可，
 本机注册的 `dshlink-node-autostart` 就是“登录触发 + 每 15 分钟兜底”跑它。
 
+**hub 的常驻**是另一套（0.11.2+，不能是 DSH host 的子进程）：
+
+```powershell
+powershell -File scripts\hub-service.ps1 install -InstallDir "D:\dsh-link"   # 注册计划任务并启动
+powershell -File scripts\hub-service.ps1 status
+powershell -File scripts\hub-service.ps1 stop     # 停止并禁用自启（网络迁移/切服务器/维护）
+powershell -File scripts\hub-service.ps1 start    # 恢复
+```
+
+计划任务 `dshlink-hub-autostart`（登录触发 + 15 分钟兜底）→ `hub-daemon.vbs` → `hub-daemon.ps1`：
+daemon 保证只有一个 hub 在线，崩溃或 `/healthz` 连续失败时清理残留 frpc 并重启；`stop` 会先禁用
+计划任务，避免 15 分钟兜底把它拉回来。细节、排障与杀软信任路径见 [`docs/HUB-SERVICE.md`](docs/HUB-SERVICE.md)。
+
 关于弹窗：控制台程序如果**父进程没有控制台**，Windows 会给它新建一个可见窗口。所以用托盘/无窗口方式启动 DSH 时，
 DSH 拉起的每个 `pwsh`/`node` 工具都会弹窗——解决办法是让启动器给后端一个**隐藏但存在**的控制台
 （`CREATE_NEW_CONSOLE` + `STARTF_USESHOWWINDOW/SW_HIDE`），子进程继承它便不再开窗。

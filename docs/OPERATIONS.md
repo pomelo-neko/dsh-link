@@ -33,6 +33,18 @@ scripts\start-dshlink.cmd          # 幂等：8787 没在听就拉起节点，fr
 把 `scripts\start-dshlink.vbs` 注册成计划任务（登录触发 + 每 15 分钟兜底）即可。Linux 用 systemd：
 `ExecStart=/usr/bin/node <repo>/bin/dshlink.mjs serve`。
 
+hub 的常驻用独立脚本（0.11.2+），它不依赖 DSH host：
+
+```powershell
+powershell -File scripts\hub-service.ps1 install -InstallDir "D:\dsh-link"
+powershell -File scripts\hub-service.ps1 status
+powershell -File scripts\hub-service.ps1 stop     # 停止并禁用自启（换网络/切服务器/维护）
+powershell -File scripts\hub-service.ps1 start    # 重新启用并启动
+```
+
+计划任务 `dshlink-hub-autostart`（登录触发 + 每 15 分钟兜底）启动隐藏 daemon，daemon 负责
+拉起 hub、健康检查失败时重启、清理残留 frpc；细节与排障见 [`HUB-SERVICE.md`](HUB-SERVICE.md)。
+
 > **坑 1：节点必须由"外部进程"启动。**
 > 在 DSH 的 agent 工具调用里用 `Start-Process`/`wscript` 起的 node 属于那次调用的进程树，
 > 调用结束会被静默回收——现象是"节点起来几十秒后 8787 又空了"。正确做法是计划任务、

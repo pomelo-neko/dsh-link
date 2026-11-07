@@ -953,4 +953,4 @@ http://<LAN IP>:8787/api/v1/info 返回 401，带 device token 的正常读取�
     `docs/mobile/screenshots/`（该目录 git-ignored）。
   - 已知未验证：真机 arm64 的 UI 与相机扫码、折叠屏内屏实际表现（仅用 `wm size` 模拟 ≥600dp）。
 > 仓库版本 0.6.0 起包含本 App；App 自身版本为 0.7.0（versionCode 10），与节点/CLI 独立演进
-> （当前仓库/节点 0.11.1，hub 0.11.1；hub 直连 + dshlink2 每设备证书是主推入口）。
+> （当前仓库/节点 0.11.2，hub 0.11.2；hub 直连 + dshlink2 每设备证书是主推入口）。

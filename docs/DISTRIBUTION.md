@@ -130,8 +130,19 @@ secretKey、以及下一步命令。配置写在 `C:\Users\<you>\.dshlink-hub\ds
 ### 3.4 启动 hub（常驻）
 
 ```powershell
+# 推荐：注册登录自启 + 独立 daemon 保活（Windows）
+powershell -File scripts\hub-service.ps1 install -InstallDir "C:\dshlink"
+powershell -File scripts\hub-service.ps1 status
+
+# 前台调试
 node bin\dshlink.mjs hub serve
-# Windows 常驻（计划任务，示例）
+```
+
+Windows 上优先用 `scripts\hub-service.ps1`：计划任务以**当前用户**运行（不是 SYSTEM，否则读不到
+`%USERPROFILE%` 下的 hub 配置/证书），daemon 负责崩溃重启与健康检查，`stop` 会先禁用计划任务。
+详见 [HUB-SERVICE.md](HUB-SERVICE.md)。手工挂计划任务的老写法仍可用（注意 SYSTEM 账户的数据目录问题）：
+
+```powershell
 schtasks /Create /TN dshlink-hub /SC ONSTART /TR "node C:\dshlink\bin\dshlink.mjs hub serve" /RU SYSTEM /F
 ```
 

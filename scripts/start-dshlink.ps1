@@ -27,7 +27,12 @@ $frpc = Join-Path $root "vendor\frp\windows-amd64\frpc.exe"
 $frpcConfig = if ($env:DSHLINK_FRPC_CONFIG) { $env:DSHLINK_FRPC_CONFIG } else { Join-Path $env:USERPROFILE '.dshlink\frp\frpc.toml' }
 if (-not (Test-Path $frpc)) { Write-Host "frpc: not bundled here, skipped" }
 elseif (-not (Test-Path $frpcConfig)) { Write-Host "frpc: no config at $frpcConfig, skipped" }
-elseif (Get-Process frpc -ErrorAction SilentlyContinue) { Write-Host "frpc: already running" }
+# Match on this exact config, not on any frpc.exe: a hub (or another site) may run its own
+# frpc without the node tunnel, and "some frpc is alive" must not suppress this one.
+elseif (Get-CimInstance Win32_Process -Filter "Name = 'frpc.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($frpcConfig.ToLower()) }) {
+  Write-Host "frpc: already running ($frpcConfig)"
+}
 else {
   Start-Process -FilePath $frpc -ArgumentList @("-c", $frpcConfig) -WorkingDirectory (Split-Path -Parent $frpcConfig) -WindowStyle Hidden
   Write-Host "frpc: started ($frpcConfig)"

@@ -422,6 +422,23 @@ scripts\start-dshlink.cmd      # idempotent: starts the node and frpc hidden if 
 and starts whatever is missing, always with `-WindowStyle Hidden`. Register the `.vbs` as a
 scheduled task (at logon, plus a periodic top-up) to survive reboots.
 
+The **hub** has its own service wrapper — it must not be a child of the DSH host, or restarting
+the host takes the hub offline:
+
+```powershell
+powershell -File scripts\hub-service.ps1 install -InstallDir D:\dsh-link   # register + start
+powershell -File scripts\hub-service.ps1 status
+powershell -File scripts\hub-service.ps1 stop    # stop and disable auto-start (network move/maintenance)
+powershell -File scripts\hub-service.ps1 start   # re-enable and start
+```
+
+It registers the `dshlink-hub-autostart` logon task (plus a 15-minute top-up) that runs a hidden,
+single-instance daemon; the daemon restarts the hub after an exit or failed `/healthz` checks,
+cleans up leftover hub/frpc processes (matched by data directory) and rotates its logs. `stop`
+disables the task first, so the top-up cannot resurrect the hub during maintenance. Status is also
+available as JSON (`-Json`). Details, troubleshooting and antivirus trust paths:
+[`docs/HUB-SERVICE.md`](docs/HUB-SERVICE.md).
+
 ## Security model
 
 | Item | Default | Notes |
