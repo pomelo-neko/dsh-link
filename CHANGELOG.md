@@ -7,6 +7,20 @@ version: the node/CLI (`package.json`) and the DSH Host plugin
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Bundled agent skill refreshed to 0.11.x.** `integrations/dsh-skill/SKILL.md` was last updated
+  for 0.8.0, so agents never learned directed sessions (0.4+), the DSH view/action channel (0.3+),
+  hub enrolment and the phone controller (0.8–0.10), the hub Web console or the Windows hub service
+  (0.11.2). It now documents the current command surface under a portable `$ROOT` placeholder
+  instead of a machine path (so `install-dsh` stays byte-idempotent), explains what happens when a
+  directed target is refused or dead, and states which gateway ports serve the phone rather than an
+  agent. New `test/skill.test.mjs` fails when the skill drifts from the CLI command registry, leaks
+  a machine-specific value, or stops naming the documented release line; CONTRIBUTING now asks for
+  a skill update whenever commands or flags change.
+
 ## [0.11.2] — 2026-11-08
 
 ### Added

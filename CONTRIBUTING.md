@@ -56,7 +56,7 @@ Notes:
 | `bin/dshlink.mjs` | the CLI (argument parsing, all subcommands, output formatting) |
 | `src/*.mjs` | the node: config, store, fs sandbox, HTTP server, MCP endpoint, ops, tunnel, pairing, hot reload, DSH view, capability channel |
 | `integrations/dsh-link-bridge/` | the DSH Host plugin that wakes a conversation when messages arrive |
-| `integrations/dsh-skill/` | the agent-facing skill (`SKILL.md`) for driving the CLI |
+| `integrations/dsh-skill/` | the agent-facing skill (`SKILL.md`) for driving the CLI — refresh it when commands, flags or the recommended workflow change |
 | `docs/` | design, protocol, DSH integration, FRP, operations, troubleshooting |
 | `test/` | `*.test.mjs` suites + the CLI smoke script |
 | `scripts/` | bundle build/verify, vendor fetch/verify, Windows autostart |
@@ -68,6 +68,7 @@ Notes:
 3. Run `node test/run.mjs` and paste the summary line in the PR description.
 4. Update `CHANGELOG.md` under **Unreleased**.
 5. Docs are part of the change: a new config key, CLI flag or endpoint needs a line in
-   `README.md` and the relevant file under `docs/`.
+   `README.md` and the relevant file under `docs/`. A new command or flag also needs a line in
+   `integrations/dsh-skill/SKILL.md`, which is what other agents actually read.
 
 Commit messages: imperative mood, one short summary line, optional body explaining *why*.
